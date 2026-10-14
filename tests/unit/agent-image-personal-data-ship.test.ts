@@ -44,6 +44,10 @@ const buildScript = readFileSync(
 )
 const gitignore = readFileSync(join(repoRoot, ".gitignore"), "utf8")
 const dockerignore = readFileSync(join(agentImageDir, ".dockerignore"), "utf8")
+const agentPlatformStack = readFileSync(
+  join(repoRoot, "infra", "lib", "agent-platform-stack.ts"),
+  "utf8"
+)
 
 describe("agent-image ships the canonical personal-data patterns", () => {
   it("build-and-push.sh stages the committed file into the build context", () => {
@@ -75,6 +79,14 @@ describe("agent-image ships the canonical personal-data patterns", () => {
   it("keeps the staged copy out of git so it cannot drift", () => {
     expect(gitignore).toContain(stagedRelative)
     expect(existsSync(join(repoRoot, stagedRelative))).toBe(false)
+  })
+
+  it("keeps the staged file out of the CDK bundled-skills asset", () => {
+    // The staged copy lands INSIDE infra/agent-image/skills/, the tree the
+    // BundledSkillsDeployment uploads to S3. A deploy overlapping a build would
+    // otherwise ship it and make the asset hash depend on build timing.
+    expect(agentPlatformStack).toContain("'_shared/personal-data-patterns.json',")
+    expect(agentPlatformStack).toContain("'validated-fs.cjs',")
   })
 
   it("does not let .dockerignore exclude the staged file", () => {
@@ -129,6 +141,8 @@ describe("the canonical pattern file is the only copy of the regexes", () => {
     for (const file of [
       join(repoRoot, "infra", "agent-image", "skills", "chat-chart", "run.js"),
       join(repoRoot, "lib", "safety", "types.ts"),
+      join(repoRoot, "lib", "safety", "custom-pii-patterns.ts"),
+      join(repoRoot, "docs", "features", "k12-content-safety.md"),
       join(repoRoot, "lib", "safety", "personal-data-scan.ts"),
       join(repoRoot, "infra", "agent-image", "skills", "_shared", "personal-data.js"),
       join(repoRoot, "infra", "agent-image", "personal_data.py"),

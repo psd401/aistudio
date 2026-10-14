@@ -93,7 +93,9 @@ own line so Google Chat renders them correctly.
 - missing `atrium-content` capability is a hard error;
 - there is no S3, intranet, or public-publish fallback;
 - podcast generation runs by default and must succeed unless the owner disabled
-  it in config.
+  it in config — except a `personal_data_detected` refusal, which withholds
+  only the recording (see "Write the spoken script without contact details"
+  below).
 
 The skill self-reports a fatal run through the same owner-bound failure broker
 used by `psd-failure-report` before returning its error. It calls that broker
@@ -260,7 +262,8 @@ same artifact-delivery model as `psd-tts`. Disabling it is a per-owner config
 choice.
 
 **Write the spoken script without contact details.** The audio URL is public
-and never expires, so `psd-tts` refuses to narrate a phone number, email
+for 30 days and the recording cannot be re-checked once it is sound, so
+`psd-tts` refuses to narrate a phone number, email
 address, SSN or student number (#1886). When that happens the edition is still
 written and delivered — only the recording is withheld, and both the page and
 the DM say so. Write "call the front office" rather than the number, and refer

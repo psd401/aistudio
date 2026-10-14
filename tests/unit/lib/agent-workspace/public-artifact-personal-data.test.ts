@@ -9,6 +9,9 @@
  * being read at all.
  */
 
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
 import { describe, expect, it, jest } from "@jest/globals"
 
 import {
@@ -16,10 +19,20 @@ import {
   scanPublicArtifactForPersonalData,
 } from "@/lib/agent-workspace/public-artifact-personal-data"
 import {
-  countDistinctPersonalData,
   detectPersonalDataKinds,
+  TEXT_EXTRACTABLE_EXTENSIONS,
   textExtractionFor,
 } from "@/lib/safety/personal-data-scan"
+
+// Shared with the CJS (chat-chart) and Python (psd-tts) loaders' suites.
+const SHARED_CASES = (
+  JSON.parse(
+    readFileSync(
+      join(__dirname, "..", "..", "..", "fixtures", "personal-data-cases.json"),
+      "utf8"
+    )
+  ) as { cases: Array<{ name: string; text: string; publicFile: string[] }> }
+).cases
 
 function utf8Upload(
   fileName: string,
@@ -76,12 +89,14 @@ describe("public-file personal-data rule", () => {
     const readPdfText = jest.fn(async () => ({
       pages: [
         {
+          page: 1,
           text:
             "Harbor Ridge Middle School Open House\n" +
             "Thursday 6:00pm in the commons. Families welcome.\n" +
             "Questions? Call the front office at 253-530-1000.",
         },
       ],
+      needsOcrPages: [],
     }))
     const result = await scanPublicArtifactForPersonalData({
       ...utf8Upload("flyer.pdf", "application/pdf", "%PDF-1.7 ..."),
@@ -97,9 +112,10 @@ describe("public-file personal-data rule", () => {
       ...utf8Upload("flyer.pdf", "application/pdf", "%PDF-1.7 ..."),
       readPdfText: async () => ({
         pages: [
-          { text: "Call 253-530-1000" },
-          { text: "or Mrs Hall directly on 253-555-0147" },
+          { page: 1, text: "Call 253-530-1000" },
+          { page: 2, text: "or Mrs Hall directly on 253-555-0147" },
         ],
+        needsOcrPages: [],
       }),
     })
     expect(result).toEqual({ refused: true, kinds: ["us-phone"] })
@@ -148,6 +164,22 @@ describe("public-file personal-data rule", () => {
     ).resolves.toEqual({ refused: true, kinds: ["psd-student-id"] })
   })
 
+
+  it("reads an SVG's text: a <text> element can carry a roster", async () => {
+    const result = await scanPublicArtifactForPersonalData(
+      utf8Upload(
+        "seating.svg",
+        "image/svg+xml",
+        '<svg xmlns="http://www.w3.org/2000/svg"><text>Garcia 2240393</text></svg>'
+      )
+    )
+    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+  })
+})
+
+// A file the check cannot read in full is allowed, but never reported as a
+// clean scan — "nothing was found" and "nothing was looked at" must differ.
+describe("public-file rule on files it cannot fully read", () => {
   it("allows a PDF the parser cannot read, and says it was not scanned", async () => {
     // Deliberate: a parser error is not evidence of personal data, and the
     // risk #1886 names is false positives blocking legitimate public flyers.
@@ -161,7 +193,41 @@ describe("public-file personal-data rule", () => {
       refused: false,
       scanned: false,
       reason: "unreadable",
+      // The parser's own message, so a bug in our extraction is visible in the
+      // log rather than hiding among genuinely encrypted files.
+      parserError: "encrypted",
     })
+  })
+
+  it("does not call a scanned-image PDF clean: its image pages were not read", async () => {
+    // A photographed seating chart parses fine and yields no text. Before
+    // this, it came back `scanned: true` — the same line as a clean flyer.
+    const result = await scanPublicArtifactForPersonalData({
+      ...utf8Upload("seating.pdf", "application/pdf", "%PDF-1.7 ..."),
+      readPdfText: async () => ({
+        pages: [{ page: 1, text: "" }],
+        needsOcrPages: [1],
+      }),
+    })
+    expect(result).toEqual({
+      refused: false,
+      scanned: false,
+      reason: "needs-ocr",
+    })
+  })
+
+  it("still refuses a PDF whose text pages carry personal data beside image pages", async () => {
+    const result = await scanPublicArtifactForPersonalData({
+      ...utf8Upload("mixed.pdf", "application/pdf", "%PDF-1.7 ..."),
+      readPdfText: async () => ({
+        pages: [
+          { page: 1, text: "Roster: 2240393 Garcia" },
+          { page: 2, text: "" },
+        ],
+        needsOcrPages: [2],
+      }),
+    })
+    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
   })
 
   it("does not read a PDF larger than the scan budget", async () => {
@@ -192,21 +258,48 @@ describe("public-file personal-data rule", () => {
     })
     expect(readBytes).toHaveBeenCalledWith(MAX_PERSONAL_DATA_SCAN_BYTES)
   })
+
+  it("does not call a text file past the budget clean: its tail was not read", async () => {
+    // Personal data after the first 32 MiB is never seen, so a clean prefix
+    // must not read the same as a clean file.
+    const result = await scanPublicArtifactForPersonalData({
+      fileName: "big.csv",
+      contentType: "text/csv",
+      byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
+      readBytes: async () => new TextEncoder().encode("id,score\n1,90\n"),
+    })
+    expect(result).toEqual({
+      refused: false,
+      scanned: false,
+      reason: "over-scan-budget",
+    })
+  })
+
+  it("still refuses a text file past the budget when the part read carries personal data", async () => {
+    const result = await scanPublicArtifactForPersonalData({
+      fileName: "big.csv",
+      contentType: "text/csv",
+      byteLength: MAX_PERSONAL_DATA_SCAN_BYTES + 1,
+      readBytes: async () => new TextEncoder().encode("2240393,Garcia\n"),
+    })
+    expect(result).toEqual({ refused: true, kinds: ["psd-student-id"] })
+  })
 })
 
 describe("which uploads are text-extractable", () => {
-  it("covers exactly the five types #1886 names", () => {
+  it("covers the five types #1886 names, plus SVG", () => {
     for (const [fileName, contentType, expected] of [
       ["a.csv", "text/csv", "utf8"],
       ["a.json", "application/json", "utf8"],
       ["a.md", "text/markdown", "utf8"],
       ["a.txt", "text/plain", "utf8"],
       ["a.pdf", "application/pdf", "pdf"],
-      // Out of scope: images, video, audio.
+      // Plain XML on disk, whatever it renders as.
+      ["a.svg", "image/svg+xml", "utf8"],
+      // Out of scope: raster images, video, audio.
       ["a.png", "image/png", null],
       ["a.mp3", "audio/mpeg", null],
       ["a.mp4", "video/mp4", null],
-      ["a.svg", "image/svg+xml", null],
       ["noextension", "text/plain", null],
     ] as const) {
       expect(textExtractionFor(fileName, contentType)).toBe(expected)
@@ -221,18 +314,39 @@ describe("which uploads are text-extractable", () => {
   })
 })
 
-describe("narration rule", () => {
-  it("refuses the first match of anything, unlike the public-file rule", () => {
-    const oneStaffNumber = "Reach Mrs Hall on 253-555-0147 before Friday."
-    expect(detectPersonalDataKinds(oneStaffNumber, "public-file")).toEqual([])
-    expect(detectPersonalDataKinds(oneStaffNumber, "narration")).toEqual([
-      "us-phone",
-    ])
-  })
+describe("public-file rule on the cases shared with the agent image", () => {
+  it.each(SHARED_CASES.map((entry) => [entry.name, entry] as const))(
+    "%s",
+    (_name, entry) => {
+      expect(detectPersonalDataKinds(entry.text)).toEqual(entry.publicFile)
+    }
+  )
+})
 
-  it("finds nothing in ordinary prose", () => {
-    const brief = "Three meetings today. The board packet is ready. Bus 12 is late."
-    expect(detectPersonalDataKinds(brief, "narration")).toEqual([])
-    expect(countDistinctPersonalData(brief).size).toBe(0)
+describe("the psd-publish-file skill tells the agent what is read", () => {
+  it("names every text-extractable type the check reads", () => {
+    // SKILL.md restates TEXT_EXTRACTABLE in prose for the agent; this is what
+    // keeps that sentence from going stale when a type is added or removed.
+    const skill = readFileSync(
+      join(
+        __dirname,
+        "..",
+        "..",
+        "..",
+        "..",
+        "infra",
+        "agent-image",
+        "skills",
+        "psd-publish-file",
+        "SKILL.md"
+      ),
+      "utf8"
+    )
+    const sentence = skill.match(/<!-- scanned-types -->([\s\S]*?)<!-- \/scanned-types -->/)
+    expect(sentence).not.toBeNull()
+    const named = [...sentence![1]!.matchAll(/`(\.[a-z0-9]+)`/g)]
+      .map((match) => match[1])
+      .sort()
+    expect(named).toEqual([...TEXT_EXTRACTABLE_EXTENSIONS])
   })
 })

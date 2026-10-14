@@ -47,6 +47,14 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
     createPublicArtifactUploadMock(...args),
   createPublicArtifactDownloadUrl: (...args: unknown[]) =>
     createPublicArtifactDownloadUrlMock(...args),
+  // The real one: a pure string helper, kept real so the log-redaction tests
+  // exercise the broker's own allowlist rather than a copy of it.
+  publicArtifactExtension: (name: string) =>
+    jest
+      .requireActual<typeof import("@/lib/agent-workspace/storage-broker")>(
+        "@/lib/agent-workspace/storage-broker",
+      )
+      .publicArtifactExtension(name),
   completeWorkspaceUpload: (...args: unknown[]) =>
     completeWorkspaceUploadMock(...args),
   ensureWorkspaceCheckpoint: (...args: unknown[]) =>
@@ -932,6 +940,37 @@ describe("POST /api/agent/workspace-storage — public link refused (#1886)", ()
       code: "personal_data_detected",
     })
     expect(mockLogError).toHaveBeenCalled()
+  })
+
+  it("never logs a public artifact's name, only its extension", async () => {
+    const studentFile = "Garcia_IEP_summary.pdf"
+    const body = {
+      operation: "publish",
+      path: studentFile,
+      contentType: "application/pdf",
+      contentLength: 10,
+      idempotencyKey: "publish-idempotency",
+      checksumSha256: "A".repeat(43) + "=",
+    }
+    mockLogInfo.mockClear()
+    mockLogWarn.mockClear()
+    await POST(request(body))
+    createPublicArtifactUploadMock.mockRejectedValueOnce(new Error("boom"))
+    await POST(request(body))
+    createPublicArtifactDownloadUrlMock.mockRejectedValueOnce(new Error("boom"))
+    await POST(
+      request({ operation: "download-public", path: "Maria.Garcia" }),
+    )
+
+    const logged = JSON.stringify([
+      ...mockLogInfo.mock.calls,
+      ...mockLogWarn.mock.calls,
+    ])
+    expect(mockLogWarn).toHaveBeenCalled()
+    expect(logged.toLowerCase()).not.toContain("garcia")
+    expect(logged).toContain('"path":"*.pdf"')
+    // A last dot-segment that is not a publishable type is not logged either.
+    expect(logged).toContain('"path":"*"')
   })
 
   it("logs the kinds and never the file name on a refusal", async () => {

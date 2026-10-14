@@ -61,14 +61,15 @@ existed.
 never contents.
 
 **The broker does read the contents, though, and it will refuse you.** Since
-#1886, a `--to public` upload whose type a text check can read — `.csv`,
-`.txt`, `.md`, `.json` and the text of a `.pdf` — is scanned for student and
-staff personal data before the link is minted. A match returns
-`personal_data_detected` and nothing is published. That is a backstop for
-mistakes, not a reason to stop judging: it looks for student numbers, Social
-Security numbers, email addresses and phone numbers only. It cannot see names,
-grades, discipline notes, IEP content or a photo of a class list, and it does
-not read images, audio or video at all.
+#1886, a `--to public` upload whose type a text check can read —
+<!-- scanned-types -->`.csv`, `.txt`, `.md`, `.json`, `.svg` and the text of a
+`.pdf`<!-- /scanned-types --> — is scanned for student and staff personal data
+before the link is minted. A match returns `personal_data_detected` and nothing
+is published. That is a backstop for mistakes, not a reason to stop judging: it
+looks for student numbers, Social Security numbers, email addresses and phone
+numbers only. It cannot see names, grades, discipline notes, IEP content or a
+photo of a class list, it does not read the scanned (image) pages of a PDF, and
+it does not read raster images, audio or video at all.
 
 ## What you can deliver
 
@@ -136,6 +137,12 @@ staged bytes were deleted. Do one of these instead:
 3. **Redact and republish** — only when the file genuinely is meant to be
    public and the personal data was a mistake in it. Remove the data, write a
    new file, and publish that.
+
+**Do not change the file's type to get it past the check.** Re-rendering the
+same data as a `.png`, `.mp3` or `.mp4` — or as a scanned PDF — and publishing
+that would go through unread, and it would put exactly the same personal data
+on exactly the same kind of open link. The refusal is about the contents, not
+the format; a different format is still the wrong destination.
 
 Tell the user plainly what happened: the file has personal data in it, so it
 has been delivered privately rather than as a public link. Do not describe the

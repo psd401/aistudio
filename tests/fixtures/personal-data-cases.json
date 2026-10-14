@@ -1,0 +1,76 @@
+{
+  "_comment": [
+    "Shared cases for the three personal-data loaders (#1886). Each loader's own",
+    "suite runs every case, so the TS broker, the CJS chat-chart reader and the",
+    "Python psd-tts reader cannot drift apart on what lib/safety/personal-data-patterns.json matches.",
+    "",
+    "  present     every kind found at all. psd-tts's narration rule refuses exactly",
+    "              these; chat-chart's first-match must return one of them (or null).",
+    "  publicFile  the kinds the broker's public-link rule refuses (distinct-count",
+    "              thresholds), checked by tests/unit/lib/agent-workspace/public-artifact-personal-data.test.ts.",
+    "",
+    "Both lists are sorted. Fictitious values only."
+  ],
+  "cases": [
+    {
+      "name": "a flyer with the school's one phone number",
+      "text": "Open house Thursday. Questions? Call 253-530-1000.",
+      "present": ["us-phone"],
+      "publicFile": []
+    },
+    {
+      "name": "one number written with its country code",
+      "text": "Call the front office at 1-253-530-1000.",
+      "present": ["us-phone"],
+      "publicFile": []
+    },
+    {
+      "name": "one number in two formats is still one number",
+      "text": "Call 253-530-1000.\nFooter: (253) 530-1000, or 12535301000 from a cell.",
+      "present": ["us-phone"],
+      "publicFile": []
+    },
+    {
+      "name": "two distinct numbers are a contact list",
+      "text": "A. Hall 253-555-0147\nB. Reyes 253-555-0192",
+      "present": ["us-phone"],
+      "publicFile": ["us-phone"]
+    },
+    {
+      "name": "one email address in two cases is still one address",
+      "text": "Email AHall@psd401.net, or ahall@psd401.net after hours.",
+      "present": ["email"],
+      "publicFile": []
+    },
+    {
+      "name": "a substitute list of emails and phones",
+      "text": "ahall@psd401.net 253-555-0147\nbreyes@psd401.net 253-555-0192",
+      "present": ["email", "us-phone"],
+      "publicFile": ["email", "us-phone"]
+    },
+    {
+      "name": "a single student number",
+      "text": "row,2240393",
+      "present": ["psd-student-id"],
+      "publicFile": ["psd-student-id"]
+    },
+    {
+      "name": "a single SSN",
+      "text": "SSN on file: 123-45-6789",
+      "present": ["ssn"],
+      "publicFile": ["ssn"]
+    },
+    {
+      "name": "an eight-digit number is not a student number",
+      "text": "Order 22403931 shipped on Monday.",
+      "present": [],
+      "publicFile": []
+    },
+    {
+      "name": "ordinary prose",
+      "text": "Three meetings today. The board packet is ready. Bus 12 is late.",
+      "present": [],
+      "publicFile": []
+    }
+  ]
+}

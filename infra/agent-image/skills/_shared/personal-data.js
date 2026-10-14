@@ -12,14 +12,12 @@
  * lib/safety/types.ts, and nowhere at all on the upload path) and two of the
  * three were already drifting.
  *
- * Two policies, and they differ on purpose:
- *
- *   publicFile  a text-extractable file about to get an unsigned public URL.
- *               One contact detail is normal public content (the school phone
- *               number in a flyer footer); two or more is a contact list.
- *   narration   text about to be synthesised into an MP3 that is public by
- *               link with no expiry, and opaque to every later text check.
- *               Refuses on the first match of anything.
+ * Only `firstPersonalDataKind` is here because only chat-chart uses this
+ * loader, and its rule is "refuse on any match". The public-file thresholds
+ * are the broker's (lib/safety/personal-data-scan.ts) and the narration rule
+ * is psd-tts's (infra/agent-image/personal_data.py); neither runs in Node in
+ * the image. tests/fixtures/personal-data-cases.json is run through all three
+ * loaders so they cannot drift apart on what the patterns match.
  */
 
 const path = require('node:path');
@@ -53,17 +51,10 @@ const PATTERNS = PATTERN_FILE.patterns.map((raw) => ({
   kind: raw.kind,
   // Patterns come only from the versioned, source-controlled policy file, the
   // same arrangement path-policy.ts uses for workspace-policy.json.
-  // Separate objects: `test` must not share lastIndex with the global form.
+  // Non-global, so `.test()` carries no lastIndex state between calls.
   // eslint-disable-next-line security/detect-non-literal-regexp
   test: new RegExp(raw.source, 'i'),
-  // eslint-disable-next-line security/detect-non-literal-regexp
-  all: new RegExp(raw.source, 'gi'),
 }));
-
-const POLICIES = {
-  publicFile: PATTERN_FILE.publicFileMinDistinct,
-  narration: PATTERN_FILE.narrationMinDistinct,
-};
 
 /**
  * The first kind of personal data the text contains, or null.
@@ -80,43 +71,7 @@ function firstPersonalDataKind(text) {
   return null;
 }
 
-function distinctCount(text, kind) {
-  const values = new Set();
-  for (const pattern of PATTERNS) {
-    if (pattern.kind !== kind) continue;
-    for (const match of text.matchAll(pattern.all)) {
-      values.add(match[0].toLowerCase());
-    }
-  }
-  return values.size;
-}
-
-/**
- * The kinds that make this text unfit for `policyName` ('publicFile' or
- * 'narration'), sorted. Never the matched values — those must not travel into a
- * log line or an error message.
- */
-function personalDataKinds(text, policyName) {
-  const minimums = POLICIES[policyName];
-  if (!minimums) throw new Error(`Unknown personal-data policy: ${policyName}`);
-  const kinds = new Set();
-  for (const pattern of PATTERNS) {
-    if (kinds.has(pattern.kind)) continue;
-    const minimum = minimums[pattern.kind];
-    if (typeof minimum !== 'number') continue;
-    // Threshold 1 needs no counting, which keeps the common case a single
-    // short-circuiting `.test()` per pattern.
-    if (minimum <= 1) {
-      if (pattern.test.test(text)) kinds.add(pattern.kind);
-    } else if (distinctCount(text, pattern.kind) >= minimum) {
-      kinds.add(pattern.kind);
-    }
-  }
-  return [...kinds].sort();
-}
-
 module.exports = {
   firstPersonalDataKind,
-  personalDataKinds,
   PERSONAL_DATA_PATTERN_COUNT: PATTERNS.length,
 };

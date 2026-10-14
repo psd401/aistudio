@@ -12,6 +12,7 @@
  * them to read, and what to do when a file cannot be parsed.
  */
 
+import type { PdfExtractionResult } from "@/lib/repositories/content-platform/pdf-processing";
 import {
   detectPersonalDataKinds,
   textExtractionFor,
@@ -33,25 +34,43 @@ export const MAX_PERSONAL_DATA_SCAN_BYTES = 32 * 1024 * 1024;
  * the same line.
  */
 export type UnscannedReason =
-  /** An image, audio or video file: out of scope for #1886 by design. */
+  /** A raster image, audio or video file: out of scope for #1886 by design. */
   | "not-text-extractable"
-  /** A PDF too large to parse within the scan budget. */
+  /**
+   * Larger than the scan budget. A PDF is not read at all (a truncated PDF
+   * does not parse); a text file has only its first
+   * `MAX_PERSONAL_DATA_SCAN_BYTES` read, and a match there is still refused.
+   */
   | "over-scan-budget"
   /** A PDF that the parser could not read (encrypted, truncated, malformed). */
-  | "unreadable";
+  | "unreadable"
+  /**
+   * A PDF with at least one page carrying no text layer — a scanned or
+   * photographed page. Its text pages were read and found nothing, but the
+   * image pages could not be, and a scanned seating chart is exactly the case
+   * #1886 opened with.
+   */
+  | "needs-ocr";
 
 export type PublicArtifactScanResult =
   | { refused: true; kinds: PersonalDataKind[] }
   | { refused: false; scanned: true }
-  | { refused: false; scanned: false; reason: UnscannedReason };
+  | {
+      refused: false;
+      scanned: false;
+      reason: UnscannedReason;
+      /** For `unreadable`: the parser's own error, never the file's text. */
+      parserError?: string;
+    };
 
+/** The slice of the PDF parser's result this check reads. */
 export type PdfTextReader = (
   bytes: Uint8Array
-) => Promise<{ pages: Array<{ text: string }> }>;
+) => Promise<Pick<PdfExtractionResult, "pages" | "needsOcrPages">>;
 
 async function defaultPdfTextReader(
   bytes: Uint8Array
-): Promise<{ pages: Array<{ text: string }> }> {
+): Promise<PdfExtractionResult> {
   // Deferred so the scan module — and every unit test that only exercises the
   // utf8 path — does not pull the PDF parser in.
   const { extractPdfText } = await import(
@@ -66,10 +85,12 @@ async function defaultPdfTextReader(
  * `readBytes` is passed the cap rather than the object being handed over whole,
  * so the caller can range-read instead of downloading a file it will truncate.
  *
- * A PDF the parser cannot read is ALLOWED, not refused. The risk the issue
- * names is false positives blocking legitimate public flyers, and a parser
- * error is not evidence of personal data — but it is logged, so a rise in
- * `unreadable` is visible rather than silent.
+ * A file the check could not fully read is ALLOWED, not refused — a PDF the
+ * parser rejects, a scanned page with no text layer, the tail of a text file
+ * past the budget. The risk the issue names is false positives blocking
+ * legitimate public flyers, and "could not read it" is not evidence of
+ * personal data. But each of those comes back `scanned: false` with its
+ * reason, never as a clean scan, so the caller's log can tell them apart.
  */
 export async function scanPublicArtifactForPersonalData(input: {
   fileName: string;
@@ -82,10 +103,8 @@ export async function scanPublicArtifactForPersonalData(input: {
   if (!extraction) {
     return { refused: false, scanned: false, reason: "not-text-extractable" };
   }
-  if (
-    extraction === "pdf" &&
-    input.byteLength > MAX_PERSONAL_DATA_SCAN_BYTES
-  ) {
+  const overBudget = input.byteLength > MAX_PERSONAL_DATA_SCAN_BYTES;
+  if (extraction === "pdf" && overBudget) {
     // A truncated PDF does not parse, so unlike the utf8 path there is no
     // partial scan to fall back to.
     return { refused: false, scanned: false, reason: "over-scan-budget" };
@@ -93,6 +112,7 @@ export async function scanPublicArtifactForPersonalData(input: {
 
   const bytes = await input.readBytes(MAX_PERSONAL_DATA_SCAN_BYTES);
   let text: string;
+  let imagePages = false;
   if (extraction === "utf8") {
     // Non-fatal: a mis-declared or truncated-mid-codepoint file still yields
     // text to scan rather than throwing the gate open.
@@ -103,13 +123,28 @@ export async function scanPublicArtifactForPersonalData(input: {
         bytes
       );
       text = extracted.pages.map((page) => page.text).join("\n");
-    } catch {
-      return { refused: false, scanned: false, reason: "unreadable" };
+      imagePages = extracted.needsOcrPages.length > 0;
+    } catch (error) {
+      return {
+        refused: false,
+        scanned: false,
+        reason: "unreadable",
+        // So a bug in our own extraction does not hide among encrypted PDFs.
+        parserError: (error instanceof Error ? error.message : String(error))
+          .slice(0, 200),
+      };
     }
   }
 
-  const kinds = detectPersonalDataKinds(text, "public-file");
-  return kinds.length > 0
-    ? { refused: true, kinds }
-    : { refused: false, scanned: true };
+  // What WAS read is still checked: a match in the readable part refuses the
+  // file however much of it could not be read.
+  const kinds = detectPersonalDataKinds(text);
+  if (kinds.length > 0) return { refused: true, kinds };
+  if (overBudget) {
+    return { refused: false, scanned: false, reason: "over-scan-budget" };
+  }
+  if (imagePages) {
+    return { refused: false, scanned: false, reason: "needs-ocr" };
+  }
+  return { refused: false, scanned: true };
 }

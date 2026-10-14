@@ -113,7 +113,8 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
     tests/unit/lib/agent-workspace/storage-broker-upload.test.ts \
     tests/unit/lib/agent-workspace/storage-broker.test.ts \
     tests/unit/lib/agent-workspace/public-artifact-personal-data.test.ts \
-    tests/unit/agent-image-personal-data-ship.test.ts)" ]; then
+    tests/unit/agent-image-personal-data-ship.test.ts \
+    tests/fixtures/personal-data-cases.json)" ]; then
   echo "ERROR: agent-image sources are dirty; commit them before building." >&2
   echo "       Image provenance must identify the exact source content." >&2
   exit 1

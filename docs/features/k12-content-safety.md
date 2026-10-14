@@ -460,15 +460,16 @@ To enable blocking, change `inputAction`/`outputAction` from `'NONE'` to `'BLOCK
 
 ### Adding Custom PII Patterns
 
-Amazon Comprehend detects standard PII (names, emails, phone numbers), but you may need to protect district-specific identifiers like student IDs or employee numbers. Custom patterns are defined in `lib/safety/types.ts`:
+Amazon Comprehend detects standard PII (names, emails, phone numbers), but you may need to protect district-specific identifiers like student IDs or employee numbers. Custom patterns are defined in `lib/safety/custom-pii-patterns.ts`:
 
 ```typescript
-// lib/safety/types.ts
+// lib/safety/custom-pii-patterns.ts
 export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
   {
     type: 'STUDENT_ID',
-    description: 'Student numbers - 7 digits starting with 2',
-    pattern: /\b2\d{6}\b/,
+    description: 'PSD401 student numbers - 7 digits starting with 2 (e.g., 2240393)',
+    // Read from lib/safety/personal-data-patterns.json — never re-typed (#1886)
+    pattern: PSD_STUDENT_ID_PATTERN,
     confidence: 1.0,
   },
   {
@@ -482,7 +483,7 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 
 **How to add a new pattern:**
 
-1. Open `lib/safety/types.ts`
+1. Open `lib/safety/custom-pii-patterns.ts`
 2. Add an entry to `CUSTOM_PII_PATTERNS` with:
    - `type`: Unique identifier (e.g., `STUDENT_ID`)
    - `description`: Human-readable explanation
@@ -499,12 +500,13 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 
 | Identifier | Pattern | Matches |
 |------------|---------|---------|
-| 7-digit student ID starting with 2 | `/\b2\d{6}\b/` | 2240393, 2123456 |
 | Employee badge (E + 5 digits) | `/\bE\d{5}\b/i` | E12345, e54321 |
 | Case number (CASE-NNNN) | `/\bCASE-\d{4}\b/i` | CASE-1234 |
 | Custom ID with prefix | `/\bPSD-\d{6}\b/` | PSD-123456 |
 
 Custom patterns participate in the two detect-only telemetry points; they do not rewrite inference content and do not refuse a write.
+
+The student-number pattern is the exception to "write the regex here". It lives in `lib/safety/personal-data-patterns.json`, the single file the agent workspace's public-link check, chat-chart and psd-tts also read (#1886), and reaches this list as `PSD_STUDENT_ID_PATTERN`. Change it in that JSON file, never by re-typing it here.
 
 ## Local Development
 

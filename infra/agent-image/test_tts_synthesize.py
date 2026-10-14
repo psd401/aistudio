@@ -200,8 +200,9 @@ print(f"{audio.hex()}:{chunks}")
 
 class TestNarrationPersonalDataGate(unittest.TestCase):
     """
-    Issue #1886. Every MP3 this skill makes is uploaded public-by-link with no
-    expiry, and seven morning-brief podcasts were found sitting on open URLs.
+    Issue #1886. Every MP3 this skill makes is uploaded public-by-link, and
+    seven morning-brief podcasts were found speaking contact details on open
+    URLs.
     Once the text is sound no later check can read it, so the refusal has to
     happen BEFORE synthesis — nothing sent to Polly, nothing uploaded.
     """
@@ -300,22 +301,33 @@ class TestNarrationPersonalDataGate(unittest.TestCase):
         self.assertEqual(result["stdout"]["error"], "gate_unavailable")
         self.assertEqual(result["uploaded"], [])
 
-    def test_the_narration_policy_is_stricter_than_the_public_file_policy(self):
-        # The shared module, read directly: one contact detail is allowed in a
-        # public FILE (a flyer footer) and never in narration.
+    def test_narration_refuses_the_one_number_a_public_file_may_carry(self):
+        # A public FILE may carry one contact detail (a flyer footer); the
+        # narration rule refuses it, because nothing is lost by saying "call
+        # the front office" instead.
         sys.path.insert(0, str(pathlib.Path(__file__).parent))
-        from personal_data import (
-            NARRATION_POLICY,
-            PUBLIC_FILE_POLICY,
-            personal_data_kinds,
-        )
+        from personal_data import personal_data_kinds
 
         flyer = "Open house Thursday. Questions? Call 253-530-1000."
-        self.assertEqual(personal_data_kinds(flyer, PUBLIC_FILE_POLICY), [])
-        self.assertEqual(
-            personal_data_kinds(flyer, NARRATION_POLICY), ["us-phone"]
-        )
+        self.assertEqual(personal_data_kinds(flyer), ["us-phone"])
 
+    def test_the_shared_cases_agree_with_the_other_two_loaders(self):
+        # tests/fixtures/personal-data-cases.json is run by the TS broker's and
+        # chat-chart's suites too, so the three loaders cannot drift apart.
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        from personal_data import personal_data_kinds
+
+        cases_path = (
+            pathlib.Path(__file__).resolve().parent.parent.parent
+            / "tests"
+            / "fixtures"
+            / "personal-data-cases.json"
+        )
+        cases = json.loads(cases_path.read_text(encoding="utf-8"))["cases"]
+        self.assertGreater(len(cases), 0)
+        for case in cases:
+            with self.subTest(case["name"]):
+                self.assertEqual(personal_data_kinds(case["text"]), case["present"])
 
 if __name__ == "__main__":
     unittest.main()

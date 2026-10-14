@@ -79,11 +79,14 @@ class BriefError extends Error {
 }
 
 class SourceUnavailableError extends Error {
-  constructor(message, source, cause = null) {
+  // `output` is the failing command's own parsed JSON, when it printed any, so
+  // a caller can branch on its structured `error` code instead of the text.
+  constructor(message, source, cause = null, output = null) {
     super(message);
     this.name = 'SourceUnavailableError';
     this.source = source;
     this.cause = cause;
+    this.output = output;
   }
 }
 
@@ -668,7 +671,7 @@ function externalJson(runExternal, spec, source) {
       compactObject(parsed) ||
       String(result.stderr || '').trim().slice(0, 1_000) ||
       `${source} exited ${result.code}`;
-    throw new SourceUnavailableError(detail, source);
+    throw new SourceUnavailableError(detail, source, null, parsed);
   }
   if (parsed === null) {
     throw new SourceUnavailableError(
@@ -1884,12 +1887,15 @@ function validateSynthesis(raw, snapshot, config) {
  * failure was something else (#1886).
  *
  * psd-tts emits `{"status":"error","error":"personal_data_detected",...}` on
- * stdout and exits 1, and externalJson folds that JSON into the thrown error's
- * message. Matched on the code, not on the English.
+ * stdout and exits 1, and externalJson carries that parsed JSON on the thrown
+ * error as `output`. Matched on the structured code — not on the message,
+ * where any other failure that merely quoted the phrase would also match.
  */
 function narrationRefusalDetail(error) {
-  const message = String((error && error.message) || '');
-  return message.includes('personal_data_detected') ? message : null;
+  const output = error instanceof SourceUnavailableError ? error.output : null;
+  return output && output.error === 'personal_data_detected'
+    ? String(error.message)
+    : null;
 }
 
 function synthesizePodcast(synthesis, user, config, runExternal) {
@@ -1918,8 +1924,8 @@ function synthesizePodcast(synthesis, user, config, runExternal) {
   } catch (error) {
     // A REFUSAL is not a failure, and it must not cost the user their brief.
     // psd-tts declines to narrate a phone number, email address, SSN or
-    // student number because its MP3s are public by link and never expire
-    // (#1886). The edition is still written and delivered; only the audio is
+    // student number because its MP3s are public by link for 30 days and
+    // cannot be re-checked once they are audio (#1886). The edition is still written and delivered; only the audio is
     // withheld, and the page says so. Every other psd-tts failure keeps its
     // existing hard-fail behaviour — a broken relay should still be loud.
     const refusal = narrationRefusalDetail(error);
@@ -2079,8 +2085,8 @@ function deliveryMessage(snapshot, created, podcast) {
     lines.push(
       '',
       'No podcast today: the spoken script included personal data (a phone ' +
-        'number, email address or student number) and podcast audio is a ' +
-        'public, permanent link, so it was not recorded.',
+        'number, email address, Social Security number or student number) ' +
+        'and podcast audio is a public link, so it was not recorded.',
     );
   }
   return lines.join('\n');

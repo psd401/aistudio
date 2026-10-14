@@ -684,7 +684,7 @@ describe('Atrium delivery and podcast', () => {
 // own describe so neither block outgrows the 150-line function cap.
 describe('podcast narration refusals', () => {
   // #1886. psd-tts refuses to narrate a phone number, email address, SSN or
-  // student number, because its MP3s are public by link and never expire. A
+  // student number, because its MP3s are public by link for 30 days. A
   // refusal must NOT cost the user their whole brief: before this, any
   // non-zero psd-tts exit threw straight out of composeBrief and nothing was
   // delivered at all.
@@ -771,6 +771,37 @@ describe('podcast narration refusals', () => {
         },
       ),
     ).rejects.toThrow(/upstream_error|Polly/);
+  });
+
+  // The refusal is recognised by psd-tts's structured `error` code, never by
+  // the phrase turning up in some other failure's text.
+  test('a failure that only quotes the refusal code still fails the run', async () => {
+    const dir = makeTempDir();
+    process.env.PSD_MORNING_BRIEF_STATE_DIR = dir;
+    await expect(
+      composeBrief(
+        {
+          user: 'owner@example.net',
+          config: normalizeConfig(),
+          snapshot: snapshotFixture(),
+          synthesis: synthesisFixture(),
+        },
+        {
+          runExternal: () => ({
+            code: 1,
+            stdout: JSON.stringify({
+              status: 'error',
+              error: 'upstream_error',
+              message: 'relay error while handling personal_data_detected',
+            }),
+            stderr: '',
+          }),
+          broker: async () => {
+            throw new Error('must not reach delivery');
+          },
+        },
+      ),
+    ).rejects.toThrow(/upstream_error/);
   });
 
 });

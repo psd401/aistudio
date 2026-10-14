@@ -9,6 +9,9 @@ imports directly and which `build-and-push.sh` stages into the image at
 `workspace_policy.json`: one committed file, three runtimes reading it, no
 regex written twice.
 
+Only the narration rule is here, because only psd-tts uses this loader. The
+public-file thresholds are the broker's (lib/safety/personal-data-scan.ts).
+
 `source` strings in that file are constrained to syntax that is valid in both
 JavaScript and Python `re` — no named groups, no lookbehind, no \\p{...}.
 """
@@ -18,10 +21,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Mapping
-
-PUBLIC_FILE_POLICY = "publicFile"
-NARRATION_POLICY = "narration"
+from typing import Dict, List, Set
 
 
 def _pattern_file_path(module_path: Path) -> Path:
@@ -48,40 +48,43 @@ _PATTERNS = [
     for entry in _PATTERN_FILE["patterns"]
 ]
 
-_POLICIES: Mapping[str, Mapping[str, int]] = {
-    PUBLIC_FILE_POLICY: _PATTERN_FILE["publicFileMinDistinct"],
-    NARRATION_POLICY: _PATTERN_FILE["narrationMinDistinct"],
-}
+_NARRATION_MIN_DISTINCT: Dict[str, int] = _PATTERN_FILE["narrationMinDistinct"]
+
+
+def _distinct_value(kind: str, matched: str) -> str:
+    # A phone number is its ten digits: the country-code pattern and the bare
+    # one both match `1-253-530-1000`, and that is one number, not two. Same
+    # rule as lib/safety/personal-data-scan.ts.
+    if kind != "us-phone":
+        return matched.lower()
+    digits = re.sub(r"\D", "", matched)
+    return digits[1:] if len(digits) == 11 else digits
 
 
 def _distinct_counts(text: str) -> Dict[str, int]:
     """
     How many DISTINCT values of each kind the text contains.
 
-    Distinct rather than total: a flyer repeating the same school phone number
-    in a header and a footer is one phone number, while a substitute call list
-    of ten different numbers is ten.
+    Distinct rather than total: a header and a footer repeating the same
+    number are one phone number, while a call list of ten numbers is ten.
     """
-    values: Dict[str, set] = {}
+    values: Dict[str, Set[str]] = {}
     for kind, pattern in _PATTERNS:
         for match in pattern.finditer(text):
-            values.setdefault(kind, set()).add(match.group(0).lower())
+            values.setdefault(kind, set()).add(_distinct_value(kind, match.group(0)))
     return {kind: len(found) for kind, found in values.items()}
 
 
-def personal_data_kinds(text: str, policy: str = NARRATION_POLICY) -> List[str]:
+def personal_data_kinds(text: str) -> List[str]:
     """
-    The kinds of personal data that make `text` unfit for `policy`, sorted.
+    The kinds of personal data that make `text` unfit for narration, sorted.
 
     Returns the KINDS and never the matched values: a refusal must not carry
     the personal data into a log line, an error message or a CloudWatch event.
     """
-    minimums = _POLICIES.get(policy)
-    if minimums is None:
-        raise ValueError(f"unknown personal-data policy: {policy}")
     counts = _distinct_counts(text)
     return sorted(
         kind
         for kind, distinct in counts.items()
-        if kind in minimums and distinct >= minimums[kind]
+        if kind in _NARRATION_MIN_DISTINCT and distinct >= _NARRATION_MIN_DISTINCT[kind]
     )

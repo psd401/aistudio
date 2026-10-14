@@ -81,9 +81,10 @@
   "_narration_policy_comment": [
     "Narration (psd-tts) refuses on the FIRST match of any kind.",
     "",
-    "Audio is the one public surface with no expiry — `psd-tts` uploads every",
-    "MP3 as public-by-link forever, by design (#1886), and once synthesised the",
-    "bytes are opaque audio that no later text check can read. There is also no",
+    "Audio cannot be checked after the fact — `psd-tts` uploads every MP3",
+    "public-by-link (for 30 days, like any public artifact), and once synthesised",
+    "the bytes are opaque audio that no later text check, including the",
+    "broker's public-link scan, can read. There is also no",
     "legitimate reason to speak a phone number or an address into a shareable",
     "recording: the agent can say \"call the front office\" and lose nothing. So",
     "the cheap, strict rule applies here and the flyer-footer allowance does not."

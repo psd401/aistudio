@@ -5187,6 +5187,13 @@ export class AgentPlatformStack extends cdk.Stack {
               '**/.build-probes/**',
               '**/.candidate-builds/**',
               '**/mcp-test-support.js',
+              // Staged into this tree by build-and-push.sh for the image build
+              // only, and gitignored. Without these, a deploy that runs while a
+              // build has them staged would hash and upload them, making the
+              // asset depend on build timing. Nothing reads them from S3: the
+              // readers work per skill prefix, and neither is a skill.
+              'validated-fs.cjs',
+              '_shared/personal-data-patterns.json',
             ],
           },
         ),

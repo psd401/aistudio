@@ -12,10 +12,10 @@ import {
 } from "@aws-sdk/client-comprehend";
 import type { PiiEntity as ComprehendPiiEntity } from "@aws-sdk/client-comprehend";
 import { createLogger, generateRequestId } from "@/lib/logger";
+import { CUSTOM_PII_PATTERNS } from "./custom-pii-patterns";
 import type { GuardrailsConfig, PIIEntity } from "./types";
 import {
   CONFIDENCE_GATED_PII_TYPES,
-  CUSTOM_PII_PATTERNS,
   K12_PII_TYPES,
   PII_MIN_CONFIDENCE_SCORE,
   PII_TYPE_CONFIDENCE_OVERRIDES,

@@ -14,6 +14,7 @@ import {
   ensureWorkspaceCheckpoint,
   finalizeWorkspaceCheckpoint,
   listWorkspaceObjects,
+  publicArtifactExtension,
   releaseWorkspaceUploads,
   WorkspacePublicArtifactRefusedError,
   WorkspaceStorageAdmissionError,
@@ -531,12 +532,23 @@ function storageFailureStatus(
  * whose whole purpose is carrying personal data (often named after a student),
  * so at most a KNOWN deliverable extension is logged. Anything after the last
  * dot is not safe on its own: "Maria.Garcia" would log a surname.
+ *
+ * A public artifact's name (`publish`, `download-public`) gets the same
+ * treatment (#1886): it is agent-chosen too, and a refused publish is the one
+ * moment we know the file is about somebody — `Garcia_IEP_summary.pdf` must
+ * not land in CloudWatch.
  */
 function loggablePath(input: StorageRequest): string | undefined {
-  if (input.operation !== "drive-upload" || !input.path) return input.path
-  return isDriveDeliverableName(input.path)
-    ? `*${driveDeliveryExtension(input.path)}`
-    : "*"
+  if (!input.path) return input.path
+  if (input.operation === "drive-upload") {
+    return isDriveDeliverableName(input.path)
+      ? `*${driveDeliveryExtension(input.path)}`
+      : "*"
+  }
+  if (input.operation === "publish" || input.operation === "download-public") {
+    return `*${publicArtifactExtension(input.path)}`
+  }
+  return input.path
 }
 
 /**

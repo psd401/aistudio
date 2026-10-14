@@ -155,11 +155,13 @@ def narration_personal_data(text):
     The kinds of personal data in the narration, or [] — the #1886 gate.
 
     WHY THIS IS STRICTER THAN THE PUBLIC-FILE GATE. Every MP3 this skill
-    produces is uploaded public-by-link with no expiry, by design, and once
-    synthesised the bytes are opaque audio that no later text check can read.
-    A morning-brief podcast that spoke a staff member's phone number sat on an
-    open URL indefinitely, and seven of them did. There is also nothing to
-    lose by refusing: the narration can say "call the front office" instead.
+    produces is uploaded public-by-link (deleted after 30 days by the
+    `expire-public-artifacts` lifecycle rule), and once synthesised the bytes
+    are opaque audio that no later text check can read — the broker's
+    public-link scan does not read audio. Seven morning-brief podcasts were
+    found speaking staff contact details on open URLs. There is also nothing
+    to lose by refusing: the narration can say "call the front office"
+    instead.
     So this uses the `narration` policy, which refuses on the FIRST match,
     while a public *file* is allowed one contact detail (a school phone number
     in a flyer footer).
@@ -170,9 +172,9 @@ def narration_personal_data(text):
     load failure means the image is broken, not that this text is safe.
     """
     _add_image_modules_to_path()
-    from personal_data import NARRATION_POLICY, personal_data_kinds
+    from personal_data import personal_data_kinds
 
-    return personal_data_kinds(text, NARRATION_POLICY)
+    return personal_data_kinds(text)
 
 
 def _record_narration_refusal(user_email, kinds):
@@ -232,7 +234,7 @@ def main():
         _fail(f"text is {len(text)} chars; maximum is {MAX_TEXT_CHARS}", "too_large")
 
     # The #1886 gate, BEFORE synthesis: nothing is sent to Polly and nothing is
-    # uploaded. The audio would be public by link with no expiry.
+    # uploaded. The audio would be public by link, and unreadable to any check.
     try:
         refused_kinds = narration_personal_data(text)
     except Exception as exc:  # noqa: BLE001 - fails closed, see the docstring
@@ -242,8 +244,8 @@ def main():
         _fail(
             "the narration contains personal data ("
             + ", ".join(refused_kinds)
-            + "). Audio is uploaded public-by-link with NO expiry and cannot be "
-            "re-checked once it is sound, so this is refused rather than "
+            + "). Audio is uploaded public-by-link and cannot be re-checked once "
+            "it is sound, so this is refused rather than "
             "published. Rewrite the narration without it — say \"call the front "
             "office\" rather than the number, and refer to people by first name "
             "or role rather than reading out contact details — then run this "

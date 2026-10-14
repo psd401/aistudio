@@ -222,6 +222,19 @@ const PUBLIC_CONTENT_TYPES = new Map<string, ReadonlySet<string>>([
   [".webp", new Set(["image/webp"])],
 ])
 
+/**
+ * The extension of a public artifact name, or `""` when it has none the broker
+ * would publish. For logging: only a KNOWN extension is safe to log on its own,
+ * because anything after the last dot of an agent-chosen name may be a
+ * surname ("Maria.Garcia").
+ */
+export function publicArtifactExtension(name: string): string {
+  const extensionIndex = name.lastIndexOf(".")
+  if (extensionIndex === -1) return ""
+  const extension = name.slice(extensionIndex).toLowerCase()
+  return PUBLIC_EXTENSIONS.has(extension) ? extension : ""
+}
+
 let client: S3Client | null = null
 
 const PRIVATE_BYTE_LIMITS = {
@@ -3278,7 +3291,9 @@ async function assertPublicArtifactCarriesNoPersonalData(
   const fileName = claimed.targetKey.slice(
     claimed.targetKey.lastIndexOf("/") + 1,
   )
-  const extension = fileName.slice(fileName.lastIndexOf("."))
+  const extensionIndex = fileName.lastIndexOf(".")
+  const extension =
+    extensionIndex === -1 ? "" : fileName.slice(extensionIndex).toLowerCase()
   const result = await scanPublicArtifactForPersonalData({
     fileName,
     contentType: claimed.contentType,
@@ -3314,6 +3329,7 @@ async function assertPublicArtifactCarriesNoPersonalData(
       extension,
       bytes: claimed.expectedBytes,
       reason: result.reason,
+      ...(result.parserError ? { parserError: result.parserError } : {}),
     })
   }
 }
