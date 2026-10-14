@@ -31,12 +31,15 @@ const PUBLIC_PATHS = [
   // require a same-owner AI Studio session.
   "/api/agent", // Agent endpoints verify router-signed invocation context
   "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
-  // Canva, Plaud, and AI Studio intentionally are NOT public. Their external
-  // OAuth grants are stored in a local owner's reusable credential slot, so
-  // both the start and callback must carry a live AI Studio session whose email
-  // matches that immutable owner. A signed link alone proves integrity, not who
-  // opened it. The Cognito data flow remains separate and has its own identity
-  // semantics.
+  // Canva, Plaud, AI Studio, and credential entry intentionally are NOT public.
+  // Their grants (or, for /agent-connect-credential, a user-typed secret —
+  // #1887) are stored in a local owner's reusable credential slot, so both the
+  // start and callback must carry a live AI Studio session whose email matches
+  // that immutable owner. A signed link alone proves integrity, not who opened
+  // it. Do not add /agent-connect-credential here: a session is the second
+  // factor that keeps a leaked link from opening a secret-entry form for
+  // whoever found it. The Cognito data flow remains separate and has its own
+  // identity semantics.
   "/agent-connect-data",
   // Atrium public reader (#1057): /p/[slug] is the anonymous public_web reader
   // route (spec §20). It is world-readable by design — the page itself gates
