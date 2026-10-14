@@ -570,6 +570,7 @@ ENV OPENCLAW_SKIP_CRON=1
 #   openclaw_agent_db_migrate.mjs — pinned-host SQLite schema migrator
 #   openclaw_runtime_patch.mjs — fail-closed backports for the pinned host
 #   openclaw_aborted_hint.mjs — build-only helper for the patch above (#1897)
+#   openclaw_patch_text.mjs — build-only anchor-replace helper for the patch
 #   workspace_sync.py       — S3 ↔ /home/node/.openclaw sync
 #   mantle_proxy.py         — local proxy to Bedrock Mantle with retry/rescue
 #   chat_format.py          — Markdown→Google Chat formatter + envelope splitter
@@ -590,7 +591,8 @@ ENV TZ=America/Los_Angeles
 # and local relay remain root so model-launched processes cannot read request
 # signing authority under /run/psd-agent-authority.
 RUN node /app/openclaw_runtime_patch.mjs /app/dist && \
-    rm /app/openclaw_runtime_patch.mjs /app/openclaw_aborted_hint.mjs && \
+    rm /app/openclaw_runtime_patch.mjs /app/openclaw_aborted_hint.mjs \
+       /app/openclaw_patch_text.mjs && \
     chown -R node:node /home/node/.openclaw && \
     chown -R root:root /app && \
     chmod -R a-w /app

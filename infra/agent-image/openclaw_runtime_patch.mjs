@@ -20,28 +20,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  PATCHED_ABORTED_HINT_ASSIGNMENT,
   UPSTREAM_ABORTED_HINT_ANCHOR,
-  rewriteAbortedRunHint,
 } from "./openclaw_aborted_hint.mjs";
+import { fail, replaceOnce } from "./openclaw_patch_text.mjs";
 
 const EXPECTED_OPENCLAW_VERSION = "2026.7.2-beta.5";
 const distDir = path.resolve(process.argv[2] ?? "/app/dist");
 const packagePath = path.join(path.dirname(distDir), "package.json");
-
-function fail(message) {
-  throw new Error(`OpenClaw runtime patch failed: ${message}`);
-}
-
-function replaceOnce(source, before, after, label) {
-  const first = source.indexOf(before);
-  if (first < 0) {
-    fail(`${label}: expected anchor was not found`);
-  }
-  if (source.includes(before, first + before.length)) {
-    fail(`${label}: expected anchor occurred more than once`);
-  }
-  return source.slice(0, first) + after + source.slice(first + before.length);
-}
 
 function findUniqueBundle(files, label, markers) {
   const matches = files.filter((file) => {
@@ -338,22 +324,19 @@ patchTool.source = replaceOnce(
 );
 
 // The platform must not blame the user for its own cutoffs (issue #1897).
-//
-// `applySessionHints` prepends "Note: The previous agent run was aborted by
-// the user. Resume carefully or ask for clarification." to the agent-visible
-// body whenever the session's `abortedLastRun` flag is set — and in this
-// runtime that flag is only ever set by the platform, never by a person (see
-// openclaw_aborted_hint.mjs for all four setters and why each is a system
-// event). A turn ended by the chat deadline, a gateway restart, or promotion
-// to a background job leaves the session entry at `status: "running"`, the
-// next turn's gateway marks it orphaned, and the model opens that turn by
-// reading that its user stopped it. It then says so, and asks whether to
-// continue work the user already asked for.
+// `applySessionHints` tells the model "the previous agent run was aborted by
+// the user" whenever `abortedLastRun` is set, and here only the platform ever
+// sets it. See openclaw_aborted_hint.mjs for the setters and the replacement.
 const replyBody = findUniqueBundle(files, "aborted-last-run session hint", [
   UPSTREAM_ABORTED_HINT_ANCHOR,
   "async function applySessionHints(params)",
 ]);
-replyBody.source = rewriteAbortedRunHint(replyBody.source);
+replyBody.source = replaceOnce(
+  replyBody.source,
+  UPSTREAM_ABORTED_HINT_ANCHOR,
+  PATCHED_ABORTED_HINT_ASSIGNMENT,
+  "aborted-last-run session hint",
+);
 
 for (const file of [
   embeddedAgent,

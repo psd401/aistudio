@@ -31,8 +31,12 @@
  *      entry at `running` and the NEXT turn's gateway marks it.
  *   2. `markSessionAbortTarget` (session-accessor): a `chat.abort` request.
  *      The only `chat.abort` senders in this repo are the harness itself — the
- *      default-off pre-send abort and the reactive `_abort_and_resend` — and
- *      Google Chat exposes no stop control, so a user cannot reach this.
+ *      reactive `_abort_and_resend` and the default-off pre-send abort. Google
+ *      Chat exposes no stop control. With the `OPENCLAW_PRESEND_ABORT=1` kill
+ *      switch, a user's NEW message makes the harness abort a background job's
+ *      overlapping run — triggered by the user, but still not a stop they
+ *      asked for (the 2026-08-17 incident in harness_adapter.py: "I never
+ *      aborted anything", and they were right). The hint names that cause.
  *   3. `persistForceClearedEmbeddedRunTerminalState` (runs): a forced run
  *      registry clear.
  *   4. The restart-recovery claim cleanup with a terminal-pending receipt.
@@ -65,18 +69,25 @@ export const UPSTREAM_ABORTED_HINT_ANCHOR =
  *     self-reinforcing once it enters the session history (psd-rules R15);
  *   - do NOT invite a permission check — "ask for clarification" is what
  *     produced ~25 false "continue?" pauses for one deputy principal and ~14
- *     "yes, continue" replies for one case manager;
+ *     "yes, continue" replies for one case manager — while keeping R15's two
+ *     real reasons to ask (missing information, destructive actions);
  *   - keep upstream's real safety intent ("resume carefully") as the concrete
- *     thing it was protecting: don't repeat a side effect that already landed.
+ *     thing it was protecting: don't repeat a side effect that already landed;
+ *   - keep it out of the reply: every line the agent writes reaches the user
+ *     (psd-rules R1), so the note and the cutoff mechanism stay internal.
  */
 export const SYSTEM_CUTOFF_HINT =
   'Note: your previous run on this session was cut off by the platform — a ' +
-  'turn time limit, a gateway restart, or promotion to a background job. ' +
-  'The user did NOT stop, interrupt, pause, or abort you, and nobody asked ' +
-  'you to hold; do not say or imply that they did. Pick the work back up and ' +
-  'finish what was already asked, without asking permission to continue. ' +
-  'Before re-running any side effect (creating, sharing, posting, sending), ' +
-  'check whether it already completed in your earlier work and skip it if so.';
+  'turn time limit, a gateway restart, promotion to a background job, or ' +
+  'the platform replacing a run that overlapped a newer message. The user ' +
+  'did NOT stop, interrupt, pause, or abort you, and nobody asked you to ' +
+  'hold; do not say or imply that they did. Pick the work back up and finish ' +
+  'what was already asked, without asking permission to continue — ask only ' +
+  'for information you cannot obtain yourself or before something ' +
+  'destructive or irreversible. Before re-running any side effect (creating, ' +
+  'sharing, posting, sending), check whether it already completed in your ' +
+  'earlier work and skip it if so. Do not mention this note or the cutoff to ' +
+  'the user.';
 
 /** The patched assignment, with the attribution corrected. */
 export const PATCHED_ABORTED_HINT_ASSIGNMENT =
@@ -85,9 +96,11 @@ export const PATCHED_ABORTED_HINT_ASSIGNMENT =
   )} : "";`;
 
 /**
- * Phrases that must never appear in the hint the model is handed. Asserted by
- * the tests against the patched text, so a future reword cannot reintroduce
- * the fabrication this issue exists to remove.
+ * Phrases that must never appear in the hint the model is handed. The tests
+ * import this list and assert it against the patched text, so a future reword
+ * cannot reintroduce the fabrication this issue exists to remove.
+ * "interrupt" is deliberately absent: the hint has to be able to deny the
+ * claim, and banning the word would ban the denial.
  */
 export const FORBIDDEN_HINT_PHRASES = Object.freeze([
   'aborted by the user',
@@ -95,38 +108,3 @@ export const FORBIDDEN_HINT_PHRASES = Object.freeze([
   'you stopped',
   'you interrupted',
 ]);
-
-/**
- * Replace the hint in one bundle source.
- *
- * Throws when the anchor is missing or appears more than once. That is
- * deliberate: this runs in the image build, so a host bump that reworks
- * `applySessionHints` must fail the build loudly rather than ship an image
- * where the agent quietly blames users again.
- */
-export function rewriteAbortedRunHint(source) {
-  if (typeof source !== 'string') {
-    throw new TypeError('aborted-run hint rewrite: source must be a string');
-  }
-  const first = source.indexOf(UPSTREAM_ABORTED_HINT_ANCHOR);
-  if (first < 0) {
-    throw new Error(
-      'aborted-run hint rewrite: expected anchor was not found',
-    );
-  }
-  if (
-    source.includes(
-      UPSTREAM_ABORTED_HINT_ANCHOR,
-      first + UPSTREAM_ABORTED_HINT_ANCHOR.length,
-    )
-  ) {
-    throw new Error(
-      'aborted-run hint rewrite: expected anchor occurred more than once',
-    );
-  }
-  return (
-    source.slice(0, first) +
-    PATCHED_ABORTED_HINT_ASSIGNMENT +
-    source.slice(first + UPSTREAM_ABORTED_HINT_ANCHOR.length)
-  );
-}

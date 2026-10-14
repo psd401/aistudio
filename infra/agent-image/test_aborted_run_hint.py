@@ -6,40 +6,11 @@ The replies continued after it shipped, clustered on turns cut short by a chat
 deadline expiry, a gateway restart, or promotion to a background job.
 
 This is the second, independent source, and unlike the first it is not an
-inference the model makes — it is a sentence the platform hands it.
-
-The chain, all of it inside the pinned OpenClaw 2026.7.2-beta.5 host:
-
-  1. `harness_adapter.shutdown()` SIGTERMs then SIGKILLs the whole gateway
-     process group at turn end. A turn that ran past the chat deadline is still
-     mid-run when that happens, so its session entry is left at
-     `status: "running"` in the SQLite session store — which lives in the
-     workspace and is S3-synced, so it survives into the next turn.
-  2. The next turn's gateway boots and runs
-     `markStartupOrphanedMainSessionsForRecovery`
-     (main-session-restart-recovery). Any entry still at `status: "running"`
-     with no live owner process gets `transitionMainSessionRecovery(entry,
-     { kind: "mark_interrupted" })`, whose body is exactly:
-         entry.status = "running";
-         entry.abortedLastRun = true;
-  3. That turn's reply pipeline then runs `applySessionHints`
-     (src/auto-reply/reply/body.ts) which, for `abortedLastRun`, PREPENDS a
-     sentence to the agent-visible body and clears the flag:
-         const abortedHint = params.abortedLastRun ? "Note: The previous
-           agent run was aborted by the user. Resume carefully or ask for
-           clarification." : "";
-         if (abortedHint) prefixedBodyBase = `${abortedHint}\n\n${prefixedBodyBase}`;
-
-So the first thing the model reads, above what the user actually typed, is the
-platform asserting that the user aborted it, plus an invitation to ask for
-clarification. Hence "it looks like you stopped the last run", and hence the
-~25 false "continue?" pauses one deputy principal saw and the ~14 "yes,
-continue" replies one case manager needed to finish a single bulk job.
-
-The fix replaces that sentence at image-build time (openclaw_aborted_hint.mjs,
-applied by openclaw_runtime_patch.mjs). Replacing rather than suppressing: the
-hint is real information — the previous run genuinely did not finish — only its
-attribution and its "ask for clarification" tail are wrong.
+inference the model makes: a turn cut off by the platform leaves the session
+`abortedLastRun`, and upstream's `applySessionHints` then prepends "The previous
+agent run was aborted by the user ... ask for clarification" to the next turn.
+The full causal chain and the incident counts live in the header of
+openclaw_aborted_hint.mjs; the fix replaces that sentence at image-build time.
 
 These tests pin, in order: the replacement text's content rules; that the real
 rewrite runs against a realistic bundle; that the next turn's composed context
@@ -60,6 +31,7 @@ import unittest
 
 SOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
 HINT_MODULE = os.path.join(SOURCE_DIR, "openclaw_aborted_hint.mjs")
+PATCH_TEXT_MODULE = os.path.join(SOURCE_DIR, "openclaw_patch_text.mjs")
 PATCH_SCRIPT = os.path.join(SOURCE_DIR, "openclaw_runtime_patch.mjs")
 DOCKERFILE = os.path.join(SOURCE_DIR, "Dockerfile")
 RULES_PATH = os.path.join(SOURCE_DIR, "skills", "psd-rules", "SKILL.md")
@@ -71,17 +43,6 @@ UPSTREAM_HINT_ASSIGNMENT = (
     '"Note: The previous agent run was aborted by the user. '
     'Resume carefully or ask for clarification." : "";'
 )
-
-# Wording the model must never be handed. "interrupted" is deliberately NOT in
-# this list: the replacement has to be able to deny the claim ("did NOT stop,
-# interrupt, ..."), and banning the word would ban the denial.
-FORBIDDEN_IN_HINT = (
-    "aborted by the user",
-    "ask for clarification",
-    "you stopped",
-    "you interrupted",
-)
-
 
 def _js_runtime() -> str:
     """Whichever ESM runtime this environment has.
@@ -124,10 +85,11 @@ def _run_js(script: str) -> str:
 def _hint_constants() -> dict:
     """The real exported constants, read by executing the shipped module."""
     out = _run_js(
-        f"import {{ SYSTEM_CUTOFF_HINT, UPSTREAM_ABORTED_HINT_ANCHOR }} "
-        f"from {json.dumps(HINT_MODULE)};\n"
+        f"import {{ SYSTEM_CUTOFF_HINT, UPSTREAM_ABORTED_HINT_ANCHOR, "
+        f"FORBIDDEN_HINT_PHRASES }} from {json.dumps(HINT_MODULE)};\n"
         "process.stdout.write(JSON.stringify({ "
-        "hint: SYSTEM_CUTOFF_HINT, anchor: UPSTREAM_ABORTED_HINT_ANCHOR }));\n"
+        "hint: SYSTEM_CUTOFF_HINT, anchor: UPSTREAM_ABORTED_HINT_ANCHOR, "
+        "forbidden: FORBIDDEN_HINT_PHRASES }));\n"
     )
     return json.loads(out)
 
@@ -150,10 +112,17 @@ class TheReplacementTextIsHonest(unittest.TestCase):
     def test_it_names_the_platform_as_the_cause(self):
         self.assertIn("cut off by the platform", self.hint)
 
-    def test_it_names_all_three_observed_cutoff_causes(self):
-        # The October cases clustered on exactly these three, so the note has
-        # to cover all of them or it reads as wrong on two thirds of its uses.
-        for cause in ("turn time limit", "gateway restart", "background job"):
+    def test_it_names_every_platform_cutoff_cause(self):
+        # The October cases clustered on the first three; the fourth is the
+        # OPENCLAW_PRESEND_ABORT kill switch replacing a background job's run
+        # when the user sends a new message. A note that omits a cause reads
+        # as wrong every time that cause fires.
+        for cause in (
+            "turn time limit",
+            "gateway restart",
+            "background job",
+            "overlapped a newer message",
+        ):
             self.assertIn(cause, self.hint, cause)
 
     def test_it_denies_the_user_stop_reading_explicitly(self):
@@ -165,11 +134,23 @@ class TheReplacementTextIsHonest(unittest.TestCase):
     def test_it_does_not_invite_a_permission_check(self):
         self.assertIn("without asking permission to continue", self.hint)
 
+    def test_it_keeps_the_real_reasons_to_ask(self):
+        # psd-rules R15: missing information and destructive actions still
+        # warrant a question; the hint must not override that.
+        self.assertIn("information you cannot obtain", self.hint)
+        self.assertIn("destructive or irreversible", self.hint)
+
+    def test_it_keeps_the_note_out_of_the_reply(self):
+        # Every line the agent writes reaches the user (psd-rules R1).
+        self.assertIn("Do not mention this note", self.hint)
+
     def test_it_keeps_the_side_effect_safety_upstream_intended(self):
         self.assertIn("already completed", self.hint)
 
     def test_it_contains_no_user_stop_wording(self):
-        for phrase in FORBIDDEN_IN_HINT:
+        forbidden = _hint_constants()["forbidden"]
+        self.assertTrue(forbidden)
+        for phrase in forbidden:
             self.assertNotIn(phrase, self.hint, phrase)
 
 
@@ -244,14 +225,6 @@ process.stdout.write(JSON.stringify({
             "the fixture must actually reach the aborted-hint path",
         )
 
-    def test_the_injected_context_carries_the_system_cutoff_note(self):
-        self.assertIn("cut off by the platform", self.injected)
-        self.assertIn("turn time limit", self.injected)
-
-    def test_the_injected_context_has_no_user_stop_wording(self):
-        for phrase in FORBIDDEN_IN_HINT:
-            self.assertNotIn(phrase, self.injected, phrase)
-
     def test_the_note_precedes_the_users_actual_message(self):
         # Ordering matters: upstream prefixes, and a note that landed after
         # the user's words would read as part of their message.
@@ -262,13 +235,26 @@ process.stdout.write(JSON.stringify({
         self.assertIn("\n\nplease continue", self.injected)
 
 
+REWRITE_PRELUDE = (
+    f"import {{ UPSTREAM_ABORTED_HINT_ANCHOR, PATCHED_ABORTED_HINT_ASSIGNMENT, "
+    f"SYSTEM_CUTOFF_HINT }} from {json.dumps(HINT_MODULE)};\n"
+    f"import {{ replaceOnce }} from {json.dumps(PATCH_TEXT_MODULE)};\n"
+    "const rewrite = (source) => replaceOnce(source, "
+    "UPSTREAM_ABORTED_HINT_ANCHOR, PATCHED_ABORTED_HINT_ASSIGNMENT, "
+    "'aborted-last-run session hint');\n"
+)
+
+
 class AHostBumpMustFailTheBuild(unittest.TestCase):
     DRIVER = """
-import { rewriteAbortedRunHint } from %(module)s;
+import { UPSTREAM_ABORTED_HINT_ANCHOR, PATCHED_ABORTED_HINT_ASSIGNMENT }
+  from %(module)s;
+import { replaceOnce } from %(patch_text)s;
 const results = [];
 for (const [label, source] of %(cases)s) {
   try {
-    rewriteAbortedRunHint(source);
+    replaceOnce(source, UPSTREAM_ABORTED_HINT_ANCHOR,
+      PATCHED_ABORTED_HINT_ASSIGNMENT, "aborted-last-run session hint");
     results.push([label, "no-throw"]);
   } catch (error) {
     results.push([label, String(error.message)]);
@@ -282,6 +268,7 @@ process.stdout.write(JSON.stringify(results));
             self.DRIVER
             % {
                 "module": json.dumps(HINT_MODULE),
+                "patch_text": json.dumps(PATCH_TEXT_MODULE),
                 "cases": json.dumps(cases),
             }
         )
@@ -292,6 +279,12 @@ process.stdout.write(JSON.stringify(results));
             [["reworded", "const abortedHint = params.abortedLastRun ? 'x' : '';"]]
         )
         self.assertIn("was not found", outcomes["reworded"])
+        # Routed through the patch script's shared failure format, so the
+        # build log names the step that broke.
+        self.assertIn(
+            "OpenClaw runtime patch failed: aborted-last-run session hint",
+            outcomes["reworded"],
+        )
 
     def test_a_duplicated_anchor_throws(self):
         doubled = UPSTREAM_HINT_ASSIGNMENT + "\n" + UPSTREAM_HINT_ASSIGNMENT
@@ -303,11 +296,10 @@ process.stdout.write(JSON.stringify(results));
         # missing original anchor so a duplicated Dockerfile invocation is
         # caught rather than masked.
         once = _run_js(
-            f"import {{ rewriteAbortedRunHint }} from {json.dumps(HINT_MODULE)};\n"
-            f"const first = rewriteAbortedRunHint("
-            f"{json.dumps(UPSTREAM_HINT_ASSIGNMENT)});\n"
+            REWRITE_PRELUDE
+            + f"const first = rewrite({json.dumps(UPSTREAM_HINT_ASSIGNMENT)});\n"
             "let second = 'no-throw';\n"
-            "try { rewriteAbortedRunHint(first); }\n"
+            "try { rewrite(first); }\n"
             "catch (error) { second = String(error.message); }\n"
             "process.stdout.write(JSON.stringify({ first, second }));\n"
         )
@@ -333,9 +325,8 @@ class TheRewriteRunsOnARealisticBundle(unittest.TestCase):
     def test_only_the_hint_text_changes(self):
         payload = json.loads(
             _run_js(
-                f"import {{ rewriteAbortedRunHint, SYSTEM_CUTOFF_HINT }} from "
-                f"{json.dumps(HINT_MODULE)};\n"
-                f"const out = rewriteAbortedRunHint({json.dumps(self.BUNDLE)});\n"
+                REWRITE_PRELUDE
+                + f"const out = rewrite({json.dumps(self.BUNDLE)});\n"
                 "process.stdout.write(JSON.stringify({ out, "
                 "hint: SYSTEM_CUTOFF_HINT }));\n"
             )
@@ -358,10 +349,8 @@ class TheRewriteRunsOnARealisticBundle(unittest.TestCase):
         # still parses: `new Function` raises SyntaxError if it does not.
         self.assertEqual(
             _run_js(
-                f"import {{ rewriteAbortedRunHint }} from "
-                f"{json.dumps(HINT_MODULE)};\n"
-                f"const out = rewriteAbortedRunHint("
-                f"{json.dumps(self.BUNDLE)});\n"
+                REWRITE_PRELUDE
+                + f"const out = rewrite({json.dumps(self.BUNDLE)});\n"
                 "new Function(out);\n"
                 "process.stdout.write('parsed');\n"
             ),
@@ -377,12 +366,16 @@ class TheBuildAppliesTheRewrite(unittest.TestCase):
             self.patch_source = handle.read()
 
     def test_the_patch_script_imports_the_rewrite(self):
-        self.assertIn("rewriteAbortedRunHint", self.patch_source)
+        self.assertIn("PATCHED_ABORTED_HINT_ASSIGNMENT", self.patch_source)
         self.assertIn("./openclaw_aborted_hint.mjs", self.patch_source)
+        self.assertIn("./openclaw_patch_text.mjs", self.patch_source)
 
     def test_the_patch_script_applies_it_to_the_reply_body_bundle(self):
         self.assertIn(
-            "replyBody.source = rewriteAbortedRunHint(replyBody.source);",
+            "replyBody.source = replaceOnce(\n"
+            "  replyBody.source,\n"
+            "  UPSTREAM_ABORTED_HINT_ANCHOR,\n"
+            "  PATCHED_ABORTED_HINT_ASSIGNMENT,\n",
             self.patch_source,
         )
         # Located by the anchor AND the enclosing function, so it cannot bind
@@ -402,7 +395,8 @@ class TheBuildAppliesTheRewrite(unittest.TestCase):
         with open(DOCKERFILE, encoding="utf-8") as handle:
             dockerfile = handle.read()
         self.assertIn(
-            "rm /app/openclaw_runtime_patch.mjs /app/openclaw_aborted_hint.mjs",
+            "rm /app/openclaw_runtime_patch.mjs /app/openclaw_aborted_hint.mjs "
+            "\\\n       /app/openclaw_patch_text.mjs &&",
             dockerfile,
         )
 
@@ -413,10 +407,26 @@ class RulesMatchTheNewBehaviour(unittest.TestCase):
             self.rules = handle.read()
 
     def test_psd_rules_quotes_the_new_note_so_the_model_recognises_it(self):
-        self.assertIn(
+        # Derived from the shipped constant, not retyped, so a reword of the
+        # note's opening cannot silently desync from what psd-rules quotes.
+        opening = _hint_constants()["hint"].split(" — ", 1)[0]
+        self.assertEqual(
+            opening,
             "Note: your previous run on this session was cut off by the platform",
-            self.rules,
         )
+        self.assertIn(opening, self.rules)
+
+    def test_psd_rules_carries_the_same_instructions_as_the_note(self):
+        # The model reads both; they must not drift into disagreement.
+        flat = " ".join(self.rules.split())
+        for clause in (
+            "do not ask whether to continue",
+            "do not tell the user they stopped you",
+            "Re-check any side effect",
+            "destructive or irreversible",
+            "Never mention the note",
+        ):
+            self.assertIn(clause, flat, clause)
 
     def test_psd_rules_states_the_user_cannot_be_the_cause(self):
         self.assertIn("Chat has no stop control", self.rules)
