@@ -23,6 +23,9 @@ openwiki:
     - infra/lambdas/agent-cron/chat-text-budget.ts
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
     - infra/lambdas/agent-cron/index.ts
+    - infra/lambdas/agent-cron/thread-session-map.ts
+    - infra/lambdas/agent-router/thread-session-map.ts
+    - infra/lib/agent-platform-stack.ts
     - infra/lambdas/document-processor-v2/index.ts
     - infra/lambdas/document-processor-v2/package.json
     - infra/lambdas/document-processor-v2/processors/factory.ts
@@ -44,6 +47,8 @@ openwiki:
     - infra/lambdas/agent-router/chat-delivery-budget.test.ts
     - infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
+    - infra/lambdas/agent-cron/thread-session-map.test.ts
+    - infra/lambdas/agent-router/thread-session-map.test.ts
     - infra/lambdas/document-processor-v2/__tests__/handler.test.ts
 ---
 
@@ -329,6 +334,8 @@ The `agent-cron` Lambda handles scheduled agent runs (watchers, monitors, period
 
 For harness implementation details including the NO_REPLY token and `allow_silent` contract, see **[agent-platform/overview.md → Scheduled Run Silent Reply](../agent-platform/overview.md#scheduled-run-silent-reply-1853)**.
 
+**Thread Mapping Writes** (#1891): After a scheduled post lands, `deliverScheduledResult()` records the Chat thread Google assigned to it in the `psd-agent-thread-sessions-{env}` DynamoDB table (`THREAD_SESSIONS_TABLE`), so a reply in that thread resolves to the run's transcript. The write is best-effort and sits outside the delivery try/catch. The cron role has `dynamodb:PutItem` on that table only. Stack wiring is in `/infra/lib/agent-platform-stack.ts`. Behavior and invariants are in **[agent-platform/overview.md → Scheduled Post Thread Mapping](../agent-platform/overview.md#scheduled-post-thread-mapping-1891)**.
+
 ### Agent Router
 
 The `agent-router` Lambda handles agent request routing with automatic failure telemetry hygiene:
@@ -343,6 +350,8 @@ The `agent-router` Lambda handles agent request routing with automatic failure t
 - **Decouples retry latency from DB health**: Visibility shortening runs before the telemetry write, so a slow or exhausted DB pool cannot block prompt retry
 
 Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
+
+**Thread Mapping Reads** (#1891): For an owner DM turn that is not a `/btw` aside, `resolveOwnerConversationSessionId()` reads the thread-sessions table (`THREAD_SESSIONS_TABLE`; the router role has `dynamodb:GetItem` only) before choosing the conversation session. It fails open: a missing table, row, owner mismatch or read error falls back to the ordinary `space + thread` session. See **[agent-platform/overview.md → Scheduled Post Thread Mapping](../agent-platform/overview.md#scheduled-post-thread-mapping-1891)** for the owner check and expiry rules.
 
 For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
@@ -375,7 +384,6 @@ Google Chat messages carry **32,000 bytes** of text plus cards—a combined budg
 | `agent-mint/` | DWD token broker (isolated security) |
 | `hyperframes-render/` | HTML to video rendering |
 | `agent-media/` | HTML-to-PDF, ffmpeg transcode/probe, and Amazon Transcribe |
-<!-- openwiki: broken internal link [../agent-platform/overview.md#runtime-topology] heading anchor "runtime-topology" does not exist in "../agent-platform/overview.md". Fix the href or restore the target, then delete this comment. -->
 | `agent-triage-poll/` | Email triage dispatcher and worker: a 5-minute poll and a daily learning run fan out one FIFO message per opted-in user. See [agent-platform triage topology](../agent-platform/overview.md#runtime-topology) |
 | `agent-triage-digest/` | Per-user daily triage digest, invoked by EventBridge Scheduler and summing `dailyStats` through `digest-window.ts`. See [agent-platform triage](../agent-platform/overview.md#email-triage-content-first-classification-1855-1861) |
 

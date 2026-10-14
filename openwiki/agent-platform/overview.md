@@ -1,11 +1,17 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, scheduled-post thread mapping, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
   source_paths:
+    - lib/agent-workspace/drive-delivery.ts
+    - lib/agent-workspace/storage-broker.ts
+    - infra/agent-image/skills/psd-publish-file/publish.js
+    - infra/agent-image/skills/_shared/drive-deliverer.js
+    - infra/lambdas/agent-cron/thread-session-map.ts
+    - infra/lambdas/agent-router/thread-session-map.ts
     - infra/agent-image/skills/psd-atrium/SKILL.md
     - infra/agent-image/skills/psd-html-artifact/SKILL.md
     - infra/agent-image/skills/psd-workspace/SKILL.md
@@ -22,6 +28,12 @@ openwiki:
     - infra/agent-image/agentcore_wrapper.py
     - infra/lambdas/agent-cron/index.ts
   test_paths:
+    - tests/unit/lib/agent-workspace/drive-delivery.test.ts
+    - tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts
+    - tests/unit/agent-image-drive-delivery-drift.test.ts
+    - infra/agent-image/skills/psd-publish-file/publish.test.js
+    - infra/lambdas/agent-cron/thread-session-map.test.ts
+    - infra/lambdas/agent-router/thread-session-map.test.ts
     - tests/e2e/atrium-sandbox-script-order.spec.ts
     - tests/smoke/atrium-artifact-sandbox-host.smoke.ts
     - tests/unit/lib/agent-workspace/command-executor.test.ts
@@ -78,7 +90,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-image-gen` — Image generation
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
 - `psd-instructional-vision` — PSD instructional framework (Instructional Essentials, UDL, MTSS) from live repository
-- `psd-publish-file` — Publish generated local files (PDF, PNG, CSV, MP3, MP4) to public-by-link S3 URLs
+- `psd-publish-file` — Hands a generated local file to the requesting user. Default: a private Drive file in the agent's account, shared with that one user (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)). `--to public` remains an unsigned public-by-link S3 URL that expires after 30 days
 
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)
@@ -267,6 +279,20 @@ Sweep slices deliberately do not count — a backfill of 1000 messages is not to
 
 **Validation**: `tests/unit/agent-triage-worker-security.test.ts`
 
+#### Runtime Topology
+
+**Sources**: `/infra/lambdas/agent-triage-poll/dispatcher.ts`, `/infra/lambdas/agent-triage-poll/worker.ts`, `/infra/lambdas/agent-triage-poll/queue.ts`, `/infra/lambdas/agent-triage-poll/index.ts`
+
+Triage work is fanned out, not run inline. The dispatcher runs on the 5-minute poll and on the daily `learn` rule (input `{ job: "learn" }`). It enqueues one FIFO message per enabled user, plus a `sweep` kick for any user whose initial-inbox sweep is pending or stalled (`sweepNeedsKick`). The worker consumes the queue and dispatches by message type:
+
+- `poll` — the live triage tick for that user: `processUser` in `index.ts`, a library the worker imports, not a Lambda entry point.
+- `sweep` — one initial-inbox-sweep slice via `runSweepSlice`; it re-enqueues a continuation keyed on the page cursor until the sweep completes.
+- `learn` — nightly correction-driven learning via `runLearning`.
+
+`enqueue` and `enqueueMany` in `queue.ts` set deduplication ids (`clampDedupId`); sweep continuations key on the page cursor so consecutive slices stay distinct. `processBatch` in `worker.ts` groups records so that a `poll` and a `sweep` or `learn` for the same user can share a batch. The worker drops any message whose user row is missing or disabled, so work dispatched before a user was turned off is not acted on.
+
+Focused checks: `cd infra/lambdas/agent-triage-poll && bun test dispatcher.test.ts worker.test.ts queue.test.ts` (or `bun run test:lambda:triage-poll`, which also runs a frozen install first).
+
 #### Phase 3 Files
 
 - `infra/lambdas/agent-triage-poll/` — `content-features.ts`, `daily-stats.ts`, `content-features.test.ts`, `content-learning.test.ts`, `daily-stats.test.ts` (+ extensions to `rules.ts`, `learning.ts`, `storage.ts`, `gmail.ts`, `types.ts`, `index.ts`)
@@ -372,6 +398,68 @@ The `psd-print-pdf`, `psd-media`, and `psd-transcribe` skills route through a sh
 - Removes scratch objects on all exit paths (important for transcription: the transport copy is someone's voice)
 
 The relay injects `workspacePrefix` from the web-verified invocation context — the caller never states who it is, preventing cross-owner access. Publishing stays separate through `psd-publish-file` and its sensitivity gate.
+
+### Private File Delivery to Drive (#1885)
+
+**When to consult**: any change to how an agent hands a generated file to a person (`psd-publish-file`, the only caller of `_shared/drive-deliverer.js`, plus the SKILL.md guidance of the other file-producing skills that points at it), to the `drive-upload` / `deliver-to-drive` storage operations, or to the Drive delivery type policy.
+
+**Why it exists**: Before #1885 the only outbound path for an agent-made file was `publishArtifact()`, an unsigned public-by-link S3 object. Office files could not be published at all, and Drive `drive +upload` is refused because the Workspace CLI runs in an empty temp directory on the web tier. A file containing student or staff data therefore had either a public link or nothing. The new default creates the file inside the agent's own account (`agnt_<uniqname>@psd401.net`) and shares it with exactly one person, the caller, as a `writer`.
+
+**Flow**: the skill stages bytes through the broker, then asks the broker to create the Drive copy. The bytes never pass through the broker's JSON route.
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-publish-file publish.js
+    participant Broker as workspace-storage route and storage-broker
+    participant S3 as Workspace S3 staging key
+    participant Mint as Mint boundary via mint-client
+    participant Drive as Google Drive for agent account
+    Skill->>Broker: drive-upload (fileName, contentType, length, checksum)
+    Broker-->>Skill: signed PUT and reservationId
+    Skill->>S3: PUT bytes to .drive-delivery staging key
+    Skill->>Broker: deliver-to-drive (reservationId)
+    Broker->>S3: read staged bytes by versionId and verify length
+    Broker->>Mint: mint token for agent account (derived server-side)
+    Broker->>Drive: resumable upload, file owned by agent account
+    Broker->>Broker: record Drive file id on the reservation before sharing
+    Broker->>Drive: share with the owner only, role writer
+    Broker->>S3: delete staging object and settle reservation
+    Broker-->>Skill: fileId, webViewLink, sharedWith
+```
+
+**Runtime invariants**:
+- **Single recipient, no transfer.** `shareDriveFileWithUser` creates one `type: "user"` permission (`writer`) for the owner's email. It never creates `anyone`, domain, or second-person grants, and never transfers ownership. The agent account remains owner, which keeps `assertAgentOwnsSharedFile` in `command-executor.ts` true for later operations.
+- **Containment before claim.** `deliverStagedUploadToDrive` reads the reservation scoped to the owner key. Its `targetKey` must decode through `driveDeliveryFileName()` as this owner's `.drive-delivery/<ownerHash>/<slot>/<name>` key. A reservation for a workspace path or public artifact is refused before it is claimed, so a refusal never wedges another upload in `verifying`.
+- **Name comes from the key.** The Drive file name is read back from the reservation's target key, not from a request parameter.
+- **Record before share.** The Drive file id is written to the reservation (`objectVersionId`) before sharing, so an interrupted delivery is finished by replay instead of creating a second copy.
+- **No public fallback.** A failed share deletes the unshared file (best effort) and reports `share_failed`. The claim is reset so the agent can retry. Every refusal's message avoids suggesting a public link.
+- **Replay is idempotent.** A `committed` reservation returns the stored file id with `reused: true`. A `verifying` reservation with a file id goes through `recoverDriveDelivery`, which re-shares (Drive returns the existing permission) and settles without uploading again.
+- **Staging cleanup is non-fatal.** The staging object is deleted after Drive succeeds; a failure there is logged, never thrown, so the agent does not retry into a second copy.
+- **Bounded time.** The server's worst case (initiate + upload + share) is 210 s and must fit inside the skill's 240 s `DELIVER_TIMEOUT_MS`. If the skill gives up first, the server still delivers and a retry creates a duplicate.
+
+**Type and size policy**: `DRIVE_DELIVERY_CONTENT_TYPES` in `/lib/agent-workspace/drive-delivery.ts` allows `.csv .docx .jpeg .jpg .md .pdf .png .pptx .txt .webp .xlsx`, each with exactly one content type. `MAX_DRIVE_DELIVERY_BYTES` is 100 MiB, equal to `MAX_PUBLIC_ARTIFACT_BYTES`. Publish-only types (`.svg`, `.json`, `.mp3`, `.mp4`) and `.html` are not deliverable; HTML belongs in Atrium. A declared content type that disagrees with the extension is refused as `content_type_mismatch`.
+
+**Routing and gates**:
+- `/app/api/agent/workspace-storage/route.ts` lists `drive-upload` and `deliver-to-drive` in `STORAGE_OPERATIONS`, dispatching to `createDriveDeliveryUpload` and `deliverStagedUploadToDrive`. `DriveDeliveryError` surfaces its `code` in the JSON error.
+- `/infra/agent-image/mantle_proxy.py` admits both operations on the model-callable path (the same class as `publish`), and the finalization drain closes them before root sync begins.
+- `/infra/agent-image/skills/_shared/drive-deliverer.js` (`deliverFileToDrive`) is the agent-side entry used by `psd-publish-file`; `staged-upload.js` owns the signed PUT, and `artifact-publisher.js` is the public-link ending of the same staging move.
+- `psd-publish-file/SKILL.md` tells the agent to run with no `--to` flag and documents the error codes (`share_failed`, `unsupported_type`, `content_type_mismatch`).
+
+**Extension seam: adding a deliverable type.** Change `DRIVE_DELIVERY_CONTENT_TYPES` in `drive-delivery.ts` and its skill-side mirror `DRIVE_DELIVERABLE_TYPES` in `drive-deliverer.js`, which `publish.js` imports for its `--to drive` gate. The public path has a separate list: `PUBLISHABLE_TYPES` in `publish.js` mirrors `PUBLIC_EXTENSIONS` in `storage-broker.ts`. `tests/unit/agent-image-drive-delivery-drift.test.ts` and the "publishable set matches the storage broker" test in `publish.test.js` fail when these diverge. Update `SKILL.md`'s "What you can deliver" list too. Non-goals: adding `.svg` or other active content to Drive without an explicit decision; the source comment calls that a different risk.
+
+**Focused tests**:
+- `tests/unit/lib/agent-workspace/drive-delivery.test.ts` — type policy (`Drive delivery type policy`), resumable create (`createAgentDriveFile`), share permissions (`shareDriveFileWithUser`, exactly two permissions), and cleanup.
+- `tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts` — key round-trip and owner isolation (`driveDeliveryTargetKey` / `driveDeliveryFileName`), `createDriveDeliveryUpload`, containment (`deliverStagedUploadToDrive containment`), failure and replay (`... failure handling`, `... recovery`).
+- `tests/unit/agent-workspace-storage-route.test.ts` — route operations and error mapping.
+- `tests/unit/agent-image-drive-delivery-drift.test.ts` — skill-side mirrors, the 30-day public-expiry wording, and that other file skills point to the private path.
+- `infra/agent-image/skills/psd-publish-file/publish.test.js` — argument handling, type gate, the broker publishable-set contract, and a Drive refusal surfacing its broker code.
+
+**Validation**:
+- `bun run test:skill:publish-file` (runs the skill package's own `bun test` suite).
+- `bun run test -- tests/unit/lib/agent-workspace/drive-delivery.test.ts tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts tests/unit/agent-image-drive-delivery-drift.test.ts` (root Jest, narrow paths).
+- Consumer boundary: the drift test and `infra/test/agent-skill-cdn-allowlist.test.ts` (which allowlists `drive.google.com` for returned Drive links) are the checks that cross from broker code into the shipped skill. Changing the skill files requires rebuilding the agent image; the source of truth for skill text is `infra/agent-image/skills/`.
+
+**Scope boundaries**: this path does not change public-artifact lifecycle or the public reconciliation ledger (see [Workspace Checkpoint Recovery](#workspace-checkpoint-recovery)). Mint and Drive token details live in [Google Workspace Integration](#google-workspace-integration). `drive +upload` remains refused by the Workspace command allowlists in `command-executor.ts`; the broker operations above are the replacement, not a relaxation of that refusal.
 
 ### Artifact Content Security Policy (#1750)
 
@@ -713,6 +801,58 @@ The fix honors `NO_REPLY` only for scheduled runs, and only when the model expli
 cd infra/agent-image && python -m pytest test_harness_adapter.py -k silent -v
 cd infra/lambdas/agent-cron && bun test silent-scheduled-run.test.ts
 ```
+
+---
+
+## Scheduled Post Thread Mapping (#1891)
+
+**Sources**: `/infra/lambdas/agent-cron/thread-session-map.ts`, `/infra/lambdas/agent-router/thread-session-map.ts`, `/infra/lambdas/agent-cron/index.ts`, `/infra/lambdas/agent-router/index.ts`, `/infra/lib/agent-platform-stack.ts`
+
+**Problem**: A scheduled post (morning brief, report, digest) is sent top-level into the owner's DM and its run lives in its own transcript (`scheduledConversationSessionId`). A reply in that Chat thread used to resolve to the generic `space + thread` session, so the agent could not see the post it was being asked about.
+
+**Mechanism**: a pointer row from Chat thread to run transcript, written by cron and read by the router.
+
+```mermaid
+sequenceDiagram
+    participant Cron as agent-cron (deliverScheduledResult)
+    participant Chat as Google Chat
+    participant Table as Thread sessions table (DynamoDB)
+    participant Router as agent-router (owner DM turn)
+    Cron->>Chat: post scheduled result to owner DM
+    Chat-->>Cron: created message with thread name
+    Cron->>Table: PutItem threadKey, conversationSessionId, workspacePrefix, expiresAt (14 days)
+    Note over Router,Table: Later, the owner replies in that thread
+    Router->>Table: GetItem threadKey for the reply's space and thread
+    Table-->>Router: row, or none
+    Router->>Router: follow row only when workspacePrefix matches the owner
+    Router->>Router: run the turn in the mapped conversation, else the unmapped key
+```
+
+Caption: a reply in a scheduled post's thread resolves to that run's transcript; any other thread keeps the `space + thread` key.
+
+Write side (`agent-cron`): `sendPreparedChatMessage` returns the thread name Google assigns on create. After a successful post, `recordScheduledThreadSession` writes `threadKey = space:<space>\nthread:<thread>` with the run's `conversationSessionId`, the owner's `workspacePrefix`, a `createdAt` operator field, and an `expiresAt` 14 days out (`THREAD_SESSION_TTL_SECONDS`). The promotion acknowledgement that cron posts when a run moves to the background job runner is mapped too, unless the promotion reason is `context-overflow`, because that promotion deliberately restarts the conversation.
+
+Read side (`agent-router`): `resolveOwnerConversationSessionId` runs only for owner DM turns that are not `/btw` asides, so room turns and asides skip the lookup. `lookupThreadSession` enforces `expiresAt` itself, because DynamoDB TTL deletion is asynchronous. `resolveThreadConversationSessionId` follows a row only when its `workspacePrefix` matches the turn's owner.
+
+**Invariants**:
+- The write sits outside the delivery try/catch and never throws. A mapping failure must not look like a delivery failure and re-queue an already-delivered post.
+- The row is written after the post lands. A post that never delivered leaves no pointer to an invisible message.
+- A row for a different owner is ignored. The mismatch warning is value-free, so it logs neither identifier.
+- Scheduled conversation ids embed the owner's email local part, so logs carry `conversationSessionIdHash`, never the raw id.
+- Two fires of one schedule on the same UTC day share one transcript, so both threads map to it. This follows the existing one-transcript-per-schedule-per-day design.
+- Knowingly unmapped: posts that land only via the durable outbox (the router retries without a thread name), and results of a run promoted to the background job runner. Both fall back to the pre-#1891 key.
+- Cron has `dynamodb:PutItem` only on the table, and the router has `dynamodb:GetItem` only, both granted in `agent-platform-stack.ts` with environment tag conditions so a dev Lambda cannot touch the prod table. The table is `psd-agent-thread-sessions-{env}`, keyed on `threadKey`, with TTL on `expiresAt`, pay-per-request, and `RETAIN` in prod. Losing a row degrades to the old behavior.
+
+**Relation to SOUL.md**: `SOUL.md` tells the agent that each conversation is isolated and never to read another thread. When a first message refers to earlier work it cannot see, the agent should say where that context lives and offer to start fresh there, not guess. The router's mapping is separate from that rule: it connects a reply to a scheduled post's own thread, using a row keyed on that thread rather than anything inferred from the message.
+
+**Focused tests**:
+- `infra/lambdas/agent-cron/thread-session-map.test.ts` — describe `deliverScheduledResult writes the mapping for the delivered post`: `records the created thread against the run conversation`, `records nothing when Chat returns no thread`, `a delivery failure routed to the outbox records nothing`. Also `recordThreadSession` and `lookupThreadSession` suites, including `an expired row DynamoDB has not swept yet is ignored`.
+- `infra/lambdas/agent-router/thread-session-map.test.ts` — `a reply in a scheduled post thread resolves to that run session`, `a new top-level message gets a new, unmapped session`, `a mapped row for another owner is ignored`, `no table and no thread name skip the lookup entirely`.
+- `infra/agent-image/test_soul_prompt.py` — `ConversationIsolationGuidance` (the SOUL.md continuation wording).
+
+**Validation**: `bun run test:lambda:cron` and `bun run test:lambda:router`. The two Lambdas carry duplicate `thread-session-map.ts` copies because they bundle independently. `thread-session-map.ts` is in the lockstep check in `infra/lambdas/agent-cron/chat-text-budget.lockstep.test.ts`, which compares the body after the header, so a key or TTL change must be made in both copies.
+
+**Historical rationale**: `docs/learnings/architecture/2026-10-14-best-effort-side-write-must-sit-outside-delivery-try-catch.md`, `docs/learnings/database/2026-10-14-dynamodb-ttl-is-not-a-retention-guarantee.md`, and `docs/learnings/security/2026-10-14-conversation-session-id-embeds-email-local-part.md`.
 
 ---
 
@@ -1083,7 +1223,7 @@ Google Workspace operations are classified into allowlist categories:
 | `ALLOWED_WRITES` | User-slot permitted mutations | `gmail users settings filters`, `tasks tasks move` |
 | `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
 
-**Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Use `psd-publish-file` for publishing generated files to public URLs, or share via Drive manually.
+**Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Hand generated files to the user with `psd-publish-file`, which by default creates them in the agent's Drive through the broker rather than through `drive +upload` (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)).
 
 The allowlist evolves based on production failure patterns.
 
