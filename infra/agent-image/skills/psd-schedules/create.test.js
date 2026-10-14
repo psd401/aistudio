@@ -66,19 +66,21 @@ describe('psd-schedules create refusal detail', () => {
 
   it('echoes only the three documented fields, never the whole body', () => {
     // requestAgentBroker deliberately never echoes a parsed body wholesale,
-    // because other brokers answer with secret fields alongside the status.
+    // because other brokers answer with sensitive fields alongside the status
+    // (psd-credentials exercises precisely this). An unrecognized field must
+    // be dropped rather than forwarded to the agent's transcript.
     const detail = refusalDetail(
       brokerError(409, {
         code: 'name_conflict',
         existingScheduleId: 'schedule-1',
-        accessToken: 'super-secret',
+        unexpectedField: 'must-not-be-echoed',
       })
     );
     expect(detail).toEqual({
       code: 'name_conflict',
       existingScheduleId: 'schedule-1',
     });
-    expect(Object.keys(detail)).not.toContain('accessToken');
+    expect(Object.keys(detail)).not.toContain('unexpectedField');
   });
 
   it('returns null for a 409 that carries no recognized code', () => {
