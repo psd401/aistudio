@@ -17,8 +17,18 @@ import {
   executeQuery,
   toPgRows,
 } from "@/lib/db/drizzle-client"
+import {
+  CREDENTIAL_NAME_RE,
+  isCredentialName,
+} from "@/lib/agent-credentials/name-grammar"
+import { createLogger, sanitizeForLogging } from "@/lib/logger"
 
-const SAFE_CREDENTIAL_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/
+const log = createLogger({ module: "agent-credential-broker-lib" })
+
+// Re-exported under the historic name so existing readers of this module keep
+// finding it. The definition lives in name-grammar.ts so the consent-token
+// layer can share it without importing the AWS SDK (#1887).
+const SAFE_CREDENTIAL_NAME_RE = CREDENTIAL_NAME_RE
 const SAFE_CAPABILITY_RE = /^[a-z0-9._-]{1,64}$/
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -39,7 +49,7 @@ export class AgentCredentialNotConfiguredError extends Error {
 }
 
 function credentialName(value: unknown): string {
-  if (typeof value !== "string" || !SAFE_CREDENTIAL_NAME_RE.test(value)) {
+  if (!isCredentialName(value)) {
     throw new AgentCredentialInputError("Invalid credential name")
   }
   return value
@@ -49,6 +59,18 @@ function environment(): string {
   const value = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT
   if (!value) throw new AgentCredentialNotConfiguredError()
   return value
+}
+
+/**
+ * Can this deployment store a credential at all?
+ *
+ * Callers that burn a one-time token before writing (the #1887 entry links)
+ * check this FIRST: without it, a deployment missing ENVIRONMENT spends every
+ * link it issues on a write that was never going to succeed, and every user
+ * has to ask for a replacement that fails identically.
+ */
+export function isCredentialStorageConfigured(): boolean {
+  return Boolean(process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT)
 }
 
 function userSecretId(ownerEmail: string, name: string): string {
@@ -228,16 +250,34 @@ export class AgentCredentialBroker {
       )
       action = "rotated"
     }
-    await executeQuery(
-      (db) =>
-        db.insert(psdAgentCredentialsAudit).values({
+    // The secret is now live in Secrets Manager. The audit insert is a separate
+    // store and cannot be transactional with it, so a DB blip here must NOT be
+    // reported as a failed write: the caller would tell the user their
+    // credential was not saved when it was, and (on the #1887 entry-link path)
+    // that costs them a one-time link over a write that actually succeeded.
+    // Record the gap loudly and return the truth about the secret.
+    try {
+      await executeQuery(
+        (db) =>
+          db.insert(psdAgentCredentialsAudit).values({
+            credentialName: name,
+            scope: "user",
+            action,
+            details: { user_email: ownerEmail },
+          }),
+        "agentCredentialWriteAudit"
+      )
+    } catch (error) {
+      log.error(
+        "Credential stored but the write audit row was not recorded",
+        sanitizeForLogging({
           credentialName: name,
-          scope: "user",
+          ownerEmail,
           action,
-          details: { user_email: ownerEmail },
-        }),
-      "agentCredentialWriteAudit"
-    )
+          error: error instanceof Error ? error.message : String(error),
+        })
+      )
+    }
     return { name, action }
   }
 
