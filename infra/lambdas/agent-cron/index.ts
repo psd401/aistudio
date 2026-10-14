@@ -2170,14 +2170,10 @@ async function notifyOwnerIfScheduleFailing(
   log: Logger,
   dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<void> {
-  const schedule = target;
-  const { scheduleName, sessionId } = target;
+  const { ownerEmail, scheduleId, scheduleName, sessionId } = target;
   try {
     const streak = await dependencies.failureStreak(
-      {
-        userEmail: schedule.ownerEmail,
-        scheduleId: schedule.scheduleId,
-      },
+      { userEmail: ownerEmail, scheduleId },
       log,
     );
     // `null` is "unreadable", not "no failures" — staying quiet is the only
@@ -2191,10 +2187,10 @@ async function notifyOwnerIfScheduleFailing(
     if (!decision.notify) return;
     const consentUrl =
       decision.reason === 'auth'
-        ? await dependencies.mintOwnerConsentLink(schedule, sessionId, log)
+        ? await dependencies.mintOwnerConsentLink(target, sessionId, log)
         : null;
     await dependencies.sendChatMessage(
-      schedule.dmSpaceName,
+      target.dmSpaceName,
       buildScheduleFailureNoticeText({
         scheduleName,
         reason: decision.reason,
@@ -2210,14 +2206,14 @@ async function notifyOwnerIfScheduleFailing(
     // repeat message instead, which is the right way round.
     await dependencies.markOwnerNotified(
       {
-        userEmail: target.ownerEmail,
-        scheduleId: target.scheduleId,
+        userEmail: ownerEmail,
+        scheduleId,
         ...(target.fireKey ? { fireKey: target.fireKey } : {}),
       },
       log,
     );
     log.warn('Told the owner their schedule is failing', {
-      scheduleId: schedule.scheduleId,
+      scheduleId,
       scheduleName,
       reason: decision.reason,
       consecutiveFailures: decision.consecutiveFailures,
@@ -2225,7 +2221,7 @@ async function notifyOwnerIfScheduleFailing(
     });
   } catch (error) {
     log.error('Failed to notify the owner of a failing schedule', {
-      scheduleId: schedule.scheduleId,
+      scheduleId,
       error: errorDetail(error),
     });
   }
