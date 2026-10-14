@@ -164,16 +164,30 @@ const STREAK_DECIDING_STATUSES = "('success', 'error', 'deferred')";
 const FAILED_STATUSES = "('error', 'deferred')";
 
 /**
- * How far back a streak is measured. Bounds the scan for a schedule that has
- * been failing for a year; the composite (user_id, schedule_id, created_at)
- * index from migration 188 keeps it an index range over one schedule's rows.
+ * How far back a streak is measured, in RUNS of this schedule — deliberately
+ * not in elapsed time.
  *
- * The one behavioural consequence is deliberate: a schedule still failing
- * after this long has its stamp fall outside the window, so its owner is
- * reminded once per window rather than never again. Kept in step with
- * `FAILURE_STREAK_WINDOW_DAYS` in `lib/agent-schedules/run-reader.ts`.
+ * An elapsed-time window makes the whole rule depend on how often a schedule
+ * fires. Schedule validation sets no maximum interval, so `rate(100 days)` and
+ * an annual cron are both legal; against a 90-day cutoff every earlier failure
+ * of such a schedule is already outside the window by the time the next one
+ * runs, its streak is permanently 1, and neither the `failing` marker nor the
+ * owner notice can ever trigger. Counting runs instead behaves the same for a
+ * five-minute schedule and a yearly one.
+ *
+ * Still bounded, so a schedule that has been failing for years is never read
+ * whole: the composite (user_id, schedule_id, created_at DESC) index from
+ * migration 188 makes this an ordered range scan over one schedule's rows that
+ * stops at the limit.
+ *
+ * The one consequence is deliberate: a streak longer than this loses sight of
+ * its own stamp, so the owner is reminded again rather than never again. That
+ * is per-schedule, not per-day — a five-minute schedule broken for 500
+ * consecutive runs is roughly two days gone, which is worth a second nudge.
+ * Kept in step with `FAILURE_STREAK_RUN_LIMIT` in
+ * `lib/agent-schedules/run-reader.ts`.
  */
-const FAILURE_STREAK_WINDOW_DAYS = 90;
+export const FAILURE_STREAK_RUN_LIMIT = 500;
 
 function streakFromResult(result: unknown): ScheduleFailureStreak {
   if (!result || typeof result !== 'object') {
@@ -226,10 +240,8 @@ export const FAILURE_STREAK_SQL = `WITH recent AS (
             WHERE user_id = :user_id
               AND schedule_id = :schedule_id
               AND status IN ${STREAK_DECIDING_STATUSES}
-              AND created_at
-                  > NOW() - make_interval(
-                      days => ${FAILURE_STREAK_WINDOW_DAYS}
-                    )
+            ORDER BY created_at DESC, id DESC
+            LIMIT ${FAILURE_STREAK_RUN_LIMIT}
           ),
           bound AS (
             SELECT MAX(CASE WHEN status = 'success' THEN id END)

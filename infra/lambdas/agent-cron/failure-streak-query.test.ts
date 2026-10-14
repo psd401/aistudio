@@ -10,6 +10,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
+  FAILURE_STREAK_RUN_LIMIT,
   markOwnerNotified,
   readFailureStreak,
   type RunTelemetryConfig,
@@ -70,10 +71,11 @@ describe('readFailureStreak — the query shape', () => {
     expect(sql).toContain('recent.id > bound.last_success_id');
   });
 
-  test('aggregates the stamp over the WHOLE streak, with no row page', async () => {
-    // This is the regression. A `LIMIT` here means the suppression is only as
-    // durable as the page size, and the owner is messaged again every time
-    // the stamp scrolls out of it.
+  test('aggregates the stamp over the whole bounded streak', async () => {
+    // The first version of this read a 12-row page, so a stamp scrolled out of
+    // view and the owner was messaged again every page-worth of failures. The
+    // bound is now 500 of THIS schedule's runs, which is both far past the
+    // threshold and independent of how often the schedule fires.
     const rds = client(streakResponse({ failures: 3 }));
 
     await readFailureStreak(CONFIG, rds, {
@@ -83,7 +85,8 @@ describe('readFailureStreak — the query shape', () => {
 
     const { sql } = rds.statements[0];
     expect(sql).toContain('BOOL_OR(recent.owner_notified_at IS NOT NULL)');
-    expect(sql).not.toContain('LIMIT');
+    expect(sql).toContain(`LIMIT ${FAILURE_STREAK_RUN_LIMIT}`);
+    expect(FAILURE_STREAK_RUN_LIMIT).toBeGreaterThan(100);
   });
 
   test('counts only failed runs, over only streak-deciding ones', async () => {
@@ -119,7 +122,12 @@ describe('readFailureStreak — the query shape', () => {
     expect(rds.statements[0].sql).toContain(':schedule_id');
   });
 
-  test('bounds the scan so a year-long streak is not read whole', async () => {
+  test('bounds the scan by RUNS, never by elapsed time', async () => {
+    // An elapsed-time cutoff makes the whole rule depend on cadence: schedule
+    // validation sets no maximum interval, so against a 90-day window every
+    // earlier failure of a `rate(100 days)` schedule is already outside it by
+    // the next run, the streak is permanently 1, and the owner can never be
+    // told. Counting runs behaves the same at any frequency.
     const rds = client(streakResponse({ failures: 1 }));
 
     await readFailureStreak(CONFIG, rds, {
@@ -127,8 +135,11 @@ describe('readFailureStreak — the query shape', () => {
       scheduleId: SCHEDULE,
     });
 
-    expect(rds.statements[0].sql).toContain('make_interval(');
-    expect(rds.statements[0].sql).toContain('days => 90');
+    const { sql } = rds.statements[0];
+    expect(sql).not.toContain('make_interval');
+    expect(sql).not.toContain('created_at >');
+    // Ordered so the bound takes the NEWEST runs, not an arbitrary page.
+    expect(sql).toContain('ORDER BY created_at DESC, id DESC');
   });
 });
 

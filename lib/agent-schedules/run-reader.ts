@@ -20,11 +20,19 @@ const FAILED_RUN_STATUSES = ["error", "deferred"] as const;
 const STREAK_DECIDING_STATUSES = ["success", ...FAILED_RUN_STATUSES] as const;
 
 /**
- * How far back a consecutive-failure count looks. Bounds the scan for an owner
- * with a five-minute schedule; a streak longer than this still reports well
- * above the `failing` threshold, so the marker does not depend on the window.
+ * How far back a consecutive-failure count looks, in RUNS per schedule —
+ * deliberately not in elapsed time.
+ *
+ * An elapsed-time window makes the count depend on how often a schedule fires.
+ * Validation sets no maximum interval, so `rate(100 days)` and an annual cron
+ * are both legal; against a 90-day cutoff every earlier failure of such a
+ * schedule is already outside the window by the next run, its streak is
+ * permanently 1, and it can never be marked `failing`. Counting runs behaves
+ * identically for a five-minute schedule and a yearly one, and still bounds
+ * the scan. Kept in step with `FAILURE_STREAK_RUN_LIMIT` in
+ * `infra/lambdas/agent-cron/run-telemetry.ts`.
  */
-const FAILURE_STREAK_WINDOW_DAYS = 90;
+const FAILURE_STREAK_RUN_LIMIT = 500;
 
 /** Consecutive failed runs at which `list` marks a schedule as failing. */
 export const FAILING_SCHEDULE_THRESHOLD = 3;
@@ -130,11 +138,11 @@ export class DrizzleAgentScheduleRunReader
       FAILED_RUN_STATUSES.map((status) => sql`${status}`),
       sql`, `,
     );
-    // Narrowed in the subquery, not only in the outer filter: the window
-    // function has to materialize every row this predicate admits before the
-    // count can discard any, and `skipped` / `promoted` rows decide nothing.
-    // An owner with contended five-minute schedules accumulates far more of
-    // those than real runs.
+    // Narrowed before the ranking, not only in the outer filter: `skipped` and
+    // `promoted` rows decide nothing, and an owner with contended five-minute
+    // schedules accumulates far more of those than real runs — leaving them in
+    // would spend the per-schedule run budget on rows that cannot affect the
+    // answer.
     const streakDecidingStatuses = sql.join(
       STREAK_DECIDING_STATUSES.map((status) => sql`${status}`),
       sql`, `,
@@ -147,29 +155,37 @@ export class DrizzleAgentScheduleRunReader
     const result = await executeQuery(
       (db) =>
         db.execute(sql`
-          SELECT recent.schedule_id AS schedule_id,
+          SELECT bounded.schedule_id AS schedule_id,
                  COUNT(*)::int AS failures
           FROM (
-            SELECT id,
-                   schedule_id,
-                   status,
-                   MAX(CASE WHEN status = 'success' THEN id END)
-                     OVER (PARTITION BY schedule_id) AS last_success_id
-            FROM agent_scheduled_runs
-            WHERE user_id = ${ownerEmail}
-              AND schedule_id IN (${scheduleList})
-              AND status IN (${streakDecidingStatuses})
-              AND created_at
-                  > NOW() - make_interval(
-                      days => ${FAILURE_STREAK_WINDOW_DAYS}
-                    )
-          ) AS recent
-          WHERE recent.status IN (${failedStatuses})
+            SELECT ranked.id,
+                   ranked.schedule_id,
+                   ranked.status,
+                   MAX(
+                     CASE WHEN ranked.status = 'success' THEN ranked.id END
+                   ) OVER (PARTITION BY ranked.schedule_id)
+                     AS last_success_id
+            FROM (
+              SELECT id,
+                     schedule_id,
+                     status,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY schedule_id
+                       ORDER BY created_at DESC, id DESC
+                     ) AS recency
+              FROM agent_scheduled_runs
+              WHERE user_id = ${ownerEmail}
+                AND schedule_id IN (${scheduleList})
+                AND status IN (${streakDecidingStatuses})
+            ) AS ranked
+            WHERE ranked.recency <= ${FAILURE_STREAK_RUN_LIMIT}
+          ) AS bounded
+          WHERE bounded.status IN (${failedStatuses})
             AND (
-              recent.last_success_id IS NULL
-              OR recent.id > recent.last_success_id
+              bounded.last_success_id IS NULL
+              OR bounded.id > bounded.last_success_id
             )
-          GROUP BY recent.schedule_id
+          GROUP BY bounded.schedule_id
         `),
       "getConsecutiveAgentScheduleFailures",
     );

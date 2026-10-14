@@ -29,7 +29,10 @@
  * With the stamp, both become retries on the next failing run instead.
  */
 
-import type { ScheduleFailureStreak } from './run-telemetry';
+import {
+  FAILURE_STREAK_RUN_LIMIT,
+  type ScheduleFailureStreak,
+} from './run-telemetry';
 
 /** Consecutive non-success runs that earn one owner DM. */
 export const NOTICE_THRESHOLD = 3;
@@ -112,6 +115,19 @@ export function decideScheduleFailureNotice(
     : { notify: false };
 }
 
+/**
+ * How the streak reads to a human.
+ *
+ * The count is measured over a bounded number of this schedule's runs, so a
+ * streak at that bound is a floor rather than a total. Saying "500 runs" when
+ * it is really 700 would be a number the owner could check and find wrong.
+ */
+function describeStreak(consecutiveFailures: number): string {
+  return consecutiveFailures >= FAILURE_STREAK_RUN_LIMIT
+    ? `at least ${consecutiveFailures} runs`
+    : `${consecutiveFailures} runs`;
+}
+
 export interface ScheduleFailureNoticeInput {
   scheduleName: string;
   reason: 'auth' | 'streak';
@@ -151,7 +167,7 @@ export function buildScheduleFailureNoticeText(
       // whose Chat post is still on the retry queue (`deferred`), which may
       // yet land. Either way the owner has nothing in hand, and that is the
       // part they can act on.
-      : `⚠️ *${input.scheduleName}* has not reached you for ${input.consecutiveFailures} runs in a row.`;
+      : `⚠️ *${input.scheduleName}* has not reached you for ${describeStreak(input.consecutiveFailures)} in a row.`;
   const reasonLine =
     input.reason === 'auth'
       ? 'Nothing is wrong with the schedule itself — it just cannot reach your mail, calendar, or files until the connection is renewed.'

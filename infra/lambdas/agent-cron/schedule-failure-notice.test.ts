@@ -237,6 +237,28 @@ describe('buildScheduleFailureNoticeText', () => {
     expect(text).toContain('ask your agent to check this schedule');
   });
 
+  test('a saturated streak reads as a floor, not an exact total', () => {
+    // The count is measured over a bounded number of runs, so at that bound it
+    // is a minimum. Stating it as exact would be a number the owner could
+    // check and find wrong.
+    expect(
+      buildScheduleFailureNoticeText({
+        scheduleName: 'Morning brief',
+        reason: 'streak',
+        consecutiveFailures: 500,
+        errorMessage: 'Agent temporarily unavailable',
+      }),
+    ).toContain('at least 500 runs in a row');
+    expect(
+      buildScheduleFailureNoticeText({
+        scheduleName: 'Morning brief',
+        reason: 'streak',
+        consecutiveFailures: 499,
+        errorMessage: 'Agent temporarily unavailable',
+      }),
+    ).toContain('499 runs in a row');
+  });
+
   test('a streak notice with no recorded reason still reads as prose', () => {
     const text = buildScheduleFailureNoticeText({
       scheduleName: 'Morning brief',

@@ -500,6 +500,14 @@ jobs:
       env:
         CI: true
 
+    # The `failing` marker's count is a second, independently-written query
+    # with the same semantics, and the service tests inject a fake reader — so
+    # a mistake in this SQL would be invisible to all of them.
+    - name: Run agent schedule failing-marker smoke
+      run: bun run test:smoke:schedule-failing-marker
+      env:
+        CI: true
+
   # Production-build regression for #1297. Source-level import tests cannot
   # prove how Next/Webpack packages middleware, so exercise the compiled bundle
   # with Next's real Edge sandbox and a signed expired session on every PR/push.

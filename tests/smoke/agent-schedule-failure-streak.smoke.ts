@@ -274,22 +274,53 @@ async function stampingEngagesSuppression({
   log.info("stamp with an unknown fire key: no row touched");
 }
 
-async function windowAndScoping({ given, streak }: Harness) {
-  // A success older than the window cannot bound the streak, so every failure
-  // inside the window counts. Reminding once per window is the documented
-  // consequence of bounding the scan at all.
+/**
+ * The bound is a number of RUNS, not a stretch of time. Schedule validation
+ * sets no maximum interval, so an elapsed-time cutoff let a `rate(100 days)`
+ * or annual schedule drop every earlier failure before its next run — its
+ * streak stayed 1 forever, and neither the `failing` marker nor the owner
+ * notice could ever fire.
+ */
+async function cadenceDoesNotDecideTheStreak({ given, streak }: Harness) {
+  // Three failures 200 days apart: a yearly-ish schedule, well past any
+  // sensible time window, and still a streak of three.
   await given([
-    { ...SUCCESS, ageDays: 200 },
-    { ...FAIL, ageDays: 120 },
-    FAIL,
-    FAIL,
+    { ...FAIL, ageDays: 600 },
+    { ...FAIL, ageDays: 400 },
+    { ...FAIL, ageDays: 200 },
   ]);
   assert.equal(
     Number((await streak()).failures),
-    2,
-    "runs outside the 90-day window are not counted",
+    3,
+    "a low-frequency schedule accumulates a streak like any other",
   );
-  log.info("90-day window excludes older runs on both sides");
+  log.info("failures 200 days apart still streak");
+
+  // And its stamp survives the same distance, so it is told once, not yearly.
+  await given([
+    { ...FAIL, ageDays: 600, notified: true },
+    { ...FAIL, ageDays: 400 },
+    { ...FAIL, ageDays: 200 },
+  ]);
+  assert.equal(
+    (await streak()).already_notified,
+    true,
+    "an old stamp is not aged out of a low-frequency streak",
+  );
+  log.info("a years-old stamp still suppresses");
+
+  // A success of any age still bounds the streak — the boundary is the last
+  // success, not a date.
+  await given([
+    { ...SUCCESS, ageDays: 500 },
+    { ...FAIL, ageDays: 300 },
+    { ...FAIL, ageDays: 100 },
+  ]);
+  assert.equal(Number((await streak()).failures), 2);
+  log.info("an old success still bounds an old streak");
+}
+
+async function windowAndScoping({ given, streak }: Harness) {
 
   await given(failures(3), { userId: OTHER_OWNER });
   assert.equal(Number((await streak()).failures), 0);
@@ -387,6 +418,7 @@ try {
     await neutralRunsDecideNothing(harness);
     await newestErrorIsWhatClassifies(harness);
     await stampingEngagesSuppression(harness);
+    await cadenceDoesNotDecideTheStreak(harness);
     await windowAndScoping(harness);
 
     // Leave nothing behind beyond the temp table, which dies with the session.
