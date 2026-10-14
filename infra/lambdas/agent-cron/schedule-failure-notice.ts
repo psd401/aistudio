@@ -8,9 +8,12 @@
  * over a month on an expired Google authorization before anyone noticed.
  *
  * ONE message per failure streak, and the suppression is a RECORDED FACT: the
- * run that carried the message is stamped `owner_notified_at` (migration 188)
- * and the rule stays quiet while any run in the current streak carries that
- * stamp. A success ends the streak, so the next three failures speak again.
+ * run that carried the message is stamped `owner_notified_at` (migration 188),
+ * and the rule stays quiet while ANY run in the current streak carries that
+ * stamp — evaluated over the whole streak in SQL, never over a page of recent
+ * runs, because a stamp that scrolls off the page reads as "nobody was told"
+ * and the owner gets a second message, then a third. A success ends the
+ * streak, so the next three failures speak again.
  *
  * It is deliberately not inferred from the streak's length. Length says "this
  * streak reached three", not "somebody was told", and the two come apart in
@@ -26,20 +29,10 @@
  * With the stamp, both become retries on the next failing run instead.
  */
 
-import type { ScheduleRunStatusRow } from './run-telemetry';
+import type { ScheduleFailureStreak } from './run-telemetry';
 
 /** Consecutive non-success runs that earn one owner DM. */
 export const NOTICE_THRESHOLD = 3;
-
-/**
- * Statuses that count as a failed run.
- *
- * `skipped` (a coalesced fire) and `promoted` (handed to the background
- * job-runner, whose own row is updated when it finishes) are neither failures
- * nor successes — they are ignored, so a coalesced fire cannot break a real
- * failure streak and an in-flight promotion cannot start a false one.
- */
-const FAILED_STATUSES = new Set(['error', 'deferred']);
 
 /**
  * Signatures of an expired or revoked Google Workspace grant.
@@ -67,12 +60,8 @@ export type ScheduleFailureNoticeDecision =
   | { notify: true; reason: 'auth' | 'streak'; consecutiveFailures: number };
 
 export interface ScheduleFailureNoticeQuery {
-  /**
-   * The schedule's recent streak-deciding runs, newest first, as
-   * `readRecentRunStatuses` returns them — `skipped` and `promoted` already
-   * excluded, and the run the caller just recorded at index 0.
-   */
-  rows: readonly ScheduleRunStatusRow[];
+  /** The schedule's current failure streak, aggregated over the whole streak. */
+  streak: ScheduleFailureStreak;
   /**
    * The error text of the run just recorded, UNTRUNCATED.
    *
@@ -86,58 +75,40 @@ export interface ScheduleFailureNoticeQuery {
 }
 
 /**
- * The current failure streak: the failed runs since the last success, newest
- * first. Rows after (older than) the most recent `success` are not part of it.
- */
-export function currentFailureStreak(
-  rows: readonly ScheduleRunStatusRow[],
-): ScheduleRunStatusRow[] {
-  const streak: ScheduleRunStatusRow[] = [];
-  for (const row of rows) {
-    if (row.status === 'success') break;
-    if (FAILED_STATUSES.has(row.status)) streak.push(row);
-  }
-  return streak;
-}
-
-/**
- * Decide whether THIS run earns an owner DM.
+ * Decide whether the run just recorded earns an owner DM.
  *
- * `rows` is the schedule's recent history, newest first, with the run just
- * recorded at index 0.
+ * Called only right after a failed run has been written, so the streak below
+ * already includes it.
  */
 export function decideScheduleFailureNotice(
   query: ScheduleFailureNoticeQuery,
 ): ScheduleFailureNoticeDecision {
-  const streak = currentFailureStreak(query.rows);
+  const { consecutiveFailures, alreadyNotified, newestErrorMessage } =
+    query.streak;
+
   // No current streak means the newest streak-deciding run was a success, or
   // the caller's own row never landed. Either way there is nothing to report,
   // and staying quiet is the only reading that cannot invent a message.
-  if (streak.length === 0) return { notify: false };
+  if (consecutiveFailures === 0) return { notify: false };
 
   // Somebody in this streak already carried the message.
-  if (streak.some((row) => row.ownerNotified)) return { notify: false };
+  if (alreadyNotified) return { notify: false };
 
   // A revoked grant speaks on the FIRST failure: nothing will fix itself
   // without the owner, and waiting for three runs costs a teacher three days.
   // Classified from the untruncated text when the caller has it.
-  const currentError = query.currentErrorMessage ?? streak[0].errorMessage;
   if (
-    isWorkspaceAuthFailure(currentError)
-    || isWorkspaceAuthFailure(streak[0].errorMessage)
+    isWorkspaceAuthFailure(query.currentErrorMessage)
+    || isWorkspaceAuthFailure(newestErrorMessage)
   ) {
-    return {
-      notify: true,
-      reason: 'auth',
-      consecutiveFailures: streak.length,
-    };
+    return { notify: true, reason: 'auth', consecutiveFailures };
   }
 
   // At or above the threshold, not exactly at it: a streak that was already
   // long before this rule existed, or whose earlier message failed to send,
   // still has an owner who has heard nothing.
-  return streak.length >= NOTICE_THRESHOLD
-    ? { notify: true, reason: 'streak', consecutiveFailures: streak.length }
+  return consecutiveFailures >= NOTICE_THRESHOLD
+    ? { notify: true, reason: 'streak', consecutiveFailures }
     : { notify: false };
 }
 

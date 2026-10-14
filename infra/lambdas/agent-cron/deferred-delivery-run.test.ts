@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { agentCronTestHelpers } from './index';
-import type { ScheduleRunStatusRow } from './run-telemetry';
+import type { ScheduleFailureStreak } from './run-telemetry';
 
 const {
   deliverScheduledResultWithDependencies,
@@ -63,7 +63,7 @@ function dependencies(
   options: {
     sendFails?: boolean;
     enqueueFails?: boolean;
-    history?: ScheduleRunStatusRow[] | null;
+    streak?: Partial<ScheduleFailureStreak> | null;
     consentUrl?: string | null;
   } = {},
 ) {
@@ -89,8 +89,15 @@ function dependencies(
       recordRun: (async (params: Record<string, unknown>) => {
         recorded.runs.push(params);
       }) as never,
-      recentRunStatuses: (async () =>
-        options.history === undefined ? null : options.history) as never,
+      failureStreak: (async () =>
+        options.streak
+          ? {
+            consecutiveFailures: 0,
+            alreadyNotified: false,
+            newestErrorMessage: null,
+            ...options.streak,
+          }
+          : null) as never,
       markOwnerNotified: (async (params: Record<string, unknown>) => {
         recorded.notifiedStamps.push(params);
       }) as never,
@@ -218,23 +225,11 @@ describe('the delivery envelope carries the scheduled-run reference', () => {
 });
 
 describe('the owner hears about a schedule that keeps failing', () => {
-  const FAIL: ScheduleRunStatusRow = {
-    status: 'error',
-    errorMessage: 'Agent temporarily unavailable',
-    ownerNotified: false,
-  };
+  const ORDINARY = 'Agent temporarily unavailable';
 
   test('a third consecutive failure sends one DM naming the schedule', async () => {
     const { recorded, deps } = dependencies({
-      history: [
-        {
-          status: 'error',
-          errorMessage: 'No response from agent.',
-          ownerNotified: false,
-        },
-        FAIL,
-        FAIL,
-      ],
+      streak: { consecutiveFailures: 3, newestErrorMessage: ORDINARY },
     });
 
     await deliverScheduledResultWithDependencies(
@@ -259,48 +254,12 @@ describe('the owner hears about a schedule that keeps failing', () => {
     ]);
   });
 
-  test('nothing is stamped when no message is sent', async () => {
-    const { recorded, deps } = dependencies({
-      history: [FAIL, { ...FAIL, ownerNotified: true }],
-    });
-
-    await deliverScheduledResultWithDependencies(
-      context({ ok: false }),
-      deps,
-    );
-
-    expect(recorded.dms).toHaveLength(0);
-    expect(recorded.notifiedStamps).toHaveLength(0);
-  });
-
-  test('a send that throws leaves the run unstamped, so it retries', async () => {
-    // The stamp is the suppression. Writing it before the send landed would
-    // silence the schedule on a message nobody received.
-    const { recorded, deps } = dependencies({ history: [FAIL, FAIL, FAIL] });
-    const failingDeps = {
-      ...deps,
-      sendChatMessage: (async () => {
-        throw new Error('Chat unavailable');
-      }) as never,
-    };
-
-    await deliverScheduledResultWithDependencies(
-      context({ ok: false }),
-      failingDeps,
-    );
-
-    expect(recorded.notifiedStamps).toHaveLength(0);
-  });
-
   test('a revoked grant sends a DM with the consent link', async () => {
     const { recorded, deps } = dependencies({
-      history: [
-        {
-          status: 'error',
-          errorMessage: 'Workspace authorization was revoked',
-          ownerNotified: false,
-        },
-      ],
+      streak: {
+        consecutiveFailures: 1,
+        newestErrorMessage: 'Workspace authorization was revoked',
+      },
       consentUrl: 'https://ai.psd401.net/agent-connect?token=abc',
     });
 
@@ -318,7 +277,11 @@ describe('the owner hears about a schedule that keeps failing', () => {
 
   test('a failure after the owner was told sends nothing', async () => {
     const { recorded, deps } = dependencies({
-      history: [FAIL, { ...FAIL, ownerNotified: true }, FAIL, FAIL],
+      streak: {
+        consecutiveFailures: 4,
+        alreadyNotified: true,
+        newestErrorMessage: ORDINARY,
+      },
     });
 
     await deliverScheduledResultWithDependencies(
@@ -327,55 +290,14 @@ describe('the owner hears about a schedule that keeps failing', () => {
     );
 
     expect(recorded.dms).toHaveLength(0);
+    expect(recorded.notifiedStamps).toHaveLength(0);
   });
 
-  test('a deferred delivery can be the run that trips the threshold', async () => {
+  test('a send that throws leaves the run unstamped, so it retries', async () => {
+    // The stamp is the suppression. Writing it before the send landed would
+    // silence the schedule on a message nobody received.
     const { recorded, deps } = dependencies({
-      sendFails: true,
-      history: [
-        {
-          status: 'deferred',
-          errorMessage: 'queued for retry',
-          ownerNotified: false,
-        },
-        FAIL,
-        FAIL,
-      ],
-    });
-
-    await deliverScheduledResultWithDependencies(context(), deps);
-
-    expect(recorded.runs[0]).toMatchObject({ status: 'deferred' });
-    expect(recorded.dms).toHaveLength(1);
-  });
-
-  test('an unreadable history stays silent rather than guessing', async () => {
-    // `null` is "cannot read the rows". Treating it as "no failures" would be
-    // wrong in one direction and "all failures" in the other; silence is the
-    // only reading that cannot invent a message.
-    const { recorded, deps } = dependencies({ history: undefined });
-
-    await deliverScheduledResultWithDependencies(
-      context({ ok: false }),
-      deps,
-    );
-
-    expect(recorded.runs[0]).toMatchObject({ status: 'error' });
-    expect(recorded.dms).toHaveLength(0);
-  });
-
-  test('a successful run never messages the owner', async () => {
-    const { recorded, deps } = dependencies({ history: [FAIL, FAIL, FAIL] });
-
-    await deliverScheduledResultWithDependencies(context(), deps);
-
-    expect(recorded.runs[0]).toMatchObject({ status: 'success' });
-    expect(recorded.dms).toHaveLength(0);
-  });
-
-  test('a DM that cannot be sent does not fail the run', async () => {
-    const { recorded, deps } = dependencies({
-      history: [FAIL, FAIL, FAIL],
+      streak: { consecutiveFailures: 3, newestErrorMessage: ORDINARY },
     });
     const failingDeps = {
       ...deps,
@@ -389,7 +311,50 @@ describe('the owner hears about a schedule that keeps failing', () => {
       failingDeps,
     );
 
+    // The run itself is unaffected, and nothing was stamped.
     expect(outcome).toEqual({ status: 'error', scheduleId: 'sched-morning' });
     expect(recorded.runs).toHaveLength(1);
+    expect(recorded.notifiedStamps).toHaveLength(0);
+  });
+
+  test('a deferred delivery can be the run that trips the threshold', async () => {
+    const { recorded, deps } = dependencies({
+      sendFails: true,
+      streak: {
+        consecutiveFailures: 3,
+        newestErrorMessage: 'Chat delivery failed and was queued for retry',
+      },
+    });
+
+    await deliverScheduledResultWithDependencies(context(), deps);
+
+    expect(recorded.runs[0]).toMatchObject({ status: 'deferred' });
+    expect(recorded.dms).toHaveLength(1);
+  });
+
+  test('an unreadable streak stays silent rather than guessing', async () => {
+    // `null` is "cannot read the rows". Treating it as "no failures" would be
+    // wrong in one direction and "all failures" in the other; silence is the
+    // only reading that cannot invent a message.
+    const { recorded, deps } = dependencies({ streak: null });
+
+    await deliverScheduledResultWithDependencies(
+      context({ ok: false }),
+      deps,
+    );
+
+    expect(recorded.runs[0]).toMatchObject({ status: 'error' });
+    expect(recorded.dms).toHaveLength(0);
+  });
+
+  test('a successful run never messages the owner', async () => {
+    const { recorded, deps } = dependencies({
+      streak: { consecutiveFailures: 3, newestErrorMessage: ORDINARY },
+    });
+
+    await deliverScheduledResultWithDependencies(context(), deps);
+
+    expect(recorded.runs[0]).toMatchObject({ status: 'success' });
+    expect(recorded.dms).toHaveLength(0);
   });
 });

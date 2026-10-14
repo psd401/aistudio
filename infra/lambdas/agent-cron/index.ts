@@ -1891,7 +1891,7 @@ interface ScheduledDeliveryDependencies {
   recordThreadSession: typeof recordThreadSession;
   enqueueScheduledChatDelivery: typeof enqueueScheduledChatDelivery;
   recordRun: typeof runTelemetry.recordRun;
-  recentRunStatuses: typeof runTelemetry.recentRunStatuses;
+  failureStreak: typeof runTelemetry.failureStreak;
   markOwnerNotified: typeof runTelemetry.markOwnerNotified;
   sendChatMessage: typeof sendChatMessage;
   mintOwnerConsentLink: typeof mintOwnerConsentLink;
@@ -1902,7 +1902,7 @@ const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
   recordThreadSession,
   enqueueScheduledChatDelivery,
   recordRun: (...args) => runTelemetry.recordRun(...args),
-  recentRunStatuses: (...args) => runTelemetry.recentRunStatuses(...args),
+  failureStreak: (...args) => runTelemetry.failureStreak(...args),
   markOwnerNotified: (...args) => runTelemetry.markOwnerNotified(...args),
   sendChatMessage,
   mintOwnerConsentLink,
@@ -2125,19 +2125,19 @@ async function notifyOwnerIfScheduleFailing(
 ): Promise<void> {
   const { schedule, scheduleName, sessionId, log } = context;
   try {
-    const rows = await dependencies.recentRunStatuses(
+    const streak = await dependencies.failureStreak(
       {
         userEmail: schedule.ownerEmail,
         scheduleId: schedule.scheduleId,
       },
       log,
     );
-    // `null` is "history unreadable", not "no failures" — staying quiet is the
-    // only safe reading, since the streak and the suppression both live in
-    // these rows. The next failing run reads them again.
-    if (!rows) return;
+    // `null` is "unreadable", not "no failures" — staying quiet is the only
+    // safe reading, since the streak and the suppression both live in those
+    // rows. The next failing run reads them again.
+    if (!streak) return;
     const decision = decideScheduleFailureNotice({
-      rows,
+      streak,
       currentErrorMessage: recorded.fullErrorMessage,
     });
     if (!decision.notify) return;

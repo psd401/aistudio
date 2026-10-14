@@ -56,28 +56,36 @@ export interface RunTelemetryRdsClient {
   execute(input: ExecuteStatementCommandInput): Promise<unknown>;
 }
 
-/** One historical run, newest-first, as the failure-notice rule reads it. */
-export interface ScheduleRunStatusRow {
-  status: string;
-  errorMessage: string | null;
-  /**
-   * Whether THIS run carried the "your schedule is failing" message to the
-   * owner. The rule reads it as the streak's suppression state, so it must be
-   * a recorded fact and never inferred from the streak's length (#1890).
-   */
-  ownerNotified: boolean;
+/**
+ * A schedule's CURRENT failure streak, aggregated in one pass over the whole
+ * streak rather than over a page of recent runs.
+ *
+ * Reading a fixed number of recent rows could not answer this safely. Once a
+ * streak grew past the page, the run carrying the stamp fell off the end: a
+ * schedule notified on failure 3 looked unnotified again by failure 15 and
+ * sent a second message, then a third, which on a five-minute schedule is
+ * roughly hourly. The suppression has to be evaluated against the entire
+ * streak, so the database aggregates it.
+ */
+export interface ScheduleFailureStreak {
+  /** Failed runs since the last success. 0 means there is no current streak. */
+  consecutiveFailures: number;
+  /** Whether ANY run in this streak carried the owner's message. */
+  alreadyNotified: boolean;
+  /** The newest failed run's recorded error text, for classification. */
+  newestErrorMessage: string | null;
 }
 
 export interface RunTelemetry {
   /**
-   * Recent terminal statuses for one schedule, newest first. Used to decide
-   * whether this owner has already been told the schedule is failing — the
-   * run history IS the suppression state, so no extra store can drift from it.
+   * The schedule's current failure streak. Used to decide whether this owner
+   * has already been told it is failing — the run rows ARE the suppression
+   * state, so no extra store can drift from them.
    */
-  recentRunStatuses(
-    params: { userEmail: string; scheduleId: string; limit?: number },
+  failureStreak(
+    params: { userEmail: string; scheduleId: string },
     log: CronTelemetryLogger,
-  ): Promise<ScheduleRunStatusRow[] | null>;
+  ): Promise<ScheduleFailureStreak | null>;
   /**
    * Stamp the run that carried the owner's failure message. Best-effort: a
    * stamp that cannot be written risks one repeat message, which is the right
@@ -146,101 +154,114 @@ function firstStringValue(result: unknown): string | undefined {
 }
 
 /**
- * Map `SELECT status, error_message` rows out of an RDS Data API result.
- *
- * A row whose status is not a string is dropped rather than coerced: a
- * mis-shaped row must not read as a success and silently break a failure
- * streak the owner needs to hear about.
- */
-function statusRows(result: unknown): ScheduleRunStatusRow[] {
-  if (!result || typeof result !== 'object') return [];
-  const records = (
-    result as {
-      records?: Array<
-        Array<{
-          stringValue?: unknown;
-          booleanValue?: unknown;
-          isNull?: unknown;
-        }>
-      >;
-    }
-  ).records;
-  if (!Array.isArray(records)) return [];
-  const rows: ScheduleRunStatusRow[] = [];
-  for (const record of records) {
-    const status = record?.[0]?.stringValue;
-    if (typeof status !== 'string') continue;
-    const errorMessage = record?.[1]?.stringValue;
-    rows.push({
-      status,
-      errorMessage: typeof errorMessage === 'string' ? errorMessage : null,
-      // Defaults to true on an unreadable value, which SUPPRESSES a message.
-      // A row we cannot classify must not be read as "nobody has been told".
-      ownerNotified: record?.[2]?.booleanValue !== false,
-    });
-  }
-  return rows;
-}
-
-/**
  * Statuses that decide a failure streak: a success ends it, a failure extends
  * it. Everything else — `skipped` (a coalesced fire that never ran) and
  * `promoted` (handed to the background job runner, whose own row carries the
- * outcome) — is excluded AT THE QUERY, not filtered afterwards.
- *
- * Filtering in SQL is the point. The row budget below is a count of rows, not
- * of failures, so leaving the neutral rows in let them crowd the real ones
- * out: an owner whose five-minute schedules contend on one workspace lock
- * accumulates `skipped` rows between real fires, and a streak of three
- * failures spread across a dozen coalesced fires would have been read as a
- * streak of one or two and never reported (#1890).
+ * outcome) — decides neither, and is excluded so a coalesced fire can neither
+ * break a real streak nor start a false one.
  */
 const STREAK_DECIDING_STATUSES = "('success', 'error', 'deferred')";
-
-/** How far back the streak rule looks when the caller names no bound. */
-const RECENT_RUN_STATUS_LIMIT = 12;
+const FAILED_STATUSES = "('error', 'deferred')";
 
 /**
- * Recent streak-deciding runs for one schedule, newest first.
+ * How far back a streak is measured. Bounds the scan for a schedule that has
+ * been failing for a year; the composite (user_id, schedule_id, created_at)
+ * index from migration 188 keeps it an index range over one schedule's rows.
  *
- * Bounded by `limit` because this only has to see far enough back to find the
- * last success and whether the owner was already told about this streak.
+ * The one behavioural consequence is deliberate: a schedule still failing
+ * after this long has its stamp fall outside the window, so its owner is
+ * reminded once per window rather than never again. Kept in step with
+ * `FAILURE_STREAK_WINDOW_DAYS` in `lib/agent-schedules/run-reader.ts`.
  */
-export async function readRecentRunStatuses(
+const FAILURE_STREAK_WINDOW_DAYS = 90;
+
+function streakFromResult(result: unknown): ScheduleFailureStreak {
+  if (!result || typeof result !== 'object') {
+    throw new Error('Failure-streak query returned no result');
+  }
+  const row = (
+    result as {
+      records?: Array<
+        Array<{
+          longValue?: unknown;
+          booleanValue?: unknown;
+          stringValue?: unknown;
+        }>
+      >;
+    }
+  ).records?.[0];
+  const failures = row?.[0]?.longValue;
+  if (typeof failures !== 'number') {
+    throw new TypeError('Failure-streak query returned no count');
+  }
+  const newestErrorMessage = row?.[2]?.stringValue;
+  return {
+    consecutiveFailures: failures,
+    // Defaults to true on an unreadable value, which SUPPRESSES a message. A
+    // value we cannot read must not be taken as "nobody has been told".
+    alreadyNotified: failures > 0 && row?.[1]?.booleanValue !== false,
+    newestErrorMessage:
+      typeof newestErrorMessage === 'string' ? newestErrorMessage : null,
+  };
+}
+
+/**
+ * Aggregate one schedule's current failure streak.
+ *
+ * Two statements' worth of work in one: the newest success bounds the streak,
+ * and every failed run after it is counted, checked for the owner's stamp, and
+ * asked for its error text. Mirrors `consecutiveFailuresBySchedule` in
+ * `lib/agent-schedules/run-reader.ts`, which answers the same question for the
+ * whole list at once.
+ */
+export async function readFailureStreak(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
-  params: { userEmail: string; scheduleId: string; limit?: number },
-): Promise<ScheduleRunStatusRow[]> {
+  params: { userEmail: string; scheduleId: string },
+): Promise<ScheduleFailureStreak> {
   if (!config.databaseResourceArn || !config.databaseSecretArn) {
     throw new Error('Scheduled-run telemetry database is not configured');
   }
-  // Floored as well as clamped, and NaN-guarded: `Math.max` PROPAGATES NaN
-  // rather than clamping it, so an unusable value would reach Postgres as
-  // `LIMIT NaN` — a syntax error, not a smaller page. A fraction is the same
-  // kind of failure.
-  const requested = params.limit;
-  const limit = Number.isFinite(requested)
-    ? Math.floor(Math.min(Math.max(1, requested as number), 50))
-    : RECENT_RUN_STATUS_LIMIT;
   const result = await rdsDataClient.execute({
     resourceArn: config.databaseResourceArn,
     secretArn: config.databaseSecretArn,
     database: config.databaseName,
-    sql: `SELECT status,
-                 error_message,
-                 owner_notified_at IS NOT NULL AS owner_notified
-          FROM agent_scheduled_runs
-          WHERE user_id = :user_id
-            AND schedule_id = :schedule_id
-            AND status IN ${STREAK_DECIDING_STATUSES}
-          ORDER BY created_at DESC, id DESC
-          LIMIT ${limit}`,
+    sql: `WITH recent AS (
+            SELECT id, status, error_message, owner_notified_at
+            FROM agent_scheduled_runs
+            WHERE user_id = :user_id
+              AND schedule_id = :schedule_id
+              AND status IN ${STREAK_DECIDING_STATUSES}
+              AND created_at
+                  > NOW() - make_interval(
+                      days => ${FAILURE_STREAK_WINDOW_DAYS}
+                    )
+          ),
+          bound AS (
+            SELECT MAX(CASE WHEN status = 'success' THEN id END)
+                     AS last_success_id
+            FROM recent
+          )
+          SELECT COUNT(*) AS failures,
+                 COALESCE(
+                   BOOL_OR(recent.owner_notified_at IS NOT NULL),
+                   FALSE
+                 ) AS already_notified,
+                 (
+                   ARRAY_AGG(recent.error_message ORDER BY recent.id DESC)
+                 )[1] AS newest_error_message
+          FROM recent, bound
+          WHERE recent.status IN ${FAILED_STATUSES}
+            AND (
+              bound.last_success_id IS NULL
+              OR recent.id > bound.last_success_id
+            )`,
     parameters: [
       { name: 'user_id', value: { stringValue: params.userEmail } },
       { name: 'schedule_id', value: { stringValue: params.scheduleId } },
     ],
   });
-  return statusRows(result);
+  return streakFromResult(result);
 }
 
 /**
@@ -860,11 +881,11 @@ function createPreflightRecorder(
 }
 
 /**
- * Best-effort reader of a schedule's recent statuses.
+ * Best-effort reader of a schedule's current failure streak.
  *
- * `null` means "history unreadable", which the caller must treat as "do not
- * notify" rather than "no failures". Guessing either way from a read error
- * would produce the exact noise the suppression rule exists to prevent.
+ * `null` means "unreadable", which the caller must treat as "do not notify"
+ * rather than "no failures". Guessing either way from a read error would
+ * produce the exact noise the suppression rule exists to prevent.
  */
 /**
  * The two best-effort history operations the owner-notice rule needs, built
@@ -874,9 +895,9 @@ function createBestEffortRunReaders(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
   databaseConfigured: boolean,
-): Pick<RunTelemetry, 'recentRunStatuses' | 'markOwnerNotified'> {
+): Pick<RunTelemetry, 'failureStreak' | 'markOwnerNotified'> {
   return {
-    recentRunStatuses: createRecentRunStatusesReader(
+    failureStreak: createFailureStreakReader(
       config,
       rdsDataClient,
       databaseConfigured,
@@ -889,17 +910,17 @@ function createBestEffortRunReaders(
   };
 }
 
-function createRecentRunStatusesReader(
+function createFailureStreakReader(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
   databaseConfigured: boolean,
-): RunTelemetry['recentRunStatuses'] {
+): RunTelemetry['failureStreak'] {
   return async (params, log) => {
     if (!databaseConfigured) return null;
     try {
-      return await readRecentRunStatuses(config, rdsDataClient, params);
+      return await readFailureStreak(config, rdsDataClient, params);
     } catch (error) {
-      log.warn('Failed to read recent scheduled-run statuses', {
+      log.warn('Failed to read a schedule failure streak', {
         scheduleId: params.scheduleId,
         error: sanitizeDiagnostic(
           error instanceof Error ? error.message : String(error),

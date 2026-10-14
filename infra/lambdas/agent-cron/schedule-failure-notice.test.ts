@@ -2,31 +2,33 @@ import { describe, expect, test } from 'bun:test';
 import {
   NOTICE_THRESHOLD,
   buildScheduleFailureNoticeText,
-  currentFailureStreak,
   decideScheduleFailureNotice,
   isWorkspaceAuthFailure,
 } from './schedule-failure-notice';
-import type { ScheduleRunStatusRow } from './run-telemetry';
+import type { ScheduleFailureStreak } from './run-telemetry';
 
-function row(
-  status: string,
-  errorMessage: string | null = null,
-  ownerNotified = false,
-): ScheduleRunStatusRow {
-  return { status, errorMessage, ownerNotified };
+const ORDINARY = 'Agent temporarily unavailable';
+const REVOKED = 'Workspace authorization was revoked (invalid_grant)';
+
+function streak(
+  overrides: Partial<ScheduleFailureStreak> = {},
+): ScheduleFailureStreak {
+  return {
+    consecutiveFailures: 0,
+    alreadyNotified: false,
+    newestErrorMessage: null,
+    ...overrides,
+  };
 }
 
-const FAIL = () => row('error', 'Agent temporarily unavailable');
-const AUTH_FAIL = () =>
-  row('error', 'Workspace authorization was revoked (invalid_grant)');
-/** The run that carried the owner's message. */
-const NOTIFIED = (base: ScheduleRunStatusRow = FAIL()) => ({
-  ...base,
-  ownerNotified: true,
-});
-
-function decide(rows: readonly ScheduleRunStatusRow[]) {
-  return decideScheduleFailureNotice({ rows });
+function decide(
+  overrides: Partial<ScheduleFailureStreak>,
+  currentErrorMessage?: string | null,
+) {
+  return decideScheduleFailureNotice({
+    streak: streak(overrides),
+    ...(currentErrorMessage === undefined ? {} : { currentErrorMessage }),
+  });
 }
 
 describe('isWorkspaceAuthFailure', () => {
@@ -54,84 +56,52 @@ describe('isWorkspaceAuthFailure', () => {
   });
 });
 
-describe('currentFailureStreak', () => {
-  test('stops at the last success', () => {
-    const streak = currentFailureStreak([
-      FAIL(),
-      FAIL(),
-      row('success'),
-      FAIL(),
-    ]);
-    expect(streak).toHaveLength(2);
-  });
-
-  test('a coalesced fire does not break a streak and is not counted', () => {
-    // `skipped` means this occurrence never ran. Counting it as a failure
-    // would notify on two real failures; counting it as a success would hide
-    // a streak that is still running.
-    expect(
-      currentFailureStreak([FAIL(), row('skipped'), FAIL(), FAIL()]),
-    ).toHaveLength(3);
-  });
-
-  test('an in-flight promotion is neither failure nor success', () => {
-    expect(
-      currentFailureStreak([row('promoted'), FAIL(), FAIL()]),
-    ).toHaveLength(2);
-  });
-
-  test('a deferred delivery counts as a failed run', () => {
-    expect(
-      currentFailureStreak([row('deferred', 'queued for retry')]),
-    ).toHaveLength(1);
-  });
-});
-
-/**
- * Replay a schedule's runs in arrival order through the real rule, stamping
- * the run that carries a message exactly as the Lambda does. This is the only
- * honest way to assert "exactly one message per streak": asserting it against
- * a hand-built history bakes in whatever the rule already believes.
- */
-function replay(arrivals: readonly ScheduleRunStatusRow[]): string[] {
-  const history: ScheduleRunStatusRow[] = [];
-  const notices: string[] = [];
-  for (const run of arrivals) {
-    const recorded = { ...run };
-    history.unshift(recorded);
-    const decision = decide(history);
-    if (!decision.notify) continue;
-    notices.push(decision.reason);
-    recorded.ownerNotified = true;
-  }
-  return notices;
-}
-
 describe('decideScheduleFailureNotice — the issue #1890 acceptance tests', () => {
-  test('three failed runs produce exactly one DM', () => {
-    expect(replay([FAIL(), FAIL(), FAIL()])).toEqual(['streak']);
+  test('a third consecutive failure earns the DM', () => {
+    expect(
+      decide({ consecutiveFailures: 1, newestErrorMessage: ORDINARY }),
+    ).toEqual({ notify: false });
+    expect(
+      decide({ consecutiveFailures: 2, newestErrorMessage: ORDINARY }),
+    ).toEqual({ notify: false });
+    expect(
+      decide({ consecutiveFailures: 3, newestErrorMessage: ORDINARY }),
+    ).toEqual({ notify: true, reason: 'streak', consecutiveFailures: 3 });
   });
 
-  test('a fourth failure sends no new DM', () => {
-    expect(replay([FAIL(), FAIL(), FAIL(), FAIL()])).toEqual(['streak']);
-    // And directly: the stamped run is the suppression.
+  test('a failure after the owner was told sends nothing', () => {
     expect(
-      decide([FAIL(), NOTIFIED(), FAIL(), FAIL()]),
+      decide({
+        consecutiveFailures: 4,
+        alreadyNotified: true,
+        newestErrorMessage: ORDINARY,
+      }),
     ).toEqual({ notify: false });
   });
 
-  test('a success, then three more failures, speaks again', () => {
+  test('the stamp suppresses at ANY streak length, not just the next one', () => {
+    // Codex caught this on the first draft: the suppression used to be read
+    // from a fixed page of recent runs, so a schedule notified on failure 3
+    // looked unnotified again by failure 15 and sent another message — roughly
+    // hourly on a five-minute schedule. The streak is now aggregated whole.
+    for (const consecutiveFailures of [4, 15, 300, 10_000]) {
+      expect(
+        decide({
+          consecutiveFailures,
+          alreadyNotified: true,
+          newestErrorMessage: ORDINARY,
+        }),
+      ).toEqual({ notify: false });
+    }
+  });
+
+  test('a success resets the streak, so three more failures speak again', () => {
+    // A success empties the streak, which is what clears `alreadyNotified`:
+    // the stamp sat on a run that is no longer in it.
+    expect(decide({ consecutiveFailures: 0 })).toEqual({ notify: false });
     expect(
-      replay([
-        FAIL(),
-        FAIL(),
-        FAIL(),
-        row('success'),
-        FAIL(),
-        FAIL(),
-        FAIL(),
-      ]),
-    ).toEqual(['streak', 'streak']);
+      decide({ consecutiveFailures: 3, newestErrorMessage: ORDINARY }),
+    ).toEqual({ notify: true, reason: 'streak', consecutiveFailures: 3 });
   });
 
   test('the threshold is the documented constant', () => {
@@ -145,19 +115,9 @@ describe('decideScheduleFailureNotice — a streak that predates the rule', () =
     // this shipped; their very next run sits on a streak far longer than the
     // threshold with nothing stamped. An earlier version inferred "already
     // told" from streak LENGTH and so skipped exactly this population.
-    const month = Array.from({ length: 30 }, () => FAIL());
-
-    expect(decide(month)).toEqual({
-      notify: true,
-      reason: 'streak',
-      consecutiveFailures: 30,
-    });
-  });
-
-  test('a month-long streak still produces exactly one message', () => {
-    expect(replay(Array.from({ length: 30 }, () => FAIL()))).toEqual([
-      'streak',
-    ]);
+    expect(
+      decide({ consecutiveFailures: 30, newestErrorMessage: ORDINARY }),
+    ).toEqual({ notify: true, reason: 'streak', consecutiveFailures: 30 });
   });
 
   test('a message that failed to send is retried on the next failure', () => {
@@ -165,97 +125,69 @@ describe('decideScheduleFailureNotice — a streak that predates the rule', () =
     // was stamped, so the next failing run speaks. A length-based rule would
     // have treated the failed attempt as done and gone quiet for good.
     expect(
-      decide([FAIL(), FAIL(), FAIL(), FAIL()]),
+      decide({ consecutiveFailures: 4, newestErrorMessage: ORDINARY }),
     ).toEqual({ notify: true, reason: 'streak', consecutiveFailures: 4 });
   });
 });
 
 describe('decideScheduleFailureNotice — authorization failures', () => {
   test('the first revoked-grant failure speaks immediately', () => {
-    expect(decide([AUTH_FAIL()])).toEqual({
-      notify: true,
-      reason: 'auth',
-      consecutiveFailures: 1,
-    });
+    expect(
+      decide({ consecutiveFailures: 1, newestErrorMessage: REVOKED }),
+    ).toEqual({ notify: true, reason: 'auth', consecutiveFailures: 1 });
   });
 
   test('later runs in the same revoked-grant streak stay quiet', () => {
     // The real incident: a daily recap failed every weekday for over a month
     // on an expired grant. One DM, not thirty.
     expect(
-      replay(Array.from({ length: 20 }, () => AUTH_FAIL())),
-    ).toEqual(['auth']);
-    expect(
-      decide([AUTH_FAIL(), NOTIFIED(AUTH_FAIL())]),
+      decide({
+        consecutiveFailures: 20,
+        alreadyNotified: true,
+        newestErrorMessage: REVOKED,
+      }),
     ).toEqual({ notify: false });
   });
 
-  test('a success resets the authorization suppression too', () => {
+  test('an auth failure partway into an ordinary streak still speaks', () => {
     expect(
-      decide([AUTH_FAIL(), row('success'), NOTIFIED(AUTH_FAIL())]),
-    ).toEqual({ notify: true, reason: 'auth', consecutiveFailures: 1 });
-  });
-
-  test('an auth failure after ordinary failures still speaks', () => {
-    expect(
-      decide([AUTH_FAIL(), FAIL()]),
+      decide({ consecutiveFailures: 2, newestErrorMessage: REVOKED }),
     ).toEqual({ notify: true, reason: 'auth', consecutiveFailures: 2 });
-  });
-
-  test('an ordinary failure after a reported auth failure stays quiet', () => {
-    // The owner already has one DM for this streak. A second one at the
-    // three-failure threshold would be the same message twice.
-    expect(
-      decide([FAIL(), FAIL(), NOTIFIED(AUTH_FAIL())]),
-    ).toEqual({ notify: false });
-  });
-
-  test('exactly one DM across a mixed streak of any length', () => {
-    expect(
-      replay([
-        FAIL(),
-        AUTH_FAIL(),
-        FAIL(),
-        AUTH_FAIL(),
-        FAIL(),
-        FAIL(),
-        FAIL(),
-      ]),
-    ).toEqual(['auth']);
   });
 
   test('the untruncated text classifies a long auth failure', () => {
     // The stored copy is capped at 500 characters; an authorization signature
     // past that cap would downgrade "speak now" to "wait three runs".
-    const capped = `${'preamble '.repeat(60)}`.slice(0, 500);
-    const full = `${capped}... invalid_grant`;
+    const capped = 'preamble '.repeat(60).slice(0, 500);
 
-    expect(decide([row('error', capped)])).toEqual({ notify: false });
     expect(
-      decideScheduleFailureNotice({
-        rows: [row('error', capped)],
-        currentErrorMessage: full,
-      }),
+      decide({ consecutiveFailures: 1, newestErrorMessage: capped }),
+    ).toEqual({ notify: false });
+    expect(
+      decide(
+        { consecutiveFailures: 1, newestErrorMessage: capped },
+        `${capped}... invalid_grant`,
+      ),
     ).toEqual({ notify: true, reason: 'auth', consecutiveFailures: 1 });
   });
 });
 
 describe('decideScheduleFailureNotice — when there is nothing to report', () => {
-  test('a successful newest run is silent even on a long past streak', () => {
-    expect(
-      decide([row('success'), FAIL(), FAIL(), FAIL()]),
-    ).toEqual({ notify: false });
+  test('an empty streak is silent however long the past one was', () => {
+    expect(decide({ consecutiveFailures: 0, alreadyNotified: false })).toEqual({
+      notify: false,
+    });
   });
 
-  test('an empty history is silent', () => {
-    expect(decide([])).toEqual({ notify: false });
-  });
-
-  test('an unclassifiable stamp suppresses rather than repeats', () => {
-    // `statusRows` defaults `ownerNotified` to true when the value cannot be
-    // read, so an unreadable row cannot be mistaken for "nobody was told".
+  test('an unreadable stamp suppresses rather than repeats', () => {
+    // `streakFromResult` defaults `alreadyNotified` to true when the value
+    // cannot be read, so an unreadable row is never taken as "nobody knows".
     expect(
-      decide([{ status: 'error', errorMessage: null, ownerNotified: true }]),
+      decide({
+        consecutiveFailures: 3,
+        alreadyNotified: true,
+        newestErrorMessage: null,
+      }),
     ).toEqual({ notify: false });
   });
 });
