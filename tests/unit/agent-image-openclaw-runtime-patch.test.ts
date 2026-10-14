@@ -16,6 +16,12 @@ const runtimePatch = readFileSync(
   join(imageDir, "openclaw_runtime_patch.mjs"),
   "utf8"
 )
+// The anchor-replace helper lives in a side-effect-free module so tests can
+// import it (#1897); the patch script imports it from there.
+const patchText = readFileSync(
+  join(imageDir, "openclaw_patch_text.mjs"),
+  "utf8"
+)
 
 describe("pinned OpenClaw runtime backports", () => {
   it("ships and executes the patch before making /app immutable", () => {
@@ -40,7 +46,11 @@ describe("pinned OpenClaw runtime backports", () => {
     expect(runtimePatch).toContain(
       "expected one bundle, found ${matches.length}"
     )
-    expect(runtimePatch).toContain("expected anchor occurred more than once")
+    expect(runtimePatch).toContain(
+      'import { fail, replaceOnce } from "./openclaw_patch_text.mjs";'
+    )
+    expect(patchText).toContain("expected anchor was not found")
+    expect(patchText).toContain("expected anchor occurred more than once")
   })
 
   it("stops a no-op file mutation from ending the whole run", () => {
