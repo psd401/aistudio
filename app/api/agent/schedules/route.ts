@@ -134,8 +134,10 @@ function scheduleErrorResponse(error: unknown, requestId: string): NextResponse 
     // "possible_duplicate") and the existing schedule's id. Without them the
     // agent could only read prose, and it retried under a new name instead of
     // updating the schedule it already had.
+    // `details` first so the error message always wins the `error` key, no
+    // matter what a future conflict subtype puts in its bag.
     return NextResponse.json(
-      { error: error.message, ...error.details },
+      { ...error.details, error: error.message },
       { status: 409 }
     )
   }

@@ -45,6 +45,7 @@ import {
   AgentSchedulePossibleDuplicateError,
   AgentScheduleQuotaError,
   AgentScheduleService,
+  AgentScheduleSyncError,
   scheduleTransactionToken,
   type AgentScheduleDynamoClient,
   type AgentScheduleRecord,
@@ -452,6 +453,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2b() {
         Items: [{ email: OWNER, dmSpaceName: "spaces/trusted-owner-dm" }],
       })
       .mockRejectedValueOnce(quotaFailure)
+      // The name-guard probe finds no row for "Over quota", so the cancelled
+      // condition was the quota one.
+      .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValue({})
 
     await expect(
@@ -724,10 +728,9 @@ const OWNER_ROW_RESPONSE = {
   Items: [{ email: OWNER, dmSpaceName: "spaces/trusted-owner-dm" }],
 }
 
-function cancellation(codes: string[]) {
+function cancellation() {
   return Object.assign(new Error("cancelled"), {
     name: "TransactionCanceledException",
-    CancellationReasons: codes.map((Code) => ({ Code })),
   })
 }
 
@@ -739,9 +742,7 @@ function defineNameCollisionMappingSuite() {
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
-      .mockRejectedValueOnce(
-        cancellation(["None", "ConditionalCheckFailed", "None"]),
-      )
+      .mockRejectedValueOnce(cancellation())
       .mockResolvedValueOnce({ Item: { targetScheduleId: SCHEDULE_ID } })
     schedulerSend.mockResolvedValue({})
 
@@ -775,9 +776,10 @@ function defineNameCollisionMappingSuite() {
       .mockResolvedValueOnce({ Items: [] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
-      .mockRejectedValueOnce(
-        cancellation(["ConditionalCheckFailed", "None", "None"]),
-      )
+      .mockRejectedValueOnce(cancellation())
+      // No guard row: the name-guard condition would have succeeded, so the
+      // cancellation was the quota one.
+      .mockResolvedValueOnce({})
     schedulerSend.mockResolvedValue({})
 
     const error = await service
@@ -790,31 +792,54 @@ function defineNameCollisionMappingSuite() {
 
     expect(error).toBeInstanceOf(AgentScheduleQuotaError)
     expect((error as Error).message).toContain("maximum 50")
-    // No guard probe: the reasons already told us which condition failed.
-    expect(dynamoSend).toHaveBeenCalledTimes(4)
+    expect(dynamoSend).toHaveBeenCalledTimes(5)
   })
 
-  it("probes the guard row when the SDK reports no cancellation reasons", async () => {
+  it("refuses to guess at quota when the guard probe itself fails", async () => {
+    // A transient failure on the diagnostic read must not come back out as
+    // "quota exceeded" — that is the #1889 bug with a new trigger, and it
+    // would push the agent to rename or to delete a live schedule.
     const { service, dynamoSend, schedulerSend } = harness()
     dynamoSend
       .mockResolvedValueOnce({ Items: [scheduleRecord()] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
-      .mockRejectedValueOnce(
-        Object.assign(new Error("cancelled"), {
-          name: "TransactionCanceledException",
-        }),
-      )
-      .mockResolvedValueOnce({ Item: { targetScheduleId: SCHEDULE_ID } })
+      .mockRejectedValueOnce(cancellation())
+      .mockRejectedValueOnce(new Error("ProvisionedThroughputExceeded"))
     schedulerSend.mockResolvedValue({})
 
-    await expect(
-      service.create(OWNER, {
+    const error = await service
+      .create(OWNER, {
         name: "Morning brief",
         prompt: "Something else entirely",
         cron: "0 15 * * *",
-      }),
-    ).rejects.toBeInstanceOf(AgentScheduleNameConflictError)
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleSyncError)
+    expect(error).not.toBeInstanceOf(AgentScheduleQuotaError)
+  })
+
+  it("pins the TransactWrite item order the create conditions rely on", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockResolvedValueOnce({})
+    schedulerSend.mockResolvedValue({})
+
+    await service.create(OWNER, {
+      name: "Morning brief",
+      prompt: "Summarize my day",
+      cron: "0 8 * * *",
+    })
+
+    const transaction = dynamoSend.mock.calls[3][0] as TransactWriteCommand
+    const items = transaction.input.TransactItems ?? []
+    expect(items[0]?.Update?.Key).toMatchObject({ scheduleId: "__quota__" })
+    expect(items[1]?.Put?.Item?.scheduleId).toMatch(/^__name__/)
+    expect(items[2]?.Put?.Item).toMatchObject({ name: "Morning brief" })
   })
 
 }

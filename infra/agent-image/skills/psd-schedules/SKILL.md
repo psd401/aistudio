@@ -230,10 +230,13 @@ Creating is not how you change a schedule. `update` is.
 
 - **The user is changing an existing job** — a different time, a tweaked
   prompt, a new name — then `list`, find it, and `update` it. Do not create.
-- **You are replacing a job** with a differently-shaped one, then `delete` the
-  old schedule (or `update` it with `--enabled false`) in the same turn. An
-  old schedule left enabled beside its replacement keeps firing; one assistant
-  principal received both for weeks.
+- **You are replacing a job** with a differently-shaped one, then retire the
+  old schedule **first** — `delete` it, or `update` it with `--enabled false`
+  — and only then create the replacement. Retiring it first also keeps a
+  replacement that happens to share the old cadence and opening prompt from
+  being refused as a duplicate of the thing it replaces. An old schedule left
+  enabled beside its replacement keeps firing; one assistant principal
+  received both for weeks.
 - **A `create` failed** — read the error and act on it. Never retry the same
   create under a new name.
 
@@ -244,6 +247,11 @@ schedule's id:
 |---|---|---|
 | `name_conflict` | A schedule with that name already exists | `update` the schedule at `existingScheduleId`, or `delete` it first |
 | `possible_duplicate` | An **enabled** schedule already runs the same cadence and the same opening prompt | `update` the schedule at `existingScheduleId`, or pass `--confirm-new` |
+
+If `list` does not show the schedule the 409 names, do **not** force the
+create through with `--confirm-new`. That combination means the broker and the
+listing disagree — report the id from the error to the user and ask, rather
+than adding a schedule nobody can see.
 
 `--confirm-new` is for the rare case where a second copy is genuinely wanted
 (same cadence, deliberately duplicated job). It is **not** the way past an

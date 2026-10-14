@@ -510,25 +510,15 @@ function planStaleGuardDeletes(
   return items;
 }
 
-function parseDisabled(value: unknown): boolean {
+/** An absent optional flag is false; anything non-boolean is a caller error. */
+function parseOptionalFlag(value: unknown, field: string): boolean {
   if (value === undefined) return false;
   if (typeof value !== "boolean") {
-    throw new AgentScheduleInputError("disabled must be a boolean");
+    throw new AgentScheduleInputError(`${field} must be a boolean`);
   }
   return value;
 }
 
-function parseConfirmNew(value: unknown): boolean {
-  if (value === undefined) return false;
-  if (typeof value !== "boolean") {
-    throw new AgentScheduleInputError("confirmNew must be a boolean");
-  }
-  return value;
-}
-
-/** Position of each condition in `create`'s TransactWrite, for cancellation mapping. */
-const CREATE_QUOTA_ITEM_INDEX = 0;
-const CREATE_NAME_GUARD_ITEM_INDEX = 1;
 const DUPLICATE_PROMPT_PREFIX_LENGTH = 200;
 
 function normalizedForComparison(value: string): string {
@@ -543,15 +533,24 @@ function normalizedPromptPrefix(prompt: string): string {
 }
 
 /**
- * Which TransactWrite conditions failed, or `null` when the SDK gave us no
- * reasons (older clients, a wrapped error) and the caller must probe instead.
+ * Refuses a create that duplicates an existing schedule.
+ *
+ * Called before the EventBridge schedule is created, so a refusal leaves
+ * nothing to roll back and the agent gets the id of the schedule it should
+ * have updated instead.
  */
-function transactionCancellationCodes(error: unknown): string[] | null {
-  if (!isObject(error)) return null;
-  const reasons = error.CancellationReasons;
-  if (!Array.isArray(reasons)) return null;
-  return reasons.map((reason) =>
-    isObject(reason) && typeof reason.Code === "string" ? reason.Code : "",
+function refuseIfLikelyDuplicate(
+  records: AgentScheduleRecord[],
+  candidate: { schedulerExpression: string; prompt: string },
+): void {
+  const duplicate = findLikelyDuplicate(records, candidate);
+  if (!duplicate) return;
+  log.warn("Refusing a likely duplicate schedule", {
+    existingScheduleId: duplicate.scheduleId,
+  });
+  throw new AgentSchedulePossibleDuplicateError(
+    duplicate.scheduleId,
+    duplicate.name,
   );
 }
 
@@ -786,7 +785,7 @@ export class AgentScheduleService {
    * Returning them is what lets `create` run its duplicate check without a
    * second consistent query — this method has already read every row.
    */
-  private async ensureOwnerMetadata(
+  private async reconcileOwnerMetadata(
     ownerEmail: string,
   ): Promise<AgentScheduleRecord[]> {
     let latestRecords: AgentScheduleRecord[] = [];
@@ -1026,25 +1025,11 @@ export class AgentScheduleService {
     const timezone = validateScheduleTimezone(
       input.timezone ?? DEFAULT_TIMEZONE,
     );
-    const enabled = !parseDisabled(input.disabled);
-    const confirmNew = parseConfirmNew(input.confirmNew);
-    const existingRecords = await this.ensureOwnerMetadata(ownerEmail);
-    // Refuse before the EventBridge schedule exists: nothing to roll back, and
-    // the agent gets the id of the schedule it should have updated instead.
+    const enabled = !parseOptionalFlag(input.disabled, "disabled");
+    const confirmNew = parseOptionalFlag(input.confirmNew, "confirmNew");
+    const existingRecords = await this.reconcileOwnerMetadata(ownerEmail);
     if (!confirmNew) {
-      const duplicate = findLikelyDuplicate(existingRecords, {
-        schedulerExpression,
-        prompt,
-      });
-      if (duplicate) {
-        log.warn("Refusing a likely duplicate schedule", {
-          existingScheduleId: duplicate.scheduleId,
-        });
-        throw new AgentSchedulePossibleDuplicateError(
-          duplicate.scheduleId,
-          duplicate.name,
-        );
-      }
+      refuseIfLikelyDuplicate(existingRecords, { schedulerExpression, prompt });
     }
     const profile = await this.trustedOwnerProfile(ownerEmail);
     const scheduleId = randomUUID();
@@ -1154,7 +1139,7 @@ export class AgentScheduleService {
         error instanceof Error &&
         error.name === "TransactionCanceledException"
       ) {
-        throw await this.createCancellationError(ownerEmail, name, error);
+        throw await this.createCancellationError(ownerEmail, name);
       }
       throw error;
     }
@@ -1164,44 +1149,45 @@ export class AgentScheduleService {
   /**
    * Tells a name collision apart from quota exhaustion.
    *
-   * Both cancel the same transaction, and reporting the quota error for a name
-   * collision is what drove agents to retry under a new name. The SDK's
-   * `CancellationReasons` names the failing condition; when it is absent we
-   * probe the guard row, because its existence is itself the collision.
+   * Both cancel the same transaction, and reporting the quota error for a
+   * name collision is what drove agents to retry under a new name. The guard
+   * row answers it on its own: if it exists, the name is taken; if it does
+   * not, the name-guard condition would have succeeded, so the cancellation
+   * was the quota one.
    */
   private async createCancellationError(
     ownerEmail: string,
     name: string,
-    error: unknown,
   ): Promise<Error> {
-    const codes = transactionCancellationCodes(error);
-    const nameGuardFailed = codes
-      ? codes[CREATE_NAME_GUARD_ITEM_INDEX] === "ConditionalCheckFailed"
-      : null;
-    if (nameGuardFailed !== false) {
-      const existingScheduleId = await this.nameGuardTarget(ownerEmail, name);
-      if (nameGuardFailed === true || existingScheduleId !== null) {
-        return new AgentScheduleNameConflictError(name, existingScheduleId);
-      }
+    const guardTarget = await this.nameGuardTarget(ownerEmail, name);
+    if (typeof guardTarget === "string") {
+      return new AgentScheduleNameConflictError(name, guardTarget);
     }
-    if (
-      codes &&
-      codes[CREATE_QUOTA_ITEM_INDEX] !== "ConditionalCheckFailed" &&
-      codes.some((code) => code && code !== "None")
-    ) {
-      // A condition we do not model failed (a concurrent create racing the
-      // record put). Surfacing it as a quota error would be a lie.
+    if (guardTarget === undefined) {
+      // The probe itself failed, so we do not know why the write was
+      // cancelled. Answering "quota exceeded" here would be the #1889 bug
+      // with a new trigger: the agent would retry under a different name, or
+      // delete a live schedule to make room.
       return new AgentScheduleSyncError(
-        `Schedule creation was cancelled (${codes.join(",")})`,
+        "Schedule creation was cancelled and the cause could not be " +
+          "determined. Run list and retry.",
       );
     }
     return new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner);
   }
 
+  /**
+   * The schedule id the owner's name guard row points at.
+   *
+   * Three outcomes, and the caller must keep them apart: a string (the row
+   * exists, so the name is taken), `null` (no such row), and `undefined` (the
+   * read itself failed, so we know nothing). Collapsing the last two is how a
+   * transient DynamoDB throttle would come back out as "quota exceeded".
+   */
   private async nameGuardTarget(
     ownerEmail: string,
     name: string,
-  ): Promise<string | null> {
+  ): Promise<string | null | undefined> {
     try {
       const response = await this.dynamo.send(
         new GetCommand({
@@ -1213,12 +1199,10 @@ export class AgentScheduleService {
       const target = response.Item?.targetScheduleId;
       return typeof target === "string" ? target : null;
     } catch (error) {
-      // The conflict is still a conflict without the id; never let this
-      // diagnostic read mask it.
       log.warn("Could not read the schedule name guard row", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return null;
+      return undefined;
     }
   }
 
@@ -1228,7 +1212,7 @@ export class AgentScheduleService {
   ): Promise<PublicAgentSchedule> {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(input.scheduleId);
-    await this.ensureOwnerMetadata(ownerEmail);
+    await this.reconcileOwnerMetadata(ownerEmail);
     return this.withScheduleMutationLock(
       ownerEmail,
       scheduleId,
@@ -1340,7 +1324,7 @@ export class AgentScheduleService {
   async delete(owner: string, rawScheduleId: unknown): Promise<string> {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(rawScheduleId);
-    await this.ensureOwnerMetadata(ownerEmail);
+    await this.reconcileOwnerMetadata(ownerEmail);
     return this.withScheduleMutationLock(
       ownerEmail,
       scheduleId,

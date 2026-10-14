@@ -104,8 +104,14 @@ describe('duplicate-prevention guidance', () => {
   });
 
   test('tells the agent to retire the schedule it replaces', () => {
-    expect(SKILL).toMatch(/`delete` the\s*\n?\s*old schedule/);
-    expect(SKILL).toMatch(/--enabled false/);
+    // Semantic, not prose-shaped: the replacement guidance must name both
+    // ways to retire the old schedule, in whatever wording it uses.
+    const section = SKILL.slice(
+      SKILL.indexOf('Never create a second schedule for the same job')
+    );
+    expect(section).toMatch(/\bdelete\b/);
+    expect(section).toMatch(/--enabled false/);
+    expect(section).toMatch(/\bfirst\b/);
   });
 
   test('documents both refusal codes the broker returns', () => {
