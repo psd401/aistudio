@@ -46,6 +46,11 @@ Ask one question: **would you hand this file to a stranger who found the URL?**
 | An internal draft, a report for one person, a working document | **Drive** (default) |
 | A public flyer, a published agenda, a board packet already public, a chart | `--to public` |
 
+A Drive link opens **only for the user you are working for**. If they want
+someone else to have the file, they share it from their Drive themselves — do
+not paste the Drive link into a message to another person, and do not switch
+to `--to public` to get around that for a file with personal data in it.
+
 When in doubt, Drive. It is the default precisely because the opposite default
 was wrong: for a long time a public link was the *only* outbound path, so files
 full of student and staff data went onto public URLs because nothing else

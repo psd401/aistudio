@@ -438,12 +438,27 @@ function storageFailureStatus(
 ): number {
   if (error instanceof WorkspaceStorageAdmissionError) return 429
   if (error instanceof DriveDeliveryError) {
-    // A share that failed is retryable (409, same as a lost completion race);
-    // a type or MIME refusal is the caller's own request to fix (400).
-    return error.code === "share_failed" ? 409 : 400
+    // A share that failed is retryable (409, same as a lost completion race).
+    // A create failure is Drive being unreachable, slow, or 5xx on a valid
+    // request — an upstream failure (502), not the caller's to fix. Only a type
+    // or MIME refusal is the caller's own request to fix (400).
+    if (error.code === "share_failed") return 409
+    if (error.code === "create_failed") return 502
+    return 400
   }
   if (error instanceof WorkspaceStorageCompletionError) return 409
   return isInvalidRequest ? 400 : 502
+}
+
+/**
+ * The path to log for an operation. A `drive-upload` path is the name of a file
+ * whose whole purpose is carrying personal data (often named after a student),
+ * so only its extension is logged.
+ */
+function loggablePath(input: StorageRequest): string | undefined {
+  if (input.operation !== "drive-upload" || !input.path) return input.path
+  const dot = input.path.lastIndexOf(".")
+  return dot > 0 ? `*${input.path.slice(dot).toLowerCase()}` : "*"
 }
 
 export async function POST(request: NextRequest) {
@@ -480,7 +495,7 @@ export async function POST(request: NextRequest) {
         requestId,
         ownerEmail: context.ownerEmail,
         operation: input.operation,
-        path: input.path,
+        path: loggablePath(input),
       })
     )
     return NextResponse.json(result)
@@ -491,7 +506,7 @@ export async function POST(request: NextRequest) {
         requestId,
         ownerEmail: context.ownerEmail,
         operation: input.operation,
-        path: input.path,
+        path: loggablePath(input),
         error: error instanceof Error ? error.message : String(error),
         // See lib/db/query-error.ts — Drizzle swallows the driver's real cause.
         ...describeQueryErrorCause(error),

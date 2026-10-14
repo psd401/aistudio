@@ -23,7 +23,9 @@ import {
   isNotNull,
   isNull,
   lt,
+  ne,
   notLike,
+  or,
   sql,
   sum,
 } from "drizzle-orm"
@@ -539,11 +541,16 @@ async function createUploadReservation(params: {
             params.publicArtifact,
           ),
           inArray(workspaceUploadReservations.status, RETAINED_UPLOAD_STATUSES),
-          // A Drive delivery's bytes leave S3 once delivered — its committed
+          // A Drive delivery's bytes leave S3 once delivered — its COMMITTED
           // row is not retained storage and must not feed this S3-spend signal.
-          notLike(
-            workspaceUploadReservations.targetKey,
-            `${DRIVE_DELIVERY_PREFIX}/%`,
+          // Its in-flight row still counts: the staged bytes sit in S3 until
+          // delivery.
+          or(
+            ne(workspaceUploadReservations.status, "committed"),
+            notLike(
+              workspaceUploadReservations.targetKey,
+              `${DRIVE_DELIVERY_PREFIX}/%`,
+            ),
           ),
         )
         const [byteRows, objectRows] = await Promise.all([

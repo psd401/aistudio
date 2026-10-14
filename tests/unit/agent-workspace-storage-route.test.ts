@@ -51,10 +51,12 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
   deliverStagedUploadToDrive: (...args: unknown[]) =>
     deliverStagedUploadToDriveMock(...args),
 }))
+const mockLogInfo = jest.fn()
+const mockLogWarn = jest.fn()
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
-    info: jest.fn(),
-    warn: jest.fn(),
+    info: (...args: unknown[]) => mockLogInfo(...args),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
   }),
   generateRequestId: () => "storage-request-id",
   sanitizeForLogging: (value: unknown) => value,
@@ -716,6 +718,56 @@ describe("POST /api/agent/workspace-storage", () => {
     await expect(response.json()).resolves.toMatchObject({
       code: "unsupported_type",
     })
+  })
+
+  it("reports a Drive create failure as an upstream 502 with its code", async () => {
+    const { DriveDeliveryError } = await import(
+      "@/lib/agent-workspace/drive-delivery"
+    )
+    deliverStagedUploadToDriveMock.mockRejectedValue(
+      new DriveDeliveryError(
+        "create_failed",
+        "Drive could not be reached to upload the file: timed out",
+      ),
+    )
+
+    const response = await POST(
+      request({
+        operation: "deliver-to-drive",
+        reservationId: "11111111-2222-4333-8444-555555555555",
+      }),
+    )
+
+    expect(response.status).toBe(502)
+    await expect(response.json()).resolves.toMatchObject({
+      code: "create_failed",
+    })
+  })
+
+  it("never logs a Drive delivery's file name, only its extension", async () => {
+    const studentFile = "Jordan Smith IEP.pdf"
+    const body = {
+      operation: "drive-upload",
+      path: studentFile,
+      contentType: "application/pdf",
+      contentLength: 10,
+      idempotencyKey: "drive-delivery-idempotency",
+      checksumSha256: "A".repeat(43) + "=",
+    }
+    mockLogInfo.mockClear()
+    mockLogWarn.mockClear()
+    await POST(request(body))
+    createDriveDeliveryUploadMock.mockRejectedValueOnce(new Error("boom"))
+    await POST(request(body))
+
+    const logged = JSON.stringify([
+      ...mockLogInfo.mock.calls,
+      ...mockLogWarn.mock.calls,
+    ])
+    expect(mockLogInfo).toHaveBeenCalled()
+    expect(mockLogWarn).toHaveBeenCalled()
+    expect(logged).not.toContain("Jordan")
+    expect(logged).toContain('"path":"*.pdf"')
   })
 
   it("generation-fences deletes inside the signed prefix", async () => {
