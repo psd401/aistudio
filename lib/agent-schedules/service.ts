@@ -22,6 +22,7 @@ import {
 } from "@aws-sdk/client-scheduler";
 import {
   AgentScheduleInputError,
+  DEFAULT_SCHEDULE_TIMEZONE,
   parseEnabled,
   toSchedulerExpression,
   validateScheduleId,
@@ -29,6 +30,7 @@ import {
   validateSchedulePrompt,
   validateScheduleTimezone,
 } from "@/lib/agent-schedules/validation";
+import { describeScheduleExpression } from "@/lib/agent-schedules/schedule-description";
 import {
   DrizzleAgentScheduleRunReader,
   type AgentScheduleLastRun,
@@ -41,7 +43,6 @@ import {
 } from "./mutation-lock";
 import { createLogger } from "@/lib/logger";
 
-const DEFAULT_TIMEZONE = "America/Los_Angeles";
 const DEFAULT_MAX_SCHEDULES_PER_OWNER = 50;
 const LAST_RUN_ERROR_MAX_LENGTH = 500;
 const SCHEDULE_MAXIMUM_EVENT_AGE_SECONDS = 60 * 60;
@@ -84,6 +85,30 @@ export type PublicAgentSchedule = Pick<
   | "createdAt"
   | "updatedAt"
 > & {
+  /**
+   * The expression actually handed to EventBridge Scheduler, after the 5-field
+   * expansion and the `?` day-field rule. It is what the schedule MEANS; the
+   * raw `cronExpression` is only what was typed.
+   */
+  schedulerExpression: string;
+  /** Plain-language reading of `schedulerExpression`, for read-back. */
+  description: string;
+  /**
+   * Next fire times in the schedule's timezone, ISO 8601 with offset. Empty
+   * when the expression has no computable occurrences, and always empty when
+   * `enabled` is false — a held schedule has no upcoming executions to
+   * promise.
+   *
+   * Accurate to the minute, which is EventBridge's own guarantee: it invokes
+   * every schedule type "with 60 second precision". For a `rate(...)`
+   * schedule the phase is taken from `updatedAt`, the timestamp written
+   * immediately before the Create/UpdateSchedule call — the platform anchors
+   * on activation instead, which differs by that request's latency and so
+   * sits well inside the same 60-second window. Pinning it exactly would
+   * require sending `StartDate`, which for a rate schedule also redefines
+   * its first occurrence.
+   */
+  nextRuns: string[];
   lastRunAt: string | null;
   lastRunStatus: string | null;
   lastRunError: string | null;
@@ -257,12 +282,25 @@ function publicSchedule(
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
 ): PublicAgentSchedule {
+  const summary = describeScheduleExpression(
+    record.schedulerExpression,
+    record.timezone,
+    // `updatedAt` is when EventBridge last re-anchored a rate(...) interval.
+    { anchor: record.updatedAt },
+  );
   return {
     scheduleId: record.scheduleId,
     version: record.version,
     name: record.name,
     prompt: record.prompt,
     cronExpression: record.cronExpression,
+    schedulerExpression: record.schedulerExpression,
+    description: summary.description,
+    // A disabled schedule cannot fire: EventBridge holds it, so reporting
+    // upcoming times would promise executions that never happen in the field
+    // SKILL.md tells the agent to confirm the schedule from. The description
+    // still reads back what the expression means.
+    nextRuns: record.enabled ? summary.nextRuns : [],
     timezone: record.timezone,
     enabled: record.enabled,
     createdAt: record.createdAt,
@@ -294,6 +332,19 @@ function publicDegradedSchedule(
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
 ): PublicAgentSchedule {
+  const schedulerExpression = degradedString(
+    value.schedulerExpression,
+    256,
+    degradedString(value.cronExpression, 256, ""),
+  );
+  const timezone = degradedString(value.timezone, 100, DEFAULT_SCHEDULE_TIMEZONE);
+  const updatedAt = degradedString(value.updatedAt, 64, "");
+  const enabled = typeof value.enabled === "boolean" ? value.enabled : false;
+  const summary = describeScheduleExpression(schedulerExpression, timezone, {
+    // Empty or unparseable on a degraded row; a rate(...) schedule then
+    // reports no fire times instead of ones measured from the wrong phase.
+    anchor: updatedAt,
+  });
   return {
     scheduleId: degradedString(value.scheduleId, 128, "unknown"),
     version:
@@ -303,10 +354,15 @@ function publicDegradedSchedule(
     name: degradedString(value.name, 120, "Invalid schedule"),
     prompt: degradedString(value.prompt, 20_000, ""),
     cronExpression: degradedString(value.cronExpression, 256, ""),
-    timezone: degradedString(value.timezone, 100, DEFAULT_TIMEZONE),
-    enabled: typeof value.enabled === "boolean" ? value.enabled : false,
+    schedulerExpression,
+    description: summary.description,
+    // Same rule as the normal path: no fire times for a schedule that cannot
+    // fire. A degraded row defaults to disabled, so this is usually empty.
+    nextRuns: enabled ? summary.nextRuns : [],
+    timezone,
+    enabled,
     createdAt: degradedString(value.createdAt, 64, ""),
-    updatedAt: degradedString(value.updatedAt, 64, ""),
+    updatedAt,
     lastRunAt: lastRun?.createdAt.toISOString() ?? null,
     lastRunStatus: runEnrichmentAvailable
       ? lastRun?.status ?? null
@@ -895,7 +951,7 @@ export class AgentScheduleService {
       typeof input.cron === "string" ? input.cron.trim() : input.cron;
     const schedulerExpression = toSchedulerExpression(cronExpression);
     const timezone = validateScheduleTimezone(
-      input.timezone ?? DEFAULT_TIMEZONE,
+      input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE,
     );
     const enabled = !parseDisabled(input.disabled);
     await this.ensureOwnerMetadata(ownerEmail);

@@ -44,6 +44,7 @@
     "test:smoke:auth-edge-production": "node scripts/test/auth-edge-production.smoke.cjs",
     "test:smoke:agent-credential-entry": "bun run tests/smoke/agent-credential-entry-token.smoke.ts",
     "agent:probe-context": "bun run scripts/agent-workspace/mint-agent-probe-context.ts",
+    "agent:audit-schedules": "bun run scripts/audit-agent-schedules.ts",
     "test:skill:workspace": "cd infra/agent-image/skills/psd-workspace && bun test common.test.js",
     "test:lambda:router": "cd infra/lambdas/agent-router && bun test",
     "test:lambda:cron": "cd infra/lambdas/agent-cron && bun test",

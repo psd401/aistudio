@@ -707,3 +707,106 @@ describe("schedule run history", () => {
     }
   })
 })
+
+describe("schedules echo back what was actually saved", () => {
+  it("includes the scheduler expression, description and next runs on list", async () => {
+    // #1888: responses carried only the raw cronExpression, so an agent could
+    // confirm a schedule by repeating the string it had just sent. These three
+    // fields are the only place the stored meaning can be seen to differ.
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+
+    const [schedule] = await service.list(OWNER)
+
+    expect(schedule.schedulerExpression).toBe("cron(0 8 * * ? *)")
+    expect(schedule.description).toBe("At 8:00 AM, every day")
+    expect(schedule.nextRuns).toHaveLength(3)
+    for (const run of schedule.nextRuns) {
+      expect(run).toMatch(/T08:00:00[-+]\d{2}:\d{2}$/)
+    }
+  })
+
+  it("reports no fire times for a disabled schedule", async () => {
+    // EventBridge holds a disabled schedule, so upcoming times would promise
+    // executions that never happen — in the field SKILL.md tells the agent to
+    // confirm the schedule from. The description still reads back the meaning.
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [scheduleRecord({ enabled: false })],
+    })
+
+    const [schedule] = await service.list(OWNER)
+
+    expect(schedule.enabled).toBe(false)
+    expect(schedule.description).toBe("At 8:00 AM, every day")
+    expect(schedule.nextRuns).toEqual([])
+  })
+
+  it("describes a legacy numeric day-of-week the way EventBridge reads it", async () => {
+    // 1-5 is SUN-THU here, not MON-FRI. The description is what makes that
+    // visible to an owner who never saw the expression.
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        scheduleRecord({
+          cronExpression: "30 6 * * 1-5",
+          schedulerExpression: "cron(30 6 ? * 1-5 *)",
+        }),
+      ],
+    })
+
+    const [schedule] = await service.list(OWNER)
+    expect(schedule.description).toBe("At 6:30 AM, on Sunday through Thursday")
+  })
+
+  it("still describes a degraded row, using its cron when no scheduler expression was stored", async () => {
+    const legacyId = "a273413f-7a93-4e43-9b49-1bc8880be024"
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        {
+          userId: OWNER,
+          scheduleId: legacyId,
+          name: "Legacy dispatch",
+          prompt: "Generate it",
+          cronExpression: "cron(0 6 ? * MON-FRI *)",
+          timezone: "America/Los_Angeles",
+          enabled: true,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          updatedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+    })
+
+    const [schedule] = await service.list(OWNER)
+    expect(schedule.degraded).toBe(true)
+    expect(schedule.schedulerExpression).toBe("cron(0 6 ? * MON-FRI *)")
+    expect(schedule.description).toBe("At 6:00 AM, on Monday through Friday")
+    expect(schedule.nextRuns).toHaveLength(3)
+  })
+
+  it("reports no fire times for a disabled degraded row either", async () => {
+    const legacyId = "a273413f-7a93-4e43-9b49-1bc8880be024"
+    const { service, dynamoSend } = harness()
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        {
+          userId: OWNER,
+          scheduleId: legacyId,
+          name: "Legacy dispatch",
+          prompt: "Generate it",
+          cronExpression: "cron(0 6 ? * MON-FRI *)",
+          timezone: "America/Los_Angeles",
+          enabled: false,
+          createdAt: "2026-07-24T00:00:00.000Z",
+          updatedAt: "2026-07-24T00:00:00.000Z",
+        },
+      ],
+    })
+
+    const [schedule] = await service.list(OWNER)
+    expect(schedule.enabled).toBe(false)
+    expect(schedule.description).toBe("At 6:00 AM, on Monday through Friday")
+    expect(schedule.nextRuns).toEqual([])
+  })
+})
