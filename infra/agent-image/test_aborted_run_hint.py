@@ -353,13 +353,19 @@ class TheRewriteRunsOnARealisticBundle(unittest.TestCase):
 
     def test_the_result_is_valid_javascript(self):
         # A replacement that produced a syntax error would break the whole
-        # gateway, not just this hint. JSON.stringify of the hint keeps the
-        # em dash and quoting safe; prove it.
-        _run_js(
-            f"import {{ rewriteAbortedRunHint }} from {json.dumps(HINT_MODULE)};\n"
-            f"const out = rewriteAbortedRunHint({json.dumps(self.BUNDLE)});\n"
-            "new Function(out.replace('async function', 'async function'));\n"
-            "process.stdout.write('ok');\n"
+        # gateway, not just this hint. The replacement text carries an em
+        # dash, a semicolon and parentheses, so prove the emitted assignment
+        # still parses: `new Function` raises SyntaxError if it does not.
+        self.assertEqual(
+            _run_js(
+                f"import {{ rewriteAbortedRunHint }} from "
+                f"{json.dumps(HINT_MODULE)};\n"
+                f"const out = rewriteAbortedRunHint("
+                f"{json.dumps(self.BUNDLE)});\n"
+                "new Function(out);\n"
+                "process.stdout.write('parsed');\n"
+            ),
+            "parsed",
         )
 
 
