@@ -62,7 +62,7 @@ function isYearField(field) {
   return field.split(",").every((segment) => {
     const pieces = segment.split("/");
     if (pieces.length > 2) return false;
-    if (pieces.length === 2 && !/^\d{1,3}$/.test(pieces[1])) return false;
+    if (pieces.length === 2 && !/^(?!0+$)\d{1,3}$/.test(pieces[1])) return false;
     if (pieces[0] === "*") return true;
     const bounds = pieces[0].split("-");
     return bounds.length <= 2 && bounds.every((token) => /^\d{4}$/.test(token));
@@ -171,6 +171,43 @@ function assertNamedDayOfWeek(field) {
   );
 }
 
+/**
+ * Numeric bound for a cron field, ignoring `*`, `?`, names and step syntax.
+ * Mirrors `numericValuesOutOfRange` in lib/agent-schedules/validation.ts.
+ */
+function numericValuesOutOfRange(field, min, max) {
+  if (!/^[\d*/,-]+$/.test(field)) return false;
+  return field.split(/[,/-]/).some((token) => {
+    if (token === "" || token === "*") return false;
+    const value = Number.parseInt(token, 10);
+    if (!Number.isInteger(value)) return false;
+    return value < min || value > max;
+  });
+}
+
+/**
+ * Mirrors the numeric-domain half of `validateCronFieldDomains` in
+ * lib/agent-schedules/validation.ts.
+ *
+ * The wrapped path used to check only the field count, the every-minute case
+ * and the day names, so `cron(99 99 99 99 ? *)` was accepted here and
+ * rejected at the broker — the extra round trip this client check exists to
+ * avoid.
+ */
+function assertFieldDomains(fields) {
+  const bounds = [
+    ["minute", 0, 59],
+    ["hour", 0, 23],
+    ["day-of-month", 1, 31],
+    ["month", 1, 12],
+  ];
+  for (const [index, [label, min, max]] of bounds.entries()) {
+    if (numericValuesOutOfRange(fields[index], min, max)) {
+      fail(`cron ${label} field must be ${min}-${max}`);
+    }
+  }
+}
+
 function validateWrappedExpression(expr) {
   const cronMatch = expr.match(/^cron\((.+)\)$/);
   if (cronMatch) {
@@ -180,6 +217,7 @@ function validateWrappedExpression(expr) {
       fail("Every-minute cron is not allowed. Minimum interval is 5 minutes.");
     }
     assertNamedDayOfWeek(fields[4]);
+    assertFieldDomains(fields);
     // Same year rule the unwrapped path enforces, so a hand-wrapped
     // `cron(...)` cannot smuggle a day name or a seconds field into field 6.
     if (!isYearField(fields[5])) {
@@ -187,6 +225,18 @@ function validateWrappedExpression(expr) {
         "the 6th cron field must be a 4-digit year or *. EventBridge takes " +
           "minute hour day-of-month month day-of-week year (no seconds " +
           "field).",
+      );
+    }
+    // Mirrors the `?`-exclusivity rule in validateCronFieldDomains. This is
+    // the check that catches a shifted expression whose every value is still
+    // in range: `cron(0 15 18 * * *)` reads to EventBridge as 15:00 on the
+    // 18th. Without it the unwrapped path is guarded and the hand-wrapped one
+    // is not, so an agent learns the rule only from the broker.
+    if (fields[2] !== "?" && fields[4] !== "?") {
+      fail(
+        "cron must use ? in exactly one of day-of-month / day-of-week. If " +
+          "you meant a daily time, the 5-field form is safer (e.g. " +
+          "`15 18 * * *` for 6:15pm daily) — the skill expands it correctly.",
       );
     }
     return expr;

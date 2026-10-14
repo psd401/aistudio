@@ -114,3 +114,37 @@ describe('an unwrapped 6-field cron must carry a YEAR in field 6', () => {
     );
   });
 });
+
+describe('the hand-wrapped cron path enforces the same rules as the server', () => {
+  test('rejects a wrapped expression with no ? in either day field', () => {
+    // cron(0 15 18 * * *) reads to EventBridge as 15:00 on the 18th. The
+    // unwrapped path was guarded and this one was not, so an agent that
+    // wrapped the expression itself learned the rule only from the broker.
+    const result = normalize('cron(0 15 18 * * *)');
+    expect(result.ok).toBe(false);
+    expect(result.stderr).toContain('? in exactly one');
+  });
+
+  test('still accepts a wrapped expression with ? in exactly one day field', () => {
+    expect(normalize('cron(0 8 1,15 * ? *)').stdout).toBe(
+      'cron(0 8 1,15 * ? *)',
+    );
+    expect(normalize('cron(0 9 ? * MON *)').stdout).toBe('cron(0 9 ? * MON *)');
+  });
+});
+
+describe('the wrapped path bounds its numeric fields locally', () => {
+  test('rejects out-of-range values without a broker round trip', () => {
+    expect(normalize('cron(99 6 ? * MON *)').stderr).toContain('minute');
+    expect(normalize('cron(0 99 ? * MON *)').stderr).toContain('hour');
+    expect(normalize('cron(0 6 45 * ? *)').stderr).toContain('day-of-month');
+    expect(normalize('cron(0 6 ? 13 * *)').stderr).toContain('month');
+  });
+
+  test('leaves in-range wrapped expressions alone', () => {
+    expect(normalize('cron(59 23 ? * SAT *)').stdout).toBe(
+      'cron(59 23 ? * SAT *)',
+    );
+    expect(normalize('cron(0 0 31 12 ? *)').stdout).toBe('cron(0 0 31 12 ? *)');
+  });
+});

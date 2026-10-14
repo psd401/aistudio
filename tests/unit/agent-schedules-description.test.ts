@@ -195,3 +195,112 @@ describe("describeScheduleExpression — next fire times", () => {
     ).toEqual([])
   })
 })
+
+describe("describeScheduleExpression — shapes an owner can really create", () => {
+  it("handles a day-of-week range that wraps the week", () => {
+    // Neither validator orders the day names, so FRI-MON is storable. It must
+    // read back as the four days EventBridge will actually fire on.
+    const { description, nextRuns } = describeScheduleExpression(
+      "cron(0 7 ? * FRI-MON *)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT, count: 4 }
+    )
+    // Listed in calendar order, not the order the range was typed — the set
+    // is what matters, and Sun-first matches how the days are numbered.
+    expect(description).toBe(
+      "At 7:00 AM, on Sunday, Monday, Friday, and Saturday"
+    )
+    // Monday 09:00 has passed 07:00, so Friday is next, then Sat/Sun/Mon.
+    expect(nextRuns).toEqual([
+      "2026-10-16T07:00:00-07:00",
+      "2026-10-17T07:00:00-07:00",
+      "2026-10-18T07:00:00-07:00",
+      "2026-10-19T07:00:00-07:00",
+    ])
+  })
+
+  it("handles a month range that wraps the year", () => {
+    const { description, nextRuns } = describeScheduleExpression(
+      "cron(0 9 1 NOV-FEB ? *)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(description).toBe(
+      "At 9:00 AM, on day 1 of the month in January, February, November, and December"
+    )
+    expect(nextRuns).toEqual([
+      "2026-11-01T09:00:00-08:00",
+      "2026-12-01T09:00:00-08:00",
+      "2027-01-01T09:00:00-08:00",
+    ])
+  })
+
+  it("describes a three-times-a-day schedule by listing the hours", () => {
+    const { description, nextRuns } = describeScheduleExpression(
+      "cron(0 6,12,18 * * ? *)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(description).toBe("At 6:00 AM, 12:00 PM, and 6:00 PM, every day")
+    expect(nextRuns).toEqual([
+      "2026-10-12T12:00:00-07:00",
+      "2026-10-12T18:00:00-07:00",
+      "2026-10-13T06:00:00-07:00",
+    ])
+  })
+
+  it("falls back to naming the raw fields when both time fields are sets", () => {
+    const { description } = describeScheduleExpression(
+      "cron(0,30 6,18 * * ? *)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(description).toBe("At minute 0,30 of hour 6,18, every day")
+  })
+
+  it("names the year when the expression is pinned to one", () => {
+    const { description } = describeScheduleExpression(
+      "cron(0 9 * * ? 2027)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(description).toBe("At 9:00 AM, every day in 2027")
+  })
+
+  it("falls back rather than half-describing an out-of-range at()", () => {
+    // validation.ts's at() rule checks digit shape, not range, so a record
+    // like this can already exist. It must not read back as
+    // "Once, on undefined 45, 2026".
+    const result = describeScheduleExpression(
+      "at(2026-13-45T09:00:00)",
+      PACIFIC,
+      { now: MONDAY_9AM_PDT }
+    )
+    expect(result.description).toBe("at(2026-13-45T09:00:00)")
+    expect(result.nextRuns).toEqual([])
+  })
+})
+
+describe("describeScheduleExpression — search horizon", () => {
+  it("finds every occurrence in a year set that straddles the default horizon", () => {
+    // 2033 is past the five-year default walk. Returning only the 2027 run
+    // would have silently dropped a real future fire time.
+    const { nextRuns } = describeScheduleExpression(
+      "cron(0 9 1 6 ? 2027,2033)",
+      PACIFIC,
+      { now: new Date("2026-01-01T17:00:00Z") }
+    )
+    expect(nextRuns).toEqual([
+      "2027-06-01T09:00:00-07:00",
+      "2033-06-01T09:00:00-07:00",
+    ])
+  })
+
+  it("still returns nothing once a pinned year has fully passed", () => {
+    expect(
+      describeScheduleExpression("cron(0 9 1 6 ? 2020)", PACIFIC, {
+        now: MONDAY_9AM_PDT,
+      }).nextRuns
+    ).toEqual([])
+  })
+})

@@ -91,3 +91,28 @@ describe("auditSchedule", () => {
     expect(finding?.enabled).toBe(true)
   })
 })
+
+describe("auditSchedule — restriction detection", () => {
+  it("flags a daily-named schedule that fires only every fifth day", () => {
+    // A step is still a restriction. Treating any field containing a star as
+    // unrestricted let this one through unreported.
+    const finding = auditSchedule(
+      schedule({
+        name: "Daily report",
+        schedulerExpression: "cron(0 9 */5 * ? *)",
+      })
+    )
+    expect(finding?.issues[0]).toMatch(/fires only on specific days of the month/)
+  })
+
+  it("does not flag a step of one, which is every day", () => {
+    expect(
+      auditSchedule(
+        schedule({
+          name: "Daily report",
+          schedulerExpression: "cron(0 9 */1 * ? *)",
+        })
+      )
+    ).toBeNull()
+  })
+})

@@ -69,8 +69,11 @@ export interface ScheduleSummary {
   /**
    * Upcoming fire times as ISO 8601 with the schedule timezone's UTC offset,
    * e.g. `2026-10-14T06:30:00-07:00`. Empty when the expression has no
-   * computable occurrences (an unsupported cron extension, a past `at(...)`,
-   * or a year field already in the past).
+   * computable occurrences: an unsupported cron extension, a past `at(...)`,
+   * a year field already in the past, or no match inside the search horizon
+   * (five years, or the end of the expression's own last year when it pins
+   * one). Fewer than `count` entries means the horizon was reached, not that
+   * the schedule stops.
    */
   nextRuns: string[];
 }
@@ -78,7 +81,10 @@ export interface ScheduleSummary {
 export interface DescribeScheduleOptions {
   /** Instant to compute from. Defaults to now; injected by tests. */
   now?: Date;
-  /** How many upcoming fire times to return. Defaults to 3. */
+  /**
+   * How many upcoming fire times to return. Defaults to 3, which is what
+   * every production caller uses; tests widen it to span a DST boundary.
+   */
   count?: number;
 }
 
@@ -99,8 +105,18 @@ interface ZonedParts extends CivilDate {
  * `Intl` is the only timezone database available here; `formatToParts` with
  * `hourCycle: "h23"` avoids the 24-vs-0 midnight discrepancy between runtimes.
  */
-function zonedParts(timestamp: number, timeZone: string): ZonedParts {
-  const parts = new Intl.DateTimeFormat("en-US", {
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * Formatters are reused per timezone: constructing one is the expensive part
+ * of `Intl`, and a single list() of 50 schedules resolves a few hundred
+ * wall-clock times. The cache is keyed by timezone only, since every call
+ * uses the same options, and holds at most one entry per IANA zone.
+ */
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = formatterCache.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
     year: "numeric",
@@ -108,7 +124,13 @@ function zonedParts(timestamp: number, timeZone: string): ZonedParts {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).formatToParts(new Date(timestamp));
+  });
+  formatterCache.set(timeZone, formatter);
+  return formatter;
+}
+
+function zonedParts(timestamp: number, timeZone: string): ZonedParts {
+  const parts = zoneFormatter(timeZone).formatToParts(new Date(timestamp));
   const lookup: Record<string, string> = {};
   for (const part of parts) lookup[part.type] = part.value;
   return {
@@ -181,13 +203,7 @@ function formatZonedIso(timestamp: number, timeZone: string): string {
   );
 }
 
-/**
- * Expand a cron field into the set of values it matches.
- *
- * Returns null for anything outside the subset this module reasons about —
- * notably the `L`, `W` and `#` extensions — so callers can report "no computed
- * fire times" rather than a confidently wrong one.
- */
+/** The values one cron-field segment covers, before expansion. */
 interface FieldRange {
   start: number;
   end: number;
@@ -341,10 +357,25 @@ function nextCronRuns(
   const runs: number[] = [];
   const lastYear = parsed.years ? Math.max(...parsed.years) : null;
   const start = zonedParts(from, timeZone);
+  // A pinned year set can sit beyond the default horizon — `2027,2033` would
+  // have returned only the 2027 occurrence and silently dropped the other.
+  // Walking to the end of the last named year costs only arithmetic, since
+  // non-matching days never touch Intl.
+  const searchDays =
+    lastYear === null
+      ? MAX_SEARCH_DAYS
+      : Math.max(
+          0,
+          Math.ceil(
+            (Date.UTC(lastYear + 1, 0, 1) -
+              Date.UTC(start.year, start.month - 1, start.day)) /
+              DAY_MS,
+          ),
+        );
   // Walk civil days in the schedule's timezone, anchored at local noon so a
   // DST shift never moves the cursor onto the wrong calendar day.
   const cursor = Date.UTC(start.year, start.month - 1, start.day, 12);
-  for (let offset = 0; offset < MAX_SEARCH_DAYS && runs.length < count; offset += 1) {
+  for (let offset = 0; offset < searchDays && runs.length < count; offset += 1) {
     const civil = new Date(cursor + offset * DAY_MS);
     const date: CivilDate = {
       year: civil.getUTCFullYear(),
@@ -451,6 +482,53 @@ function rateIntervalMs(count: number, unit: string): number {
 }
 
 /**
+ * Describe a one-shot `at(...)`, or null when the expression is not one.
+ *
+ * Range-checked, not just shape-checked: the regex and validation.ts's own
+ * `at(...)` rule both accept any two digits, so a record holding
+ * `at(2026-13-45T09:00:00)` can already exist. Returning the fallback for
+ * those keeps a half-garbled "Once, on undefined 45, 2026" out of the
+ * response.
+ */
+function describeAt(
+  expression: string,
+  timeZone: string,
+  now: number,
+): ScheduleSummary | null {
+  const at = expression.match(
+    /^at\((\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\)$/,
+  );
+  if (!at) return null;
+  const date: CivilDate = {
+    year: Number.parseInt(at[1], 10),
+    month: Number.parseInt(at[2], 10),
+    day: Number.parseInt(at[3], 10),
+  };
+  const hour = Number.parseInt(at[4], 10);
+  const minute = Number.parseInt(at[5], 10);
+  if (
+    date.month < 1 ||
+    date.month > 12 ||
+    date.day < 1 ||
+    date.day > 31 ||
+    hour > 23 ||
+    minute > 59
+  ) {
+    return { description: expression, nextRuns: [] };
+  }
+  const instant = wallClockToInstant(timeZone, date, hour, minute);
+  return {
+    description:
+      `Once, on ${MONTH_NAMES[date.month - 1]} ${date.day}, ${date.year} ` +
+      `at ${formatClock(hour, minute)}`,
+    nextRuns:
+      instant !== null && instant > now
+        ? [formatZonedIso(instant, timeZone)]
+        : [],
+  };
+}
+
+/**
  * Describe a normalized EventBridge Scheduler expression and compute its next
  * fire times in the schedule's own timezone.
  *
@@ -467,7 +545,6 @@ export function describeScheduleExpression(
   const count = options.count ?? DEFAULT_OCCURRENCE_COUNT;
   const fallback: ScheduleSummary = { description: expression, nextRuns: [] };
   const zone = timeZone;
-  if (count < 1) return fallback;
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: zone });
   } catch {
@@ -476,24 +553,8 @@ export function describeScheduleExpression(
 
   const trimmed = expression.trim();
 
-  const at = trimmed.match(/^at\((\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\)$/);
-  if (at) {
-    const date: CivilDate = {
-      year: Number.parseInt(at[1], 10),
-      month: Number.parseInt(at[2], 10),
-      day: Number.parseInt(at[3], 10),
-    };
-    const hour = Number.parseInt(at[4], 10);
-    const minute = Number.parseInt(at[5], 10);
-    const instant = wallClockToInstant(zone, date, hour, minute);
-    const description =
-      `Once, on ${MONTH_NAMES[date.month - 1]} ${date.day}, ${date.year} ` +
-      `at ${formatClock(hour, minute)}`;
-    return {
-      description,
-      nextRuns: instant !== null && instant > now ? [formatZonedIso(instant, zone)] : [],
-    };
-  }
+  const at = describeAt(trimmed, zone, now);
+  if (at) return at;
 
   const rate = trimmed.match(/^rate\((\d+)\s+(minutes?|hours?|days?)\)$/);
   if (rate) {

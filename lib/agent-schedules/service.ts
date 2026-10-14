@@ -271,6 +271,10 @@ function publicSchedule(
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
 ): PublicAgentSchedule {
+  const summary = describeScheduleExpression(
+    record.schedulerExpression,
+    record.timezone,
+  );
   return {
     scheduleId: record.scheduleId,
     version: record.version,
@@ -278,7 +282,8 @@ function publicSchedule(
     prompt: record.prompt,
     cronExpression: record.cronExpression,
     schedulerExpression: record.schedulerExpression,
-    ...describeScheduleExpression(record.schedulerExpression, record.timezone),
+    description: summary.description,
+    nextRuns: summary.nextRuns,
     timezone: record.timezone,
     enabled: record.enabled,
     createdAt: record.createdAt,
@@ -316,6 +321,7 @@ function publicDegradedSchedule(
     degradedString(value.cronExpression, 256, ""),
   );
   const timezone = degradedString(value.timezone, 100, DEFAULT_TIMEZONE);
+  const summary = describeScheduleExpression(schedulerExpression, timezone);
   return {
     scheduleId: degradedString(value.scheduleId, 128, "unknown"),
     version:
@@ -326,7 +332,8 @@ function publicDegradedSchedule(
     prompt: degradedString(value.prompt, 20_000, ""),
     cronExpression: degradedString(value.cronExpression, 256, ""),
     schedulerExpression,
-    ...describeScheduleExpression(schedulerExpression, timezone),
+    description: summary.description,
+    nextRuns: summary.nextRuns,
     timezone,
     enabled: typeof value.enabled === "boolean" ? value.enabled : false,
     createdAt: degradedString(value.createdAt, 64, ""),

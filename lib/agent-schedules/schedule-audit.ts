@@ -83,9 +83,22 @@ function nameSuggestsDaily(name: string): boolean {
   return DAILY_NAME_RE.test(name) || WEEKDAY_NAME_RE.test(name);
 }
 
+/**
+ * Does this field restrict which days/months fire?
+ *
+ * `*` and `?` do not, and neither does a step of one. A larger step DOES —
+ * that is the shape an "every 5th day of the month" expression takes, and
+ * treating any field containing a star as unrestricted missed it, so a
+ * schedule named "Daily report" that fires only every fifth day went
+ * unreported.
+ */
+function isRestricted(field: string): boolean {
+  return !isWildcard(field) && field !== "*/1";
+}
+
 function firesMonthlyOrYearly(fields: string[]): string | null {
-  const dayOfMonthPinned = !isWildcard(fields[2]) && !fields[2].includes("*");
-  const monthPinned = !isWildcard(fields[3]) && !fields[3].includes("*");
+  const dayOfMonthPinned = isRestricted(fields[2]);
+  const monthPinned = isRestricted(fields[3]);
   const yearPinned = fields[5] !== "*";
   if (yearPinned) return "fires only in a fixed year";
   if (monthPinned) return "fires only in specific months";
@@ -119,10 +132,15 @@ export function auditSchedule(schedule: StoredSchedule): ScheduleFinding | null 
     // The classic misread: a seconds-first cron whose seconds landed in the
     // minute slot and whose hour landed in day-of-month. `0 15 18 * ? *` at
     // minute 0 with an hour-sized day-of-month is that shape.
+    // `fields[4] === "?"` is implied by EventBridge's own rule (if
+    // day-of-month is concrete, day-of-week must be `?`), but stating it
+    // keeps this rewrite from clobbering a day-of-week suggestion computed
+    // above should a row ever reach here without that invariant.
     if (
       fields[0] === "0" &&
       /^\d{1,2}$/.test(fields[2]) &&
-      Number.parseInt(fields[2], 10) <= 23
+      Number.parseInt(fields[2], 10) <= 23 &&
+      fields[4] === "?"
     ) {
       suggested[0] = fields[1];
       suggested[1] = fields[2];

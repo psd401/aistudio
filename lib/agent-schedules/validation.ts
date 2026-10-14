@@ -166,7 +166,9 @@ function isYearField(field: string): boolean {
   return field.split(",").every((segment) => {
     const pieces = segment.split("/");
     if (pieces.length > 2) return false;
-    if (pieces.length === 2 && !/^\d{1,3}$/.test(pieces[1])) return false;
+    // `(?!0+$)` rejects a zero step: `2024/0` is nonsense, and accepting it
+    // here would let it reach AWS as an opaque 400.
+    if (pieces.length === 2 && !/^(?!0+$)\d{1,3}$/.test(pieces[1])) return false;
     if (pieces[0] === "*") return true;
     const bounds = pieces[0].split("-");
     return (
