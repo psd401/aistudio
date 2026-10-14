@@ -31,7 +31,14 @@ export interface ScheduledRunRecord {
   inputTokens: number;
   outputTokens: number;
   latencyMs: number;
-  status: 'success' | 'error' | 'skipped' | 'promoted';
+  /**
+   * `deferred` means the agent answered but the Chat post did NOT happen and
+   * was handed to the durable retry queue. It is deliberately NOT `success`:
+   * the owner has nothing yet. The router resolves it to `success` or `error`
+   * when the queued delivery finishes (#1890), which is what the background
+   * job path has always done (`recordCompletedJobResult`).
+   */
+  status: 'success' | 'error' | 'skipped' | 'promoted' | 'deferred';
   errorMessage?: string;
   failure?: {
     severity: 'error' | 'warn';
@@ -49,7 +56,22 @@ export interface RunTelemetryRdsClient {
   execute(input: ExecuteStatementCommandInput): Promise<unknown>;
 }
 
+/** One historical run, newest-first, as the failure-notice rule reads it. */
+export interface ScheduleRunStatusRow {
+  status: string;
+  errorMessage: string | null;
+}
+
 export interface RunTelemetry {
+  /**
+   * Recent terminal statuses for one schedule, newest first. Used to decide
+   * whether this owner has already been told the schedule is failing — the
+   * run history IS the suppression state, so no extra store can drift from it.
+   */
+  recentRunStatuses(
+    params: { userEmail: string; scheduleId: string; limit?: number },
+    log: CronTelemetryLogger,
+  ): Promise<ScheduleRunStatusRow[] | null>;
   recordPreflightRun(
     params: ScheduledRunRecord,
     log: CronTelemetryLogger,
@@ -106,6 +128,71 @@ function firstStringValue(result: unknown): string | undefined {
     }
   ).records?.[0]?.[0]?.stringValue;
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Map `SELECT status, error_message` rows out of an RDS Data API result.
+ *
+ * A row whose status is not a string is dropped rather than coerced: a
+ * mis-shaped row must not read as a success and silently break a failure
+ * streak the owner needs to hear about.
+ */
+function statusRows(result: unknown): ScheduleRunStatusRow[] {
+  if (!result || typeof result !== 'object') return [];
+  const records = (
+    result as {
+      records?: Array<
+        Array<{ stringValue?: unknown; isNull?: unknown }>
+      >;
+    }
+  ).records;
+  if (!Array.isArray(records)) return [];
+  const rows: ScheduleRunStatusRow[] = [];
+  for (const record of records) {
+    const status = record?.[0]?.stringValue;
+    if (typeof status !== 'string') continue;
+    const errorMessage = record?.[1]?.stringValue;
+    rows.push({
+      status,
+      errorMessage: typeof errorMessage === 'string' ? errorMessage : null,
+    });
+  }
+  return rows;
+}
+
+/**
+ * Recent terminal statuses for one schedule, newest first.
+ *
+ * Bounded by `limit` because this only has to see far enough back to find the
+ * last success and whether the owner was already told about this streak.
+ */
+export async function readRecentRunStatuses(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { userEmail: string; scheduleId: string; limit?: number },
+): Promise<ScheduleRunStatusRow[]> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  // Floored as well as clamped: a fraction reaching Postgres is an error, not
+  // a smaller page.
+  const limit = Math.floor(Math.min(Math.max(1, params.limit ?? 12), 50));
+  const result = await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: `SELECT status, error_message
+          FROM agent_scheduled_runs
+          WHERE user_id = :user_id
+            AND schedule_id = :schedule_id
+          ORDER BY created_at DESC, id DESC
+          LIMIT ${limit}`,
+    parameters: [
+      { name: 'user_id', value: { stringValue: params.userEmail } },
+      { name: 'schedule_id', value: { stringValue: params.scheduleId } },
+    ],
+  });
+  return statusRows(result);
 }
 
 function updatedRecordCount(result: unknown): 0 | 1 {
@@ -668,6 +755,34 @@ function createPreflightRecorder(
   };
 }
 
+/**
+ * Best-effort reader of a schedule's recent statuses.
+ *
+ * `null` means "history unreadable", which the caller must treat as "do not
+ * notify" rather than "no failures". Guessing either way from a read error
+ * would produce the exact noise the suppression rule exists to prevent.
+ */
+function createRecentRunStatusesReader(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  databaseConfigured: boolean,
+): RunTelemetry['recentRunStatuses'] {
+  return async (params, log) => {
+    if (!databaseConfigured) return null;
+    try {
+      return await readRecentRunStatuses(config, rdsDataClient, params);
+    } catch (error) {
+      log.warn('Failed to read recent scheduled-run statuses', {
+        scheduleId: params.scheduleId,
+        error: sanitizeDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ),
+      });
+      return null;
+    }
+  };
+}
+
 export function createRunTelemetry(
   config: RunTelemetryConfig,
   rdsDataClient: RunTelemetryRdsClient,
@@ -675,6 +790,8 @@ export function createRunTelemetry(
   const databaseConfigured =
     config.databaseResourceArn.length > 0 &&
     config.databaseSecretArn.length > 0;
+  const recentRunStatuses =
+    createRecentRunStatusesReader(config, rdsDataClient, databaseConfigured);
 
   function logCronFailure(
     params: CronFailureRecord,
@@ -834,6 +951,7 @@ export function createRunTelemetry(
   }
 
   return {
+    recentRunStatuses,
     recordPreflightRun,
     recordRun,
     recordRunStrict,

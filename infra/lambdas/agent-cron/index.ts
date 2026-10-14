@@ -64,9 +64,14 @@ import {
 import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
 import { fitChatMessageText } from './chat-text-budget';
 import {
+  createAgentRequestProof,
   createScheduledInvocationContextToken,
   deriveScheduledRequestProofKey,
 } from './invocation-context';
+import {
+  buildScheduleFailureNoticeText,
+  decideScheduleFailureNotice,
+} from './schedule-failure-notice';
 import {
   loadAuthorizedSchedule,
   type AuthorizedSchedule,
@@ -240,6 +245,12 @@ const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
 const ROUTER_QUEUE_URL = process.env.ROUTER_QUEUE_URL || '';
 const SCHEDULE_RECONCILIATION_QUEUE_URL =
   process.env.SCHEDULE_RECONCILIATION_QUEUE_URL || '';
+// Web-tier broker, used only to mint the owner's re-authorization link when a
+// schedule fails on a revoked Google grant (#1890). Unset → the failure DM
+// still goes out, with the reply-to-me wording instead of a link.
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
+const AGENT_INTERNAL_API_KEY_SECRET_ID =
+  process.env.AGENT_INTERNAL_API_KEY_SECRET_ID || '';
 
 const runTelemetry = createRunTelemetry(
   {
@@ -266,6 +277,9 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000;
 
 let cachedInvocationSigningSecret: string | null = null;
 let invocationSigningSecretCachedAt: number | null = null;
+
+let cachedInternalApiKey: string | null = null;
+let internalApiKeyCachedAt: number | null = null;
 
 
 // ---------------------------------------------------------------------------
@@ -343,6 +357,121 @@ async function getInvocationSigningSecret(): Promise<string> {
   cachedInvocationSigningSecret = secret;
   invocationSigningSecretCachedAt = Date.now();
   return secret;
+}
+
+/**
+ * Internal API key for the Next.js `/api/agent/*` broker, mirroring the
+ * router. Returns `null` when unconfigured so the caller fails closed to the
+ * link-free wording rather than issuing an unauthenticated request.
+ */
+async function getInternalApiKey(): Promise<string | null> {
+  if (process.env.AGENT_INTERNAL_API_KEY) {
+    return process.env.AGENT_INTERNAL_API_KEY;
+  }
+  if (
+    cachedInternalApiKey
+    && internalApiKeyCachedAt
+    && Date.now() - internalApiKeyCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedInternalApiKey;
+  }
+  if (!AGENT_INTERNAL_API_KEY_SECRET_ID) return null;
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({
+      SecretId: AGENT_INTERNAL_API_KEY_SECRET_ID,
+    }),
+  );
+  cachedInternalApiKey = result.SecretString || '';
+  internalApiKeyCachedAt = Date.now();
+  return cachedInternalApiKey;
+}
+
+const CONSENT_LINK_ROUTE = '/api/agent/consent-link';
+const CONSENT_LINK_TIMEOUT_MS = 5000;
+
+/**
+ * Mint the owner's Google re-authorization link for a failure DM (#1890).
+ *
+ * Deliberately best-effort and `null` on every failure: the owner must still
+ * hear that their schedule is broken even if the link cannot be issued (the
+ * broker rate-limits consent links to 20/hour per owner), so the DM text has a
+ * link-free fallback. The owner is taken from the authoritative schedule
+ * record and bound into the signed context — the broker derives it from there
+ * and rejects any body selector.
+ */
+async function mintOwnerConsentLink(
+  schedule: AuthorizedSchedule,
+  sessionId: string,
+  log: Logger,
+): Promise<string | null> {
+  if (!APP_BASE_URL) return null;
+  try {
+    const apiKey = await getInternalApiKey();
+    if (!apiKey) return null;
+    const invocationSecret = await getInvocationSigningSecret();
+    const invocationContext = createScheduledInvocationContextToken(
+      invocationSecret,
+      {
+        ownerEmail: schedule.ownerEmail,
+        sessionId,
+        workspacePrefix: schedule.workspacePrefix,
+      },
+    );
+    const requestBody = JSON.stringify({ kind: 'user_account' });
+    const response = await fetch(
+      `${APP_BASE_URL.replace(/\/+$/, '')}${CONSENT_LINK_ROUTE}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'X-Agent-Invocation-Context': invocationContext,
+          ...createAgentRequestProof(
+            deriveScheduledRequestProofKey(
+              invocationSecret,
+              invocationContext,
+            ),
+            {
+              method: 'POST',
+              route: CONSENT_LINK_ROUTE,
+              body: requestBody,
+            },
+          ),
+        },
+        body: requestBody,
+        signal: AbortSignal.timeout(CONSENT_LINK_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      log.warn('Consent link for a failing schedule returned non-OK', {
+        httpStatus: response.status,
+        scheduleId: schedule.scheduleId,
+      });
+      return null;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      url?: unknown;
+    };
+    // Only an absolute https URL on the app's own origin reaches the owner: a
+    // Chat hyperlink is a click target, so an unexpected shape is dropped
+    // rather than rendered.
+    if (typeof body.url !== 'string') return null;
+    const expectedOrigin = new URL(APP_BASE_URL).origin;
+    const parsed = new URL(body.url, expectedOrigin);
+    if (parsed.protocol !== 'https:' || parsed.origin !== expectedOrigin) {
+      log.warn('Consent link had an unexpected origin', {
+        scheduleId: schedule.scheduleId,
+      });
+      return null;
+    }
+    return parsed.toString();
+  } catch (error) {
+    log.warn('Failed to mint a consent link for a failing schedule', {
+      scheduleId: schedule.scheduleId,
+      error: errorDetail(error),
+    });
+    return null;
+  }
 }
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
@@ -1327,6 +1456,7 @@ async function enqueueScheduledChatDelivery(
   text: string,
   requestId: string,
   log: Logger,
+  fireKey?: string,
 ): Promise<void> {
   if (!ROUTER_QUEUE_URL) {
     throw new Error('ROUTER_QUEUE_URL is not configured');
@@ -1335,6 +1465,7 @@ async function enqueueScheduledChatDelivery(
     spaceName,
     text,
     requestId,
+    fireKey,
   );
   if (
     Buffer.byteLength(messageBody, 'utf8') >
@@ -1379,6 +1510,7 @@ function buildScheduledChatDeliveryEnvelope(
   spaceName: string,
   text: string,
   requestId: string,
+  fireKey?: string,
 ): string {
   return JSON.stringify({
     kind: 'agent-chat-delivery-v1',
@@ -1389,6 +1521,11 @@ function buildScheduledChatDeliveryEnvelope(
       durableDelivery: false,
       deliveryRequestId: requestId,
     },
+    // Optional: the router resolves the `deferred` run row this fire left
+    // behind. A fire with no key (a legacy invocation that carries no
+    // occurrence identity) simply omits it; the row then stays `deferred`,
+    // which is still truthful — it is never silently promoted to success.
+    ...(fireKey ? { scheduledRun: { fireKey } } : {}),
   });
 }
 
@@ -1752,11 +1889,21 @@ async function tryPromoteScheduledResult(
 interface ScheduledDeliveryDependencies {
   sendPreparedChatMessage: typeof sendPreparedChatMessage;
   recordThreadSession: typeof recordThreadSession;
+  enqueueScheduledChatDelivery: typeof enqueueScheduledChatDelivery;
+  recordRun: typeof runTelemetry.recordRun;
+  recentRunStatuses: typeof runTelemetry.recentRunStatuses;
+  sendChatMessage: typeof sendChatMessage;
+  mintOwnerConsentLink: typeof mintOwnerConsentLink;
 }
 
 const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
   sendPreparedChatMessage,
   recordThreadSession,
+  enqueueScheduledChatDelivery,
+  recordRun: (...args) => runTelemetry.recordRun(...args),
+  recentRunStatuses: (...args) => runTelemetry.recentRunStatuses(...args),
+  sendChatMessage,
+  mintOwnerConsentLink,
 };
 
 function deliverScheduledResult(
@@ -1781,7 +1928,7 @@ async function deliverScheduledResultWithDependencies(
       scheduleId: schedule.scheduleId,
       scheduleName,
     });
-    return recordScheduledCompletion(context);
+    return recordScheduledCompletion(context, dependencies);
   }
   const deliveryText = `📋 **${scheduleName}**\n\n${result.response}`;
   const preparedDelivery = prepareScheduledChatMessage(
@@ -1790,7 +1937,9 @@ async function deliverScheduledResultWithDependencies(
     log,
   );
   const deliveryRequestId = crypto.randomUUID();
-  let deliveredThreadName: string | null = null;
+  // Uninitialized: every path out of the catch below now returns, so a
+  // placeholder would only be dead weight.
+  let deliveredThreadName: string | null;
   try {
     deliveredThreadName = await dependencies.sendPreparedChatMessage(
       schedule.dmSpaceName,
@@ -1801,11 +1950,14 @@ async function deliverScheduledResultWithDependencies(
   } catch (error) {
     const initialDetail = errorDetail(error);
     try {
-      await enqueueScheduledChatDelivery(
+      await dependencies.enqueueScheduledChatDelivery(
         schedule.dmSpaceName,
         preparedDelivery.retryText,
         deliveryRequestId,
         log,
+        // Carries THIS fire's identity so the router can resolve the deferred
+        // run row once the queued post lands (or dead-letters).
+        context.fireIdentity?.key,
       );
     } catch (enqueueError) {
       const enqueueDetail = errorDetail(enqueueError);
@@ -1814,7 +1966,7 @@ async function deliverScheduledResultWithDependencies(
         enqueueError: enqueueDetail,
         deliveryRequestId,
       });
-      await runTelemetry.recordRun(
+      await dependencies.recordRun(
         {
           fireKey: context.fireIdentity?.key,
           userEmail: schedule.ownerEmail,
@@ -1833,6 +1985,16 @@ async function deliverScheduledResultWithDependencies(
       );
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
+    // The post did NOT happen; it is on the retry queue. Recording this as
+    // success is the bug in #1890 — a run row said the brief was delivered
+    // while the owner had nothing, and nothing ever came back to correct it.
+    // The row is resolved by the router when the queued delivery finishes.
+    return recordScheduledDeferral(
+      context,
+      initialDetail,
+      deliveryRequestId,
+      dependencies,
+    );
   }
   // A reply in this thread is about THIS post, so point it at the run's
   // transcript instead of the generic space+thread session the router would
@@ -1869,7 +2031,7 @@ async function deliverScheduledResultWithDependencies(
     deliveredThreadName,
     dependencies,
   );
-  return recordScheduledCompletion(context);
+  return recordScheduledCompletion(context, dependencies);
 }
 
 /**
@@ -1896,12 +2058,116 @@ async function recordScheduledThreadSession(
   );
 }
 
+/**
+ * Record a run whose answer exists but whose Chat post is still on the retry
+ * queue, and tell the owner if this is the run that makes the schedule
+ * visibly broken.
+ *
+ * Returns `error` rather than `success`: the owner has nothing in hand yet.
+ * Nothing acts on this value (the Lambda's return is observational), so the
+ * honest status costs nothing and a misleading one costs a month of silence.
+ */
+async function recordScheduledDeferral(
+  context: ScheduledResultContext,
+  deliveryDetail: string,
+  deliveryRequestId: string,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  const errorMessage =
+    `Chat delivery failed and was queued for retry: ${deliveryDetail}`;
+  await dependencies.recordRun(
+    {
+      fireKey: context.fireIdentity?.key,
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status: 'deferred',
+      errorMessage,
+    },
+    log,
+  );
+  log.warn('Scheduled response deferred to the durable retry queue', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    deliveryRequestId,
+    hasFireKey: Boolean(context.fireIdentity?.key),
+  });
+  await notifyOwnerIfScheduleFailing(context, errorMessage, dependencies);
+  return { status: 'error', scheduleId: schedule.scheduleId };
+}
+
+/**
+ * One Chat DM to the schedule's owner when their standing job has become
+ * visibly broken (#1890).
+ *
+ * Entirely best-effort: a scheduled run that actually worked must never be
+ * reported as failed because a courtesy DM could not be sent.
+ */
+async function notifyOwnerIfScheduleFailing(
+  context: ScheduledResultContext,
+  errorMessage: string | null,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, log } = context;
+  try {
+    const rows = await dependencies.recentRunStatuses(
+      {
+        userEmail: schedule.ownerEmail,
+        scheduleId: schedule.scheduleId,
+      },
+      log,
+    );
+    // `null` is "history unreadable", not "no failures" — staying quiet is the
+    // only safe reading, since the threshold and the suppression both live in
+    // these rows.
+    if (!rows) return;
+    const decision = decideScheduleFailureNotice(rows);
+    if (!decision.notify) return;
+    const consentUrl =
+      decision.reason === 'auth'
+        ? await dependencies.mintOwnerConsentLink(schedule, sessionId, log)
+        : null;
+    await dependencies.sendChatMessage(
+      schedule.dmSpaceName,
+      buildScheduleFailureNoticeText({
+        scheduleName,
+        reason: decision.reason,
+        consecutiveFailures: decision.consecutiveFailures,
+        errorMessage,
+        consentUrl,
+      }),
+      log,
+    );
+    log.warn('Told the owner their schedule is failing', {
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      reason: decision.reason,
+      consecutiveFailures: decision.consecutiveFailures,
+      hasConsentUrl: Boolean(consentUrl),
+    });
+  } catch (error) {
+    log.error('Failed to notify the owner of a failing schedule', {
+      scheduleId: schedule.scheduleId,
+      error: errorDetail(error),
+    });
+  }
+}
+
 async function recordScheduledCompletion(
   context: ScheduledResultContext,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
-  await runTelemetry.recordRun(
+  const errorMessage = result.ok
+    ? undefined
+    : result.response.substring(0, 500);
+  await dependencies.recordRun(
     {
       fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
@@ -1912,10 +2178,17 @@ async function recordScheduledCompletion(
       outputTokens: result.outputTokens,
       latencyMs: Date.now() - startTime,
       status,
-      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
+      errorMessage,
     },
     log,
   );
+  if (status === 'error') {
+    await notifyOwnerIfScheduleFailing(
+      context,
+      errorMessage ?? null,
+      dependencies,
+    );
+  }
   log.info('Scheduled task completed', {
     scheduleId: schedule.scheduleId,
     scheduleName,
@@ -2518,6 +2791,7 @@ export const agentCronTestHelpers = {
   shouldRetainScheduledTurnLock,
   deliverScheduledResult,
   deliverScheduledResultWithDependencies,
+  scheduledDeliveryDependencies,
 };
 
 export async function handler(

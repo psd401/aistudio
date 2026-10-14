@@ -3180,12 +3180,21 @@ interface ChatResponseInput {
   deliveryContext: ChatResponseDeliveryContext;
 }
 
+/**
+ * The scheduled fire whose `deferred` run row this delivery resolves (#1890).
+ * Present only on envelopes the cron queues for a scheduled post.
+ */
+interface DeferredScheduledRunRef {
+  fireKey: string;
+}
+
 interface DeferredChatDeliveryEnvelope {
   kind: typeof CHAT_DELIVERY_ENVELOPE_KIND;
   spaceName: string;
   threadName?: string;
   text: string;
   deliveryContext: ChatResponseDeliveryContext;
+  scheduledRun?: DeferredScheduledRunRef;
 }
 
 function isBoundedString(
@@ -3282,7 +3291,30 @@ const DEFERRED_CHAT_ENVELOPE_KEYS = new Set([
   'threadName',
   'text',
   'deliveryContext',
+  'scheduledRun',
 ]);
+
+const DEFERRED_SCHEDULED_RUN_KEYS = new Set(['fireKey']);
+
+/**
+ * Strict parse of the optional scheduled-run reference.
+ *
+ * `null` means "absent or unusable" rather than throwing: a malformed
+ * reference must not stop a reply the owner is waiting for. The row then stays
+ * `deferred`, which is still a truthful non-success — never a false success.
+ */
+function parseDeferredScheduledRun(
+  value: unknown
+): DeferredScheduledRunRef | null {
+  if (value === undefined) return null;
+  const raw = strictObject(value);
+  if (!raw) return null;
+  if (!hasOnlyKeys(raw, DEFERRED_SCHEDULED_RUN_KEYS)) return null;
+  // Matches agent_scheduled_runs.fire_key (VARCHAR(192)).
+  return isBoundedString(raw.fireKey, 1, 192)
+    ? { fireKey: raw.fireKey }
+    : null;
+}
 
 function parseDeferredChatDelivery(
   body: string
@@ -3312,6 +3344,7 @@ function parseDeferredChatDelivery(
     envelope.deliveryContext
   );
   if (!deliveryContext) return null;
+  const scheduledRun = parseDeferredScheduledRun(envelope.scheduledRun);
   return {
     kind: CHAT_DELIVERY_ENVELOPE_KIND,
     spaceName: envelope.spaceName,
@@ -3320,6 +3353,7 @@ function parseDeferredChatDelivery(
       : {}),
     text: envelope.text,
     deliveryContext,
+    ...(scheduledRun ? { scheduledRun } : {}),
   };
 }
 
@@ -3981,6 +4015,60 @@ async function writeScheduledRun(params: ScheduledRunWrite): Promise<void> {
             ${params.inputTokens}, ${params.outputTokens},
             ${params.latencyMs}, ${params.status},
             ${errorMessage}, ${params.fireKey ?? null})`;
+}
+
+/**
+ * Settle the `deferred` run row the cron left when its own Chat post failed
+ * and was queued here (#1890).
+ *
+ * Scoped to `status = 'deferred'`: a later redelivery, or a row the ECS
+ * supervisor has already repaired, must not be rewritten. Idempotent, so a
+ * duplicate SQS receive is harmless — the second update simply matches nothing.
+ *
+ * NEVER throws. It is called on the success path immediately after a Chat post
+ * has landed, and a telemetry error there would be re-raised as a retry and
+ * post the same message to the owner a second time.
+ */
+async function resolveDeferredScheduledRun(
+  reference: DeferredScheduledRunRef | undefined,
+  status: 'success' | 'error',
+  errorMessage: string | null,
+  log: ReturnType<typeof createLogger>,
+  dependencies: {
+    databaseConfigured?: boolean;
+    getDbClient?: typeof getDbClient;
+  } = {}
+): Promise<void> {
+  if (!reference) return;
+  const configured =
+    dependencies.databaseConfigured
+    ?? Boolean(DATABASE_HOST && DATABASE_SECRET_ARN);
+  if (!configured) return;
+  try {
+    const sql = await (dependencies.getDbClient ?? getDbClient)();
+    const updated = await sql`UPDATE agent_scheduled_runs
+      SET status = ${status},
+          error_message = ${
+            errorMessage ? sanitizeDiagnostic(errorMessage, 4000) : null
+          }
+      WHERE fire_key = ${reference.fireKey}
+        AND status = 'deferred'
+      RETURNING id`;
+    log.info('Resolved a deferred scheduled run', {
+      fireKey: reference.fireKey,
+      status,
+      // 0 is expected on a duplicate receive or after a supervisor repair.
+      rowsUpdated: updated.length,
+    });
+  } catch (error) {
+    log.error('Failed to resolve a deferred scheduled run', {
+      fireKey: reference.fireKey,
+      status,
+      error: sanitizeDiagnostic(
+        error instanceof Error ? error.message : String(error)
+      ),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -5872,8 +5960,26 @@ async function handleOwnerTurn(
   await recordOwnerResult(human, prepared, turn, startTime, log);
 }
 
+/**
+ * Whether THIS attempt is the one that dead-letters the record, using the same
+ * receive-count rule as `recordIfHeadedForDlq`: an unreadable count counts as
+ * final, because a run row left `deferred` forever is the failure mode #1890
+ * exists to end.
+ */
+function isFinalDeliveryAttempt(record: SQSRecord): boolean {
+  const receiveCount = parseInt(
+    record.attributes?.ApproximateReceiveCount ?? '',
+    10
+  );
+  return !(
+    Number.isFinite(receiveCount) &&
+    receiveCount < ROUTER_QUEUE_MAX_RECEIVE_COUNT
+  );
+}
+
 async function processDeferredChatDelivery(
   delivery: DeferredChatDeliveryEnvelope,
+  record: SQSRecord,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   try {
@@ -5887,10 +5993,20 @@ async function processDeferredChatDelivery(
     if (outcome === 'failed') {
       throw new Error('Google Chat delivery returned a failed outcome');
     }
+    // The post the cron could not make has now landed, so the run it left as
+    // `deferred` really did reach its owner (#1890).
+    await resolveDeferredScheduledRun(delivery.scheduledRun, 'success', null, log);
   } catch (error) {
-    throw new ChatDeliveryRetryError(
-      sanitizeDiagnostic(errorMessage(error))
-    );
+    const detail = sanitizeDiagnostic(errorMessage(error));
+    if (isFinalDeliveryAttempt(record)) {
+      await resolveDeferredScheduledRun(
+        delivery.scheduledRun,
+        'error',
+        `Queued Chat delivery never succeeded: ${detail}`,
+        log
+      );
+    }
+    throw new ChatDeliveryRetryError(detail);
   }
 }
 
@@ -5901,7 +6017,7 @@ async function processRecord(
   const startTime = Date.now();
   const deferredDelivery = parseDeferredChatDeliveryRecord(record.body);
   if (deferredDelivery) {
-    await processDeferredChatDelivery(deferredDelivery, log);
+    await processDeferredChatDelivery(deferredDelivery, record, log);
     return;
   }
   const parsedEvent = await parseChatEventRecord(record, log);
@@ -5967,6 +6083,9 @@ export const agentRouterTestHelpers = {
   isDuplicateMessage,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
+  parseDeferredScheduledRun,
+  isFinalDeliveryAttempt,
+  resolveDeferredScheduledRun,
   prepareGoogleChatMessage,
   buildDeferredChatDeliveryEnvelope,
   markPromotedTurnRecoveredWithDependencies,

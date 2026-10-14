@@ -346,8 +346,11 @@ describe('resolveThreadConversationSessionId', () => {
 // The wiring, not just the helper: a refactor that drops `deliveredThreadName`
 // or passes the wrong identity through would pass every test above.
 describe('deliverScheduledResult writes the mapping for the delivered post', () => {
-  const { deliverScheduledResultWithDependencies, toInvokeResult } =
-    agentCronTestHelpers;
+  const {
+    deliverScheduledResultWithDependencies,
+    toInvokeResult,
+    scheduledDeliveryDependencies,
+  } = agentCronTestHelpers;
 
   function context(log: ReturnType<typeof silentLog>) {
     return {
@@ -375,6 +378,7 @@ describe('deliverScheduledResult writes the mapping for the delivered post', () 
     const outcome = await deliverScheduledResultWithDependencies(
       context(log),
       {
+        ...scheduledDeliveryDependencies,
         sendPreparedChatMessage: (async () =>
           'spaces/owner-dm/threads/brief') as never,
         recordThreadSession: (async (
@@ -402,6 +406,7 @@ describe('deliverScheduledResult writes the mapping for the delivered post', () 
     const recorded: unknown[] = [];
 
     await deliverScheduledResultWithDependencies(context(log), {
+      ...scheduledDeliveryDependencies,
       sendPreparedChatMessage: (async () => null) as never,
       recordThreadSession: (async (_c: unknown, input: unknown) => {
         recorded.push(input);
@@ -417,6 +422,7 @@ describe('deliverScheduledResult writes the mapping for the delivered post', () 
     const recorded: unknown[] = [];
 
     await deliverScheduledResultWithDependencies(context(log), {
+      ...scheduledDeliveryDependencies,
       sendPreparedChatMessage: (async () => {
         throw new Error('Chat unavailable');
       }) as never,

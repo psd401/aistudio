@@ -2462,6 +2462,12 @@ export class AgentPlatformStack extends cdk.Stack {
         // Write-only here: one row per delivered scheduled post so a reply in
         // that Chat thread reaches this run's conversation (#1891).
         THREAD_SESSIONS_TABLE: resources.threadSessionsTable.tableName,
+        // Used for exactly one call: minting the owner's re-authorization
+        // link for a schedule that failed on a revoked Google grant (#1890).
+        // Empty → the owner still gets the failure DM, worded without a link.
+        APP_BASE_URL: props.appBaseUrl ?? '',
+        AGENT_INTERNAL_API_KEY_SECRET_ID:
+          resources.agentInternalApiKeySecret.secretName,
       },
     });
 
@@ -2471,6 +2477,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
+    resources.agentInternalApiKeySecret.grantRead(resources.cronLambdaRole);
     resources.routerQueue.grantSendMessages(resources.cronLambdaRole);
     resources.cronReconciliationQueue.grantSendMessages(
       resources.cronLambdaRole,

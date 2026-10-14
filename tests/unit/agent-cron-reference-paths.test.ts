@@ -16,7 +16,9 @@ function harness() {
   const recordRunStrict = jest.fn().mockResolvedValue(undefined)
   const recordCronFailure = jest.fn().mockResolvedValue(undefined)
   const recordCronFailureStrict = jest.fn().mockResolvedValue(undefined)
+  const recentRunStatuses = jest.fn().mockResolvedValue(null)
   const telemetry = {
+    recentRunStatuses,
     recordPreflightRun,
     recordRun,
     recordRunStrict,

@@ -53,6 +53,13 @@ detail when applicable. Schedules that have not fired yet report
 `lastRunStatus: "never run"`. If run telemetry is temporarily unavailable,
 the status is `"unknown"` instead of being reported as never run.
 
+A schedule with 3 or more consecutive failed runs also reports
+`failing: true` and a `failingReason` naming the streak. Treat that as
+actionable, not informational: say so plainly in your reply, run
+`runs.js --schedule-id <id>` for the reason, and fix or disable the schedule.
+The owner has already been sent one Chat message about it — do not repeat the
+same warning they received, add what you found.
+
 ### `update_schedule` — change fields on an existing schedule
 
 ```bash
