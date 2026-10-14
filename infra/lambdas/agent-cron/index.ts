@@ -1419,11 +1419,19 @@ async function sendPromotionAcknowledgement(
       ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
       : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
   try {
-    await sendChatMessage(
+    const ackThreadName = await sendChatMessage(
       schedule.dmSpaceName,
       `📋 **${scheduleName}**\n\n${acknowledgement}`,
       log,
     );
+    // Map the ack's thread so "did this ever run?" in that thread reaches the
+    // run's transcript (#1891). Only for a deadline promotion: a
+    // context-overflow promotion deliberately RESTARTS the conversation
+    // (resolveJobInvocation), so pointing a reply at the original session
+    // would hand it the transcript that just overflowed.
+    if (reason !== 'context-overflow') {
+      await recordScheduledThreadSession(context, ackThreadName);
+    }
   } catch (error) {
     // The job is already running, so acknowledgement delivery is best-effort.
     log.warn('Promotion ack delivery failed; job still running', {
@@ -1736,8 +1744,33 @@ async function tryPromoteScheduledResult(
   return true;
 }
 
-async function deliverScheduledResult(
+/**
+ * The two boundary calls the delivery path makes after the agent has answered.
+ * Injected so a test can prove the mapping row is written with THIS run's
+ * identity — the wiring, not just `recordThreadSession` in isolation.
+ */
+interface ScheduledDeliveryDependencies {
+  sendPreparedChatMessage: typeof sendPreparedChatMessage;
+  recordThreadSession: typeof recordThreadSession;
+}
+
+const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
+  sendPreparedChatMessage,
+  recordThreadSession,
+};
+
+function deliverScheduledResult(
   context: ScheduledResultContext,
+): Promise<HandlerResult> {
+  return deliverScheduledResultWithDependencies(
+    context,
+    scheduledDeliveryDependencies,
+  );
+}
+
+async function deliverScheduledResultWithDependencies(
+  context: ScheduledResultContext,
+  dependencies: ScheduledDeliveryDependencies,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   if (result.silent) {
@@ -1759,7 +1792,7 @@ async function deliverScheduledResult(
   const deliveryRequestId = crypto.randomUUID();
   let deliveredThreadName: string | null = null;
   try {
-    deliveredThreadName = await sendPreparedChatMessage(
+    deliveredThreadName = await dependencies.sendPreparedChatMessage(
       schedule.dmSpaceName,
       preparedDelivery,
       log,
@@ -1805,9 +1838,24 @@ async function deliverScheduledResult(
   // transcript instead of the generic space+thread session the router would
   // otherwise derive (#1891). Deliberately outside the delivery try/catch:
   // mapping must never be mistaken for a delivery failure and re-queue the
-  // post. The durable retry path has no thread name to record, so a post that
-  // only lands via the outbox keeps today's key.
-  await recordScheduledThreadSession(context, deliveredThreadName);
+  // post.
+  //
+  // Two scheduled posts are knowingly left unmapped, and both degrade to the
+  // pre-#1891 key rather than failing:
+  //   - a post that only lands via the durable outbox, because the retry
+  //     happens in the router with no thread name to record;
+  //   - the result of a run promoted to the background job-runner, which posts
+  //     from the ECS task through the router's shared Chat helper. That helper
+  //     returns a delivery outcome, not the created message, and it is on the
+  //     path of every interactive reply — widening it is a change for its own
+  //     issue, not a rider on this one. The promotion acknowledgement this
+  //     Lambda posts first IS mapped (see sendPromotionAcknowledgement), so a
+  //     reply asking after a promoted run still reaches the run's transcript.
+  await recordScheduledThreadSession(
+    context,
+    deliveredThreadName,
+    dependencies,
+  );
   return recordScheduledCompletion(context);
 }
 
@@ -1818,10 +1866,11 @@ async function deliverScheduledResult(
 async function recordScheduledThreadSession(
   context: ScheduledResultContext,
   threadName: string | null,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<void> {
   if (!threadName) return;
   const { schedule, sessionId, log } = context;
-  await recordThreadSession(
+  await dependencies.recordThreadSession(
     threadSessionDynamoClient,
     {
       tableName: THREAD_SESSIONS_TABLE,
@@ -2455,6 +2504,7 @@ export const agentCronTestHelpers = {
   toInvokeResult,
   shouldRetainScheduledTurnLock,
   deliverScheduledResult,
+  deliverScheduledResultWithDependencies,
 };
 
 export async function handler(

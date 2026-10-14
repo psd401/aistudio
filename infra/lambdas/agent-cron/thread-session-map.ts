@@ -82,6 +82,8 @@ export async function recordThreadSession(
         threadKey: threadSessionKey(input.spaceName, input.threadName),
         conversationSessionId: input.conversationSessionId,
         workspacePrefix: input.workspacePrefix,
+        // Operator field: the table has no other way to tell a row written by
+        // today's run from one the TTL has not swept yet. Nothing reads it.
         createdAt: new Date(nowMs).toISOString(),
         expiresAt:
           Math.floor(nowMs / 1000) + THREAD_SESSION_TTL_SECONDS,
@@ -168,9 +170,11 @@ export function resolveThreadConversationSessionId(
   const { mapped, workspacePrefix, fallbackConversationSessionId } = input;
   if (!mapped) return fallbackConversationSessionId;
   if (mapped.workspacePrefix !== workspacePrefix) {
+    // Deliberately value-free: `workspacePrefix` embeds the owner's email
+    // local part, and this line fires on a cross-owner row — the one case
+    // where logging both would put two people's identifiers in one record.
     log.warn('thread_session_map_owner_mismatch', {
-      mappedWorkspacePrefix: mapped.workspacePrefix,
-      workspacePrefix,
+      mappedConversationSessionId: mapped.conversationSessionId,
     });
     return fallbackConversationSessionId;
   }

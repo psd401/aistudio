@@ -19,10 +19,23 @@ SECTION_HEADING = "### Conversation isolation"
 
 
 def isolation_section() -> str:
+    """The section body, bounded by the next heading of ANY level.
+
+    Bounding on "\n## " alone would silently swallow later sections if someone
+    added an H2-level example inside this one.
+    """
     text = SOUL.read_text(encoding="utf-8")
     start = text.index(SECTION_HEADING)
-    end = text.index("\n## ", start)
-    return text[start:end]
+    body_start = start + len(SECTION_HEADING)
+    ends = [
+        offset
+        for offset in (
+            text.find("\n## ", body_start),
+            text.find("\n### ", body_start),
+        )
+        if offset != -1
+    ]
+    return text[start : min(ends)] if ends else text[start:]
 
 
 class ConversationIsolationGuidance(unittest.TestCase):
@@ -44,7 +57,34 @@ class ConversationIsolationGuidance(unittest.TestCase):
         self.assertIn("where it started", section)
 
     def test_offers_to_start_fresh_instead(self) -> None:
-        self.assertIn("start fresh here", isolation_section())
+        section = isolation_section()
+        self.assertIn("start fresh here", section)
+        # The offer is half the point: pointing at the old thread without it
+        # leaves someone who genuinely wants a clean start with no way out.
+        self.assertIn("keep both halves", section)
+
+    def test_replaces_the_clarifying_question_rather_than_adding_to_it(
+        self,
+    ) -> None:
+        self.assertIn(
+            "Say that instead of a clarifying question", isolation_section()
+        )
+
+    def test_self_contained_messages_are_carved_out(self) -> None:
+        # A bare file upload is usually a self-contained request. Without this
+        # carve-out the guidance fires on "summarize this PDF" and the rule
+        # forbids the clarifying question that would otherwise rescue it.
+        section = isolation_section()
+        self.assertIn("stands on its own", section)
+        self.assertIn("only makes sense as a continuation", section)
+
+    def test_does_not_promise_complete_context(self) -> None:
+        # SOUL.md's own transport section says Chat thread placement does not
+        # prove session isolation, so the agent must not guarantee it will have
+        # everything — it offers the mechanism, not a certainty.
+        section = isolation_section()
+        self.assertIn("I should\n  pick it up from there", section)
+        self.assertNotIn("I'll have all of", section)
 
     def test_old_generic_clarifying_question_wording_is_gone(self) -> None:
         section = isolation_section()

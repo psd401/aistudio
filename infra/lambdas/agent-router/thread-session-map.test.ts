@@ -19,10 +19,7 @@ const SPACE = 'spaces/owner-dm';
 const RUN_SESSION = 'owner-a1b2c3d4-sched-sched-morning-2026-10-13';
 
 function human(threadName: string | undefined, spaceName = SPACE): Human {
-  return {
-    spaceName,
-    threadName,
-  } as unknown as Human;
+  return { spaceName, threadName };
 }
 
 function lookupReturning(row: ThreadSessionRow | null) {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { agentCronTestHelpers } from './index';
 import {
   THREAD_SESSION_TTL_SECONDS,
   lookupThreadSession,
@@ -14,11 +15,19 @@ import {
 // it is being asked about.
 
 function silentLog() {
-  const messages: Array<{ level: string; message: string }> = [];
+  const messages: Array<{
+    level: string;
+    message: string;
+    metadata?: Record<string, unknown>;
+  }> = [];
   return {
     messages,
-    info: (message: string) => messages.push({ level: 'info', message }),
-    warn: (message: string) => messages.push({ level: 'warn', message }),
+    info: (message: string, metadata?: Record<string, unknown>) =>
+      messages.push({ level: 'info', message, metadata }),
+    warn: (message: string, metadata?: Record<string, unknown>) =>
+      messages.push({ level: 'warn', message, metadata }),
+    error: (message: string, metadata?: Record<string, unknown>) =>
+      messages.push({ level: 'error', message, metadata }),
   };
 }
 
@@ -245,6 +254,10 @@ describe('resolveThreadConversationSessionId', () => {
     expect(log.messages.map((m) => m.message)).toContain(
       'thread_session_map_owner_mismatch',
     );
+    // The mismatch line must not carry either side's workspace prefix: it
+    // embeds an email local part, and this is the one case with two owners.
+    expect(JSON.stringify(log.messages)).not.toContain('other-prefix');
+    expect(JSON.stringify(log.messages)).not.toContain('owner-prefix');
   });
 
   test('falls back when there is no row', () => {
@@ -258,5 +271,94 @@ describe('resolveThreadConversationSessionId', () => {
         silentLog(),
       ),
     ).toBe('agent-chat-hash');
+  });
+});
+
+// The wiring, not just the helper: a refactor that drops `deliveredThreadName`
+// or passes the wrong identity through would pass every test above.
+describe('deliverScheduledResult writes the mapping for the delivered post', () => {
+  const { deliverScheduledResultWithDependencies, toInvokeResult } =
+    agentCronTestHelpers;
+
+  function context(log: ReturnType<typeof silentLog>) {
+    return {
+      schedule: {
+        scheduleId: 'sched-morning',
+        ownerEmail: 'owner@psd401.net',
+        dmSpaceName: 'spaces/owner-dm',
+        workspacePrefix: 'owner-a1b2c3d4',
+      },
+      scheduleName: 'Morning brief',
+      startTime: Date.now(),
+      sessionId: 'owner-a1b2c3d4-sched-sched-morning-2026-10-13',
+      runtimeSessionId: 'agent-rt-x',
+      workspaceLockId: 'agent-workspace-x',
+      fireIdentity: null,
+      result: toInvokeResult({ result: 'Here is your brief.', metadata: {} }),
+      log,
+    } as never;
+  }
+
+  test('records the created thread against the run conversation', async () => {
+    const log = silentLog();
+    const recorded: Array<Record<string, unknown>> = [];
+
+    const outcome = await deliverScheduledResultWithDependencies(
+      context(log),
+      {
+        sendPreparedChatMessage: (async () =>
+          'spaces/owner-dm/threads/brief') as never,
+        recordThreadSession: (async (
+          _client: unknown,
+          input: Record<string, unknown>,
+        ) => {
+          recorded.push(input);
+          return true;
+        }) as never,
+      },
+    );
+
+    expect(outcome).toEqual({ status: 'success', scheduleId: 'sched-morning' });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      spaceName: 'spaces/owner-dm',
+      threadName: 'spaces/owner-dm/threads/brief',
+      conversationSessionId: 'owner-a1b2c3d4-sched-sched-morning-2026-10-13',
+      workspacePrefix: 'owner-a1b2c3d4',
+    });
+  });
+
+  test('records nothing when Chat returns no thread', async () => {
+    const log = silentLog();
+    const recorded: unknown[] = [];
+
+    await deliverScheduledResultWithDependencies(context(log), {
+      sendPreparedChatMessage: (async () => null) as never,
+      recordThreadSession: (async (_c: unknown, input: unknown) => {
+        recorded.push(input);
+        return true;
+      }) as never,
+    });
+
+    expect(recorded).toHaveLength(0);
+  });
+
+  test('a delivery failure routed to the outbox records nothing', async () => {
+    const log = silentLog();
+    const recorded: unknown[] = [];
+
+    await deliverScheduledResultWithDependencies(context(log), {
+      sendPreparedChatMessage: (async () => {
+        throw new Error('Chat unavailable');
+      }) as never,
+      recordThreadSession: (async (_c: unknown, input: unknown) => {
+        recorded.push(input);
+        return true;
+      }) as never,
+    });
+
+    // No thread name exists for an outbox delivery, so the reply keeps the
+    // pre-#1891 key rather than being mapped to a post that never landed.
+    expect(recorded).toHaveLength(0);
   });
 });

@@ -5154,7 +5154,12 @@ function ownerSessionId(
  * A stable sentinel preserves continuity for legacy events without a thread.
  */
 function ownerConversationSessionId(
-  human: HumanMessage,
+  /**
+   * Narrowed to the two fields the key is built from: a full `HumanMessage`
+   * still satisfies it, and widening the function later is then a compile
+   * error rather than a silently-undefined read in a test double.
+   */
+  human: Pick<HumanMessage, 'spaceName' | 'threadName'>,
   user: Pick<AgentUser, 'workspacePrefix'>
 ): string {
   return scopedAgentSessionId(
@@ -5181,7 +5186,7 @@ const threadSessionDynamoClient = {
  * back to the unmapped key rather than dropping the turn.
  */
 async function resolveConversationSessionIdWithDependencies(
-  human: HumanMessage,
+  human: Pick<HumanMessage, 'spaceName' | 'threadName'>,
   user: Pick<AgentUser, 'workspacePrefix'>,
   log: ReturnType<typeof createLogger>,
   dependencies: {
