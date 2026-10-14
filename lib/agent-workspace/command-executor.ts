@@ -419,9 +419,36 @@ function argumentValue(argv: readonly string[], flag: string): string | null {
  * Only `+draft` is expanded. `+send`, `+reply`, `+reply-all` and `+forward`
  * stay unimplemented and unallowlisted — this opens no path to putting mail on
  * the wire.
+ *
+ * With `--draft-id` the same message is sent to `gmail users drafts update`
+ * instead, which REPLACES that draft's content. Without it there was no way to
+ * revise a draft: `+draft` always created, so a rerun of a mail-merge or a
+ * reworded reply left a pile of near-identical drafts behind, any of which
+ * could be sent by mistake — and `drafts delete` is Phase-1 forbidden, so the
+ * stale ones could not be cleared either (#1894). `drafts update` was already
+ * allowlisted; only the documented spelling of it was missing.
  */
 const DRAFT_ADDRESS_FLAGS = ["--to", "--cc", "--bcc"] as const
-const DRAFT_VALUE_FLAGS = [...DRAFT_ADDRESS_FLAGS, "--subject", "--body"] as const
+/** Gmail resource ids as they appear in a draft/thread URL path. */
+const DRAFT_ID_FLAGS = ["--draft-id", "--thread-id"] as const
+const DRAFT_VALUE_FLAGS = [
+  ...DRAFT_ADDRESS_FLAGS,
+  ...DRAFT_ID_FLAGS,
+  "--subject",
+  "--body",
+  "--in-reply-to",
+] as const
+const DRAFT_BOOLEAN_FLAGS = ["--html"] as const
+
+/**
+ * The footer `injectMarkers` appends to a raw `gmail users drafts create`
+ * payload, duplicated here because `+draft` never carries a `--json` body for
+ * the skill-side marker to reach: the MIME is built below, after the skill has
+ * already run. A `+draft` draft therefore arrived unmarked while SKILL.md said
+ * the marker was automatic (#1894). Kept byte-identical to common.js and to
+ * the footer documented in psd-workspace/SKILL.md.
+ */
+const DRAFT_AGENT_MARKER = "— Drafted by your agent. Review before sending."
 
 function isPrintableAscii(value: string): boolean {
   return /^[\x20-\x7E]*$/.test(value)
@@ -496,6 +523,12 @@ function encodeAddressHeader(value: string): string {
  *
  * Scanning flag-by-flag rather than searching the whole argv also means a
  * `--body` whose text happens to contain `--to` cannot be mistaken for one.
+ *
+ * An unrecognized argument is REFUSED rather than skipped. Skipping it meant a
+ * `+draft --attach report.pdf`, or the `--thread-id` an agent reached for
+ * before it existed, produced a draft that silently lacked the thing the agent
+ * asked for — with a success response and no hint that half the request was
+ * dropped (#1894).
  */
 function parseDraftFlags(argv: readonly string[]): {
   values: Map<string, string>
@@ -512,7 +545,12 @@ function parseDraftFlags(argv: readonly string[]): {
       html = true
       continue
     }
-    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(argument)) continue
+    if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(argument)) {
+      throw new Error(
+        `Workspace draft does not accept ${argument}; supported flags are ` +
+          `${[...DRAFT_VALUE_FLAGS, ...DRAFT_BOOLEAN_FLAGS].join(", ")}`
+      )
+    }
     if (values.has(argument)) {
       throw new Error(
         `Workspace draft ${argument} was given more than once; ` +
@@ -527,6 +565,25 @@ function parseDraftFlags(argv: readonly string[]): {
     index += 1
   }
   return { values, html }
+}
+
+/**
+ * Validate a Gmail resource id before it reaches a URL path.
+ *
+ * `--draft-id` becomes the `{id}` segment of
+ * `PUT /gmail/v1/users/me/drafts/{id}`, so a value carrying `/` or `..` would
+ * let model-authored text choose a different endpoint than the one the
+ * allowlist judged. Gmail's own ids are base64url-ish, so the safe character
+ * set is also the complete one.
+ */
+function assertGmailResourceId(flag: string, value: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error(
+      `Workspace draft ${flag} must be a Gmail id ` +
+        "(letters, digits, hyphen and underscore only)"
+    )
+  }
+  return value
 }
 
 function assertNoHeaderInjection(flag: string, value: string): void {
@@ -610,11 +667,14 @@ export function withSharedDriveSupport(argv: readonly string[]): string[] {
   return next
 }
 
-export function expandGmailDraftHelper(argv: readonly string[]): string[] {
-  if (argv[0] !== "gmail" || argv[1] !== "+draft") return [...argv]
-
-  const { values, html: isHtml } = parseDraftFlags(argv)
-
+/**
+ * The addressing and reply headers a draft carries, in RFC 5322 order.
+ *
+ * Split out of `expandGmailDraftHelper` so neither half carries the other's
+ * branches: header encoding is where the injection and RFC 2047 rules live,
+ * and command assembly is where the create/update choice lives.
+ */
+function draftMessageHeaders(values: Map<string, string>): string[] {
   const headers: string[] = []
   for (const flag of DRAFT_ADDRESS_FLAGS) {
     const value = values.get(flag)
@@ -633,7 +693,35 @@ export function expandGmailDraftHelper(argv: readonly string[]): string[] {
     headers.push(`Subject: ${encodeHeaderValue(subject)}`)
   }
 
-  const body = values.get("--body") ?? ""
+  // These are what hold the thread together in the RECIPIENT's client, and
+  // they can only be built from the original message's `Message-ID`. A Gmail
+  // thread id is NOT one and must never be passed off as one, so it travels
+  // separately, as `--thread-id` on the message resource — which is what
+  // actually files the draft into the thread on Gmail's side.
+  const inReplyTo = values.get("--in-reply-to")
+  if (inReplyTo !== undefined) {
+    assertNoHeaderInjection("--in-reply-to", inReplyTo)
+    const trimmed = inReplyTo.trim()
+    const messageId = /^<.*>$/.test(trimmed) ? trimmed : `<${trimmed}>`
+    headers.push(`In-Reply-To: ${messageId}`)
+    headers.push(`References: ${messageId}`)
+  }
+  return headers
+}
+
+/** The base64url `message.raw` the Gmail API takes, markered and 7-bit clean. */
+function draftRawMessage(values: Map<string, string>, isHtml: boolean): string {
+  const headers = draftMessageHeaders(values)
+
+  const authored = values.get("--body") ?? ""
+  // Same footer `injectMarkers` gives a raw `drafts create`, applied here
+  // because `+draft` has no `--json` for the skill to reach. Re-marking is
+  // skipped so revising a draft (read body -> edit -> `--draft-id`) cannot
+  // stack the footer, matching how the Drive `[Agent] ` prefix guards itself.
+  const body = authored.includes(DRAFT_AGENT_MARKER)
+    ? authored
+    : `${authored}${isHtml ? "<br><br>" : "\n\n"}${DRAFT_AGENT_MARKER}`
+
   headers.push("MIME-Version: 1.0")
   headers.push(
     `Content-Type: text/${isHtml ? "html" : "plain"}; charset="UTF-8"`
@@ -644,15 +732,62 @@ export function expandGmailDraftHelper(argv: readonly string[]): string[] {
   // 7-bit clean whatever the body holds.
   headers.push("Content-Transfer-Encoding: base64")
 
-  // CRLF per RFC 5322, and base64url because that is what the Gmail API's
-  // `message.raw` field expects.
   // The body is base64 because the header above declares it so; the whole
   // message is then base64url because that is what the Gmail API's
   // `message.raw` field takes. Two different encodings, two different reasons —
-  // line-wrapped at 76 chars per RFC 2045 so long bodies stay conformant.
-  const encodedBody = (Buffer.from(body, "utf8").toString("base64").match(/.{1,76}/g) ?? []).join("\r\n")
+  // line-wrapped at 76 chars per RFC 2045 so long bodies stay conformant, and
+  // joined with CRLF per RFC 5322.
+  const encodedBody = (
+    Buffer.from(body, "utf8").toString("base64").match(/.{1,76}/g) ?? []
+  ).join("\r\n")
   const mime = `${headers.join("\r\n")}\r\n\r\n${encodedBody}`
-  const raw = Buffer.from(mime, "utf8").toString("base64url")
+  return Buffer.from(mime, "utf8").toString("base64url")
+}
+
+/** A Gmail id flag's value, validated, or undefined when the flag is absent. */
+function draftResourceId(
+  values: Map<string, string>,
+  flag: (typeof DRAFT_ID_FLAGS)[number]
+): string | undefined {
+  const value = values.get(flag)
+  return value === undefined ? undefined : assertGmailResourceId(flag, value)
+}
+
+export function expandGmailDraftHelper(argv: readonly string[]): string[] {
+  // Lowercased to match the allowlist key. `operationTokens` lowercases every
+  // positional, so `gmail +Draft` PASSED validation as `gmail +draft` and then
+  // fell through this check unexpanded — gws has no `+Draft` subcommand, so the
+  // call died at the CLI with the very "unrecognized subcommand" error SKILL.md
+  // tells the agent to report as a broker bug (#1894).
+  if (
+    argv[0]?.toLowerCase() !== "gmail" ||
+    argv[1]?.toLowerCase() !== "+draft"
+  ) {
+    return [...argv]
+  }
+
+  const { values, html: isHtml } = parseDraftFlags(argv)
+  const draftId = draftResourceId(values, "--draft-id")
+  const threadId = draftResourceId(values, "--thread-id")
+  const raw = draftRawMessage(values, isHtml)
+  const message = { raw, ...(threadId ? { threadId } : {}) }
+
+  // `drafts update` REPLACES the draft at `id` — same message, same builder,
+  // one revised draft instead of a second one beside the first. The id rides in
+  // --params because it is the `{id}` path segment, and in the body because the
+  // Draft resource carries it too.
+  if (draftId !== undefined) {
+    return [
+      "gmail",
+      "users",
+      "drafts",
+      "update",
+      "--params",
+      JSON.stringify({ userId: "me", id: draftId }),
+      "--json",
+      JSON.stringify({ id: draftId, message }),
+    ]
+  }
 
   return [
     "gmail",
@@ -662,7 +797,7 @@ export function expandGmailDraftHelper(argv: readonly string[]): string[] {
     "--params",
     JSON.stringify({ userId: "me" }),
     "--json",
-    JSON.stringify({ message: { raw } }),
+    JSON.stringify({ message }),
   ]
 }
 
