@@ -236,7 +236,7 @@ Repository readiness is derived from item counts, connector state, and generatio
 | Table | Purpose |
 |-------|---------|
 | `agent_workspace_tokens` | Token manifest |
-| `agent_workspace_consent_nonces` | One-time consent URLs |
+| `agent_workspace_consent_nonces` | One-time consent URLs, including `credential_entry` links whose `token_kind` was added by migration 187 (see [Credential Entry](../agent-platform/credential-entry.md)) |
 
 **Credential Management**
 | Table | Purpose |

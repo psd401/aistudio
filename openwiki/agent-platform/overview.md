@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, scheduled-post thread mapping, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -28,6 +28,10 @@ openwiki:
     - infra/agent-image/harness_adapter.py
     - infra/agent-image/agentcore_wrapper.py
     - infra/lambdas/agent-cron/index.ts
+    - lib/agent-workspace/credential-entry.ts
+    - lib/agent-credentials/name-grammar.ts
+    - actions/agent-credential-entry.actions.ts
+    - infra/agent-image/skills/psd-credentials/request_entry.js
   test_paths:
     - tests/unit/lib/agent-workspace/drive-delivery.test.ts
     - tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts
@@ -48,6 +52,10 @@ openwiki:
     - infra/agent-image/test_harness_adapter.py
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
     - infra/agent-image/skills/psd-atrium/run.test.js
+    - tests/unit/agent-credential-entry.test.ts
+    - tests/unit/agent-consent-link-route.test.ts
+    - tests/smoke/agent-credential-entry-token.smoke.ts
+    - infra/agent-image/skills/psd-credentials/request_entry.test.js
 ---
 
 # Agent Platform
@@ -99,7 +107,7 @@ infra/agent-image/skills/{skill-name}/
 **Data & Integration**
 - `psd-data` — District data queries (PowerSchool, spreadsheets)
 - `psd-workspace` — Google Workspace wrapper for agent accounts; Drive queries with quoted values (`name contains 'X'`) MUST use `--params-file` — tokenizer cannot preserve single quotes (#1801)
-- `psd-credentials` — Secure credential management and capability verification
+- `psd-credentials` — Owner-bound credential broker client. Collects user-held secrets through a one-time entry link (`request_entry.js`) instead of chat; see [Credential Entry](credential-entry.md) (#1887)
 - `psd-canva` — Canva design integration
 - `psd-plaud` — Plaud note integration
 - `psd-open-adaptive-district` — Open Adaptive District operating model (six-week build cycle)
@@ -514,6 +522,12 @@ Agent image builds include a bundled skill catalog (`/infra/lib/bundled-skill-ma
 - Enforces catalog approval before execution
 
 The skill initializer (`infra/lambdas/agent-skill-initializer/`) handles both registration and retirement of bundled skills, ensuring only approved capabilities execute in the agent container.
+
+---
+
+## Credential Entry (#1887)
+
+When a skill needs a secret only the user holds, the agent does not ask for it in chat. `psd-credentials/request_entry.js` mints a 15-minute, single-use link through `POST /api/agent/consent-link` with `kind: "credential_entry"`. The user types the value into a password field at `/agent-connect-credential`, and the server action writes it through `AgentCredentialBroker.put`. The claim-before-write ordering, the nonce lifecycle, and the test matrix are documented in [Credential Entry](credential-entry.md). The agent-side rule that forbids asking for a paste is shared by `SOUL.md`, `USER.md`, and the `psd-credentials`, `psd-freshservice`, `psd-aistudio`, and `psd-github` skill docs.
 
 ---
 
@@ -1401,72 +1415,6 @@ All agent actions are validated against Cedar policies before execution.
 1. **Allowlist principle** — Only explicitly permitted operations
 2. **Least privilege** — Each skill gets minimum required capabilities
 3. **Audit everything** — All actions logged with request context
-
-### Policy Enforcement
-
-```cedar
-permit(principal, action, resource)
-when { principal has capability && resource is allowed };
-```
-
-Policies are evaluated by the agent harness before each skill execution.
-
----
-
-## Agent Identity & Auditing
-
-### Identity Model
-
-Agents operate with distinct identities tracked in `agent_identities` table:
-- Human owner association
-- Capability grants
-- Audit trail linkage
-
-### Audit Tables
-
-| Table | Purpose |
-|-------|---------|
-| `agent_messages` | All agent communications |
-| `agent_tool_invocations` | Tool calls made by agents |
-| `agent_credential_reads` | Every credential access |
-| `agent_credential_requests` | Permission to read credentials |
-| `content_audit_logs` | Content creation/modification |
-
-### Telemetry
-
-Agent health monitoring via:
-- `agent_health_snapshots`
-- `agent_failures`
-- `agent_patterns`
-
----
-
-## Skill Publishing
-
-**Documentation**: `/docs/features/skill-publishing.md`
-
-Skills are published and managed through:
-1. Admin interface at `/admin/agents/skills/`
-2. Resource access grants for skill permissions
-3. Audit of all skill operations
-
-### Key Source Files
-
-| File | Purpose |
-|------|---------|
-| `/infra/agent-image/skills/*/SKILL.md` | Individual skill definitions |
-| `/lib/mcp/tool-handlers.ts` | MCP tool routing |
-| `/lib/agent-workspace/` | Workspace integration logic |
-| `/infra/lambdas/agent-router/` | Agent request routing |
-
----
-
-## Related Concepts
-
-- **[app-features/overview.md](../app-features/overview.md)** — Features agents interact with
-- **[api-integration/overview.md](../api-integration/overview.md)** — External API access
-- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
-uest context
 
 ### Policy Enforcement
 
