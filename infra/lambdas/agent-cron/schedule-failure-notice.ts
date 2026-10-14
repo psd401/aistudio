@@ -175,7 +175,10 @@ export function buildScheduleFailureNoticeText(
   const fix =
     input.reason === 'auth'
       ? input.consentUrl
-        ? `*Fix it:* <${input.consentUrl}|Reconnect Google Workspace>. The schedule starts working again on its next run.`
+        // Deliberately promises nothing about a next run: an `at(...)`
+        // one-shot has none, and telling its owner the schedule will work
+        // again would be false.
+        ? `*Fix it:* <${input.consentUrl}|Reconnect Google Workspace>.`
         : '*Fix it:* reply here and ask me to reconnect your Google Workspace account — I will send you a fresh authorization link.'
       : '*Fix it:* reply here and ask your agent to check this schedule.';
   return [headline, reasonLine, fix].join('\n\n');

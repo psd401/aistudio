@@ -210,6 +210,22 @@ describe('buildScheduleFailureNoticeText', () => {
     expect(text).not.toContain('invalid_grant');
   });
 
+  test('an auth notice promises nothing about a next run', () => {
+    // An `at(...)` one-shot has no next run, and the notice cannot see the
+    // expression — so it must not claim the schedule will work again.
+    const text = buildScheduleFailureNoticeText({
+      scheduleName: 'One-off export',
+      reason: 'auth',
+      consecutiveFailures: 1,
+      errorMessage: 'invalid_grant',
+      consentUrl: 'https://ai.psd401.net/agent-connect?token=abc',
+    });
+
+    expect(text).not.toContain('next run');
+    expect(text).not.toContain('starts working again');
+    expect(text).toContain('Reconnect Google Workspace');
+  });
+
   test('an auth notice without a link falls back to asking the agent', () => {
     const text = buildScheduleFailureNoticeText({
       scheduleName: 'Daily recap',

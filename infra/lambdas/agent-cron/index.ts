@@ -2356,6 +2356,37 @@ async function executeLockedScheduledTurn(
 
 type ScheduleGuardFailure = JobLockFailure | ScheduleFireFailure;
 
+/**
+ * Phases where the failure means the owner got NOTHING, which is the only kind
+ * the notice should speak about.
+ *
+ * An allowlist rather than a denylist, because the message it gates says "has
+ * not reached you" — a phase added later that fires after delivery would, by
+ * default, tell someone a schedule they just received had not arrived.
+ *
+ * `fire-completion` is the case that matters today: `finalizeScheduleFire`
+ * records an error with that phase when the completion marker cannot be
+ * persisted AFTER the turn has already delivered. That is a durability gap
+ * worth a failure row and an alarm, and it is not a missed run.
+ * `lock-renew` is excluded for the same reason — a renewal failure happens
+ * once the turn is already under way.
+ */
+const OWNER_MISSED_GUARD_PHASES: ReadonlySet<string> = new Set([
+  'fire-config',
+  'fire-acquire',
+  'fire-begin',
+  'fire-in-progress',
+  'fire-executing',
+  'fire-completed',
+  'lock-config',
+  'lock-acquire',
+  'lock-contention',
+]);
+
+function missedTheOwner(failure: ScheduleGuardFailure): boolean {
+  return OWNER_MISSED_GUARD_PHASES.has(failure.phase);
+}
+
 async function recordScheduleGuardFailure(
   context: Omit<LockedScheduleContext, 'lambdaContext'>,
   failure: ScheduleGuardFailure,
@@ -2396,7 +2427,7 @@ async function recordScheduleGuardFailure(
   // contention that the retry then clears. That costs one slightly-early
   // message about a schedule which had in fact just failed twice — the
   // trade is deliberate, and the other way round is the silence above.
-  if (status === 'error') {
+  if (status === 'error' && missedTheOwner(failure)) {
     await notifyOwnerIfScheduleFailing(
       noticeTargetFromContext(context),
       {
@@ -2945,6 +2976,7 @@ export const agentCronTestHelpers = {
   deliverScheduledResult,
   deliverScheduledResultWithDependencies,
   scheduledDeliveryDependencies,
+  guardFailureMissedTheOwner: missedTheOwner,
 };
 
 export async function handler(

@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { agentCronTestHelpers } from './index';
 import { monitorStoppedJob, type JobTaskSnapshot } from './job-monitor';
 import { parseScheduledRunReconciliationMessage } from './scheduled-run-reconciliation';
 
@@ -236,5 +237,46 @@ describe('the reconciliation message carries the same DM target', () => {
         JSON.stringify({ ...base, dmSpaceName: 'not-a-space' }),
       ).dmSpaceName,
     ).toBeUndefined();
+  });
+});
+
+describe('only a guard failure that MISSED the owner speaks', () => {
+  const { guardFailureMissedTheOwner } = agentCronTestHelpers;
+
+  test.each([
+    ['fire-config'],
+    ['fire-acquire'],
+    ['fire-begin'],
+    ['fire-in-progress'],
+    ['fire-executing'],
+    ['fire-completed'],
+    ['lock-config'],
+    ['lock-acquire'],
+    ['lock-contention'],
+  ])('%s means the run never reached the owner', (phase) => {
+    expect(guardFailureMissedTheOwner({ phase } as never)).toBe(true);
+  });
+
+  test('fire-completion does NOT, because the post already landed', () => {
+    // `finalizeScheduleFire` records this when the completion marker cannot be
+    // persisted AFTER the turn delivered. Worth a failure row and an alarm;
+    // telling the owner a brief they just received had not arrived is not.
+    expect(
+      guardFailureMissedTheOwner({ phase: 'fire-completion' } as never),
+    ).toBe(false);
+  });
+
+  test('lock-renew does NOT, because the turn was already under way', () => {
+    expect(
+      guardFailureMissedTheOwner({ phase: 'lock-renew' } as never),
+    ).toBe(false);
+  });
+
+  test('an unrecognized phase stays silent rather than guessing', () => {
+    // The allowlist is the point: a phase added later that fires after
+    // delivery must not default to telling someone their schedule failed.
+    expect(
+      guardFailureMissedTheOwner({ phase: 'some-future-phase' } as never),
+    ).toBe(false);
   });
 });
