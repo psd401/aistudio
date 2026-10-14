@@ -546,8 +546,12 @@ function parseDraftFlags(argv: readonly string[]): {
       continue
     }
     if (!(DRAFT_VALUE_FLAGS as readonly string[]).includes(argument)) {
+      // Only a flag-shaped token is echoed: a stray positional is usually a
+      // word from an unquoted --body, and this message is logged and returned
+      // verbatim, so it must not carry the draft's text.
+      const named = /^--[a-z][a-z-]*$/.test(argument) ? argument : "a stray argument"
       throw new Error(
-        `Workspace draft does not accept ${argument}; supported flags are ` +
+        `Workspace draft does not accept ${named}; supported flags are ` +
           `${[...DRAFT_VALUE_FLAGS, ...DRAFT_BOOLEAN_FLAGS].join(", ")}`
       )
     }
@@ -776,6 +780,17 @@ export function expandGmailDraftHelper(argv: readonly string[]): string[] {
   const { values, html: isHtml } = parseDraftFlags(argv)
   const draftId = draftResourceId(values, "--draft-id")
   const threadId = draftResourceId(values, "--thread-id")
+  // Gmail files a draft into a thread only when the threadId comes with
+  // matching reply headers and Subject; without them it is accepted but lands
+  // outside the thread, so refuse the incomplete bundle up front.
+  if (
+    threadId !== undefined &&
+    (!values.has("--in-reply-to") || !values.get("--subject")?.trim())
+  ) {
+    throw new Error(
+      "Workspace draft --thread-id also requires --in-reply-to and --subject"
+    )
+  }
   const raw = draftRawMessage(values, isHtml)
   const message = { raw, ...(threadId ? { threadId } : {}) }
 

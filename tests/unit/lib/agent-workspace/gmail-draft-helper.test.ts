@@ -187,6 +187,7 @@ describe("expandGmailDraftHelper revision, threading and strict flags", () => {
     expect(() =>
       expandGmailDraftHelper([
         "gmail", "+draft", "--thread-id", "a/b", "--to", "a@b.c", "--body", "x",
+        "--in-reply-to", "m@x", "--subject", "Re: x",
       ])
     ).toThrow(/--thread-id must be a Gmail id/)
   })
@@ -224,9 +225,30 @@ describe("expandGmailDraftHelper revision, threading and strict flags", () => {
       ])
     ).toThrow(/does not accept --attach/)
     // A stray positional is just as wrong as a stray flag.
+    // A stray positional is usually body text from an unquoted --body; the
+    // refusal is logged, so it must name the problem without echoing the text.
+    let message = ""
+    try {
+      expandGmailDraftHelper(["gmail", "+draft", "--to", "a@b.c", "Maria,"])
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toMatch(/does not accept a stray argument/)
+    expect(message).not.toContain("Maria")
+  })
+
+  it("refuses --thread-id without the reply headers and Subject Gmail needs", () => {
     expect(() =>
-      expandGmailDraftHelper(["gmail", "+draft", "--to", "a@b.c", "oops"])
-    ).toThrow(/does not accept oops/)
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--thread-id", "t1", "--to", "a@b.c", "--body", "x",
+      ])
+    ).toThrow(/--thread-id also requires --in-reply-to and --subject/)
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--thread-id", "t1", "--in-reply-to", "m@x",
+        "--to", "a@b.c", "--body", "x",
+      ])
+    ).toThrow(/--thread-id also requires/)
   })
 
   it("expands a mixed-case +draft, matching the lowercased allowlist key", () => {

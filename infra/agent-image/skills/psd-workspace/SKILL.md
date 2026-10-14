@@ -239,11 +239,11 @@ node /opt/psd-skills/psd-workspace/run.js \
 # should still have — anything you omit is dropped from the draft.
 #
 # REPLYING INSIDE A THREAD: pass `--thread-id <threadId>` (the `threadId` on
-# the message you are replying to). Gmail also requires the Subject to match
-# the thread's. For threading in the recipient's client too, pass
-# `--in-reply-to <Message-ID>` — the original message's RFC `Message-ID`
-# header, NOT its Gmail id; the broker writes `In-Reply-To` and `References`
-# from it.
+# the message you are replying to) TOGETHER WITH `--in-reply-to <Message-ID>`
+# and `--subject` matching the thread's — Gmail only files the draft into the
+# thread when all three agree, so the broker refuses `--thread-id` alone.
+# `<Message-ID>` is the original message's RFC `Message-ID` header, NOT its
+# Gmail id; the broker writes `In-Reply-To` and `References` from it.
 #
 # UNKNOWN FLAGS ARE REFUSED, by name. `+draft` takes only the flags listed
 # above; it is not a pass-through to gws. A refusal naming a flag means that

@@ -714,6 +714,7 @@ const defineWorkspaceOutboundAuditSuite4 = () => {
       draftWriteAudit([
         "gmail", "+draft", "--to", "a@b.c", "--body", "x",
         "--thread-id", "t-9", "--draft-id", "r-8812",
+        "--in-reply-to", "m@x", "--subject", "Re: x",
       ])
     ).toEqual({ draftAction: "update", draftId: "r-8812", threadId: "t-9" })
   })
