@@ -87,6 +87,25 @@ Authorized user input with a student's name
 
 Bedrock Guardrails continue to evaluate both inference input and output independently of this PII detection.
 
+### Public-Link Personal-Data Check (agent workspace, #1886)
+
+Before an agent-made file gets an unsigned, anyone-with-the-link URL, the storage broker reads its contents and refuses the link if it carries student or staff personal data. psd-tts applies the same patterns before it narrates, and chat-chart before it sends data to QuickChart. All three read one file, `lib/safety/personal-data-patterns.json`.
+
+| What | Rule |
+|------|------|
+| Detected | PSD student numbers, SSNs, email addresses, US phone numbers — four regexes, no ML |
+| Refused on a public file | One student number or SSN; **two or more distinct** emails or phone numbers (one front-office number in a flyer is allowed) |
+| Read | `.csv` `.txt` `.md` `.json` `.svg` and PDF text; UTF-8 and UTF-16 |
+| Too large to read in full | Text-extractable types over 32 MiB are refused at publish, before upload |
+
+**Accepted risks.** The check is a backstop for mistakes, not a barrier against an agent working around it. These limits are deliberate, so that refusals do not block legitimate public district content:
+
+- **Names, grades and free text are not detected.** A seating chart with names and grades but no student numbers passes.
+- **One contact detail per file is allowed**, and the check cannot tell a front-office number from a personal cell.
+- **Content the check cannot read is allowed, and logged as unscanned:** raster images, audio and video (never read); a PDF's scanned (image-only) pages (`reason: "needs-ocr"`); a PDF the parser cannot open, such as a password-protected one (`reason: "unreadable"`, with the parser's error class). Refusing image-only or unreadable PDFs would not close this gap: the same content rendered as a PNG is never read at all.
+
+The `psd-publish-file` skill tells the agent to deliver anything about a named person privately, and never to re-render refused data in another format. Unscanned uploads appear in the broker log as `Public link allowed without a contents check`, with their `reason`, so their volume can be watched. Refusals are recorded in `agent_failures` (`PublicArtifactPersonalDataRefused`, `NarrationPersonalDataRefused`).
+
 ### Violation Notifications
 
 Administrators can receive real-time notifications when the guardrail **blocks** content. Detect-only matches are not published to SNS (see `sendViolationNotification` in `lib/safety/bedrock-guardrails-service.ts`), so no notifications are sent under the current detect-only configuration:
@@ -460,15 +479,16 @@ To enable blocking, change `inputAction`/`outputAction` from `'NONE'` to `'BLOCK
 
 ### Adding Custom PII Patterns
 
-Amazon Comprehend detects standard PII (names, emails, phone numbers), but you may need to protect district-specific identifiers like student IDs or employee numbers. Custom patterns are defined in `lib/safety/types.ts`:
+Amazon Comprehend detects standard PII (names, emails, phone numbers), but you may need to protect district-specific identifiers like student IDs or employee numbers. Custom patterns are defined in `lib/safety/custom-pii-patterns.ts`:
 
 ```typescript
-// lib/safety/types.ts
+// lib/safety/custom-pii-patterns.ts
 export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
   {
     type: 'STUDENT_ID',
-    description: 'Student numbers - 7 digits starting with 2',
-    pattern: /\b2\d{6}\b/,
+    description: 'PSD401 student numbers - 7 digits starting with 2 (e.g., 2240393)',
+    // Read from lib/safety/personal-data-patterns.json — never re-typed (#1886)
+    pattern: PSD_STUDENT_ID_PATTERN,
     confidence: 1.0,
   },
   {
@@ -482,7 +502,7 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 
 **How to add a new pattern:**
 
-1. Open `lib/safety/types.ts`
+1. Open `lib/safety/custom-pii-patterns.ts`
 2. Add an entry to `CUSTOM_PII_PATTERNS` with:
    - `type`: Unique identifier (e.g., `STUDENT_ID`)
    - `description`: Human-readable explanation
@@ -499,12 +519,13 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
 
 | Identifier | Pattern | Matches |
 |------------|---------|---------|
-| 7-digit student ID starting with 2 | `/\b2\d{6}\b/` | 2240393, 2123456 |
 | Employee badge (E + 5 digits) | `/\bE\d{5}\b/i` | E12345, e54321 |
 | Case number (CASE-NNNN) | `/\bCASE-\d{4}\b/i` | CASE-1234 |
 | Custom ID with prefix | `/\bPSD-\d{6}\b/` | PSD-123456 |
 
 Custom patterns participate in the two detect-only telemetry points; they do not rewrite inference content and do not refuse a write.
+
+The student-number pattern is the exception to "write the regex here". It lives in `lib/safety/personal-data-patterns.json`, the single file the agent workspace's public-link check, chat-chart and psd-tts also read (#1886), and reaches this list as `PSD_STUDENT_ID_PATTERN`. Change it in that JSON file, never by re-typing it here.
 
 ## Local Development
 

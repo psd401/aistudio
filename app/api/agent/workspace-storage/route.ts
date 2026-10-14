@@ -14,10 +14,14 @@ import {
   ensureWorkspaceCheckpoint,
   finalizeWorkspaceCheckpoint,
   listWorkspaceObjects,
+  publicArtifactExtension,
   releaseWorkspaceUploads,
+  WorkspacePublicArtifactRefusedError,
   WorkspaceStorageAdmissionError,
   WorkspaceStorageCompletionError,
 } from "@/lib/agent-workspace/storage-broker"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { agentFailures } from "@/lib/db/schema"
 import {
   DriveDeliveryError,
   driveDeliveryExtension,
@@ -401,6 +405,62 @@ function executeDriveDeliveryUpload(
 }
 
 /**
+ * What the agent is told to do instead of retrying. Pasted into the response
+ * so the model does not have to remember the two private routes: #1885's Drive
+ * delivery, or an Atrium page that carries an owner and a visibility level.
+ */
+const PERSONAL_DATA_GUIDANCE =
+  "Do NOT retry this as a public link — it will be refused again. Deliver the " +
+  "file privately instead: `node /opt/psd-skills/psd-publish-file/publish.js " +
+  "--file <path>` (the default --to drive creates it in your Drive and shares " +
+  "it with the caller alone), or publish it as a private Atrium page. If the " +
+  "file is genuinely meant to be public, remove the personal data from it " +
+  "first and publish the redacted version."
+
+/**
+ * Count a refusal in `agent_failures` so the gate's false-positive rate is
+ * measurable (#1886 risk note: "log every refusal").
+ *
+ * Source `router` rather than `harness`: the refusal is the web broker's
+ * decision, not something the container reported about itself. Best-effort —
+ * the refusal response must be returned whether or not the row lands, so a
+ * failed insert is logged and swallowed.
+ */
+async function recordPublicArtifactRefusal(
+  error: WorkspacePublicArtifactRefusedError,
+  context: AgentInvocation,
+  requestId: string
+): Promise<void> {
+  try {
+    await executeQuery(
+      (db) =>
+        db.insert(agentFailures).values({
+          source: "router",
+          severity: "warn",
+          userId: context.ownerEmail,
+          sessionId: context.sessionId,
+          errorClass: "PublicArtifactPersonalDataRefused",
+          // The kinds, never the matched values.
+          errorMessage: `Public link refused: ${error.kinds.join(", ")}`,
+          context: { requestId, kinds: [...error.kinds] },
+        }),
+      "recordPublicArtifactPersonalDataRefusal"
+    )
+  } catch (insertError) {
+    log.error(
+      "Public link refusal could not be recorded",
+      sanitizeForLogging({
+        requestId,
+        error:
+          insertError instanceof Error
+            ? insertError.message
+            : String(insertError),
+      })
+    )
+  }
+}
+
+/**
  * Turn a broker rejection into the response the AGENT can act on.
  *
  * Two classes of error are reported verbatim rather than collapsed into the
@@ -419,6 +479,19 @@ function storageFailureResponse(error: unknown): NextResponse {
   const isInvalidRequest =
     error instanceof Error && error.message.startsWith("Invalid")
   const isDriveRefusal = error instanceof DriveDeliveryError
+  // A personal-data refusal is reported in full, with the guidance attached:
+  // this is the one rejection whose whole value is that the agent changes
+  // course instead of retrying. `kinds` names the patterns, never the values.
+  if (error instanceof WorkspacePublicArtifactRefusedError) {
+    return NextResponse.json(
+      {
+        error: `${error.message} ${PERSONAL_DATA_GUIDANCE}`,
+        code: error.code,
+        kinds: [...error.kinds],
+      },
+      { status: 422 }
+    )
+  }
   return NextResponse.json(
     {
       error:
@@ -459,12 +532,23 @@ function storageFailureStatus(
  * whose whole purpose is carrying personal data (often named after a student),
  * so at most a KNOWN deliverable extension is logged. Anything after the last
  * dot is not safe on its own: "Maria.Garcia" would log a surname.
+ *
+ * A public artifact's name (`publish`, `download-public`) gets the same
+ * treatment (#1886): it is agent-chosen too, and a refused publish is the one
+ * moment we know the file is about somebody — `Garcia_IEP_summary.pdf` must
+ * not land in CloudWatch.
  */
 function loggablePath(input: StorageRequest): string | undefined {
-  if (input.operation !== "drive-upload" || !input.path) return input.path
-  return isDriveDeliverableName(input.path)
-    ? `*${driveDeliveryExtension(input.path)}`
-    : "*"
+  if (!input.path) return input.path
+  if (input.operation === "drive-upload") {
+    return isDriveDeliverableName(input.path)
+      ? `*${driveDeliveryExtension(input.path)}`
+      : "*"
+  }
+  if (input.operation === "publish" || input.operation === "download-public") {
+    return `*${publicArtifactExtension(input.path)}`
+  }
+  return input.path
 }
 
 /**
@@ -530,6 +614,9 @@ export async function POST(request: NextRequest) {
         ...describeQueryErrorCause(error),
       })
     )
+    if (error instanceof WorkspacePublicArtifactRefusedError) {
+      await recordPublicArtifactRefusal(error, context, requestId)
+    }
     return storageFailureResponse(error)
   }
 }

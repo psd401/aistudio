@@ -12,6 +12,9 @@ S3 bucket under the public `public-images/` prefix, and return an unsigned HTTPS
 user can play in any browser (Google Chat renders it as a link). Same delivery model as
 `psd-image-gen` and `psd-html-artifact`.
 
+**The link is public and permanent.** Read "No personal data in narration"
+below before narrating anything about a named person.
+
 **Identity.** Requires `--user <caller-email>`. Pass the email verbatim from the
 `[caller: Name <email>]` header of the user turn (it scopes the S3 upload path).
 
@@ -40,12 +43,46 @@ Options:
 
 Returns JSON: `{ "status": "ok", "url": "...", "s3Key": "public-images/.../<uuid>.mp3", "voice": "Ruth", "engine": "generative", "characters": N, "chunks": N, "sharing": "public-by-link" }`.
 
+## No personal data in narration
+
+**The audio is public by link, and nothing can check it afterwards.** Like any
+public file, an MP3 this skill makes sits on an open URL for 30 days — but once
+the words are sound, no later check can read them: the public-link scan that
+refuses a roster CSV does not read audio. Seven morning-brief podcasts were
+found speaking contact details on open links this way (#1886).
+
+So the narration text is checked **before** synthesis, and a single match is
+refused: a phone number, an email address, a Social Security number or a PSD
+student number anywhere in the text returns `personal_data_detected` and
+nothing is sent to Polly and nothing is uploaded.
+
+This is stricter than the check on published *files*, where one contact detail
+(a school's front office number in a flyer footer) is allowed. Here it is not,
+because nothing is lost by avoiding it:
+
+- say **"call the front office"**, not the number;
+- say **"email Mrs Hall"**, not the address;
+- refer to students by **first name or role**, never by student number.
+
+When you get `personal_data_detected`, **rewrite the narration** along those
+lines and run the command again. Do not retry the same text, and do not split
+it up to get a number past the check. Within one run the whole text is checked
+before it is chunked for Polly, so that gains nothing; across SEPARATE runs —
+half a number in one recording, half in the next — the check cannot see it,
+and doing that would put the number in a public recording, which is the one
+thing this rule exists to stop.
+
+If the content genuinely needs to carry contact details, it should not be an
+open-link recording: write it as a file and deliver it privately with
+`psd-publish-file` (no `--to public`), or publish it to Atrium.
+
 ## Required Reply Format
 
 After the skill returns `status: ok`, your **next chat message MUST contain the bare `url`
 on a line by itself** (Google Chat renders it as a playable/downloadable link). Do not wrap
-it in Markdown link syntax or bold — bare URL only. The URL is public-by-link and does not
-expire; do not presign or re-upload it.
+it in Markdown link syntax or bold — bare URL only. The URL is public-by-link and the
+`expire-public-artifacts` lifecycle rule deletes it after 30 days; do not presign or
+re-upload it.
 
 ## Voice & engine guidance
 
@@ -65,4 +102,11 @@ expire; do not presign or re-upload it.
 - **`upstream_error`** — Polly rejected the request (e.g. a voice not offered by the chosen
   engine) or the owner-bound artifact broker failed. Check the voice/engine pairing in
   `references/voices.md`.
+- **`personal_data_detected`** — the narration contains a phone number, email
+  address, SSN or student number. Nothing was synthesised or uploaded. Rewrite
+  the text without it (see above) — a retry of the same text is refused again.
+- **`gate_unavailable`** — the personal-data check could not run, so nothing
+  was synthesised. This is an image defect, not something to work around, and
+  nothing records it for you: tell the user audio is unavailable and report it
+  with `psd-failure-report`.
 - **`misconfigured`** — the trusted web broker is not configured.

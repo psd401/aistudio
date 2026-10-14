@@ -234,3 +234,107 @@ describe('broker error codes', () => {
     }
   });
 });
+
+describe('a public link refused for personal data (#1886)', () => {
+  /** Bind the fixed loopback port and answer every broker call with `body`. */
+  async function withFakeBroker(status, body, assertions) {
+    const server = http.createServer((req, res) => {
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    });
+    const bound = await new Promise((resolve) => {
+      server.once('error', () => resolve(false));
+      server.listen(18791, '127.0.0.1', () => resolve(true));
+    });
+    // Port held by a real broker on this machine; nothing to assert against.
+    if (!bound) return;
+    try {
+      await assertions();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  }
+
+  function runAsync(args) {
+    const child = spawn('node', [CLI, ...args], {
+      cwd: path.join(__dirname, '..', '..', '..', '..'),
+    });
+    let stdout = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    return new Promise((resolve) => {
+      child.on('close', (code) => resolve({ code, stdout }));
+    });
+  }
+
+  // The one wrong move on this refusal is retrying the same file at the same
+  // destination, so the message has to say so in words the model will follow —
+  // not the broker's generic "Agent broker rejected the request" wrapper.
+  test('surfaces the code and tells the agent to deliver privately instead', async () => {
+    await withFakeBroker(
+      422,
+      {
+        error: 'Public link refused: the file contains psd-student-id.',
+        code: 'personal_data_detected',
+        kinds: ['psd-student-id'],
+      },
+      async () => {
+        const file = write('roster.csv', 'student_id\n2240393\n2187654\n');
+        const { code, stdout } = await runAsync([
+          '--file',
+          file,
+          '--to',
+          'public',
+        ]);
+        expect(code).toBe(1);
+        const json = JSON.parse(stdout.trim());
+        expect(json.error).toBe('personal_data_detected');
+        expect(json.message).toContain('psd-student-id');
+        // Names both private routes, and says not to retry.
+        expect(json.message).toContain('Do NOT retry');
+        expect(json.message).toContain('--to drive');
+        expect(json.message).toContain('psd-atrium');
+        // Never the broker's own wrapper, which reads as a transport failure.
+        expect(json.message).not.toContain('Agent broker rejected');
+      }
+    );
+  });
+
+  test('names every kind the broker reported', async () => {
+    await withFakeBroker(
+      422,
+      {
+        error: 'Public link refused.',
+        code: 'personal_data_detected',
+        kinds: ['email', 'us-phone'],
+      },
+      async () => {
+        const file = write('subs.csv', 'a@b.net,253-555-0147\n');
+        const { stdout } = await runAsync(['--file', file, '--to', 'public']);
+        const json = JSON.parse(stdout.trim());
+        expect(json.message).toContain('email, us-phone');
+      }
+    );
+  });
+
+  test('falls back to generic wording when the broker sends no kinds', async () => {
+    await withFakeBroker(
+      422,
+      { error: 'Public link refused.', code: 'personal_data_detected' },
+      async () => {
+        const file = write('note.txt', 'anything\n');
+        const { code, stdout } = await runAsync([
+          '--file',
+          file,
+          '--to',
+          'public',
+        ]);
+        expect(code).toBe(1);
+        const json = JSON.parse(stdout.trim());
+        expect(json.error).toBe('personal_data_detected');
+        expect(json.message).toContain('personal data');
+      }
+    );
+  });
+});

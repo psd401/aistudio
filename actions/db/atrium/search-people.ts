@@ -31,8 +31,6 @@ import { hasCapabilityAccess } from "@/utils/roles";
 import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
-export type { PersonOption };
-
 export async function searchPeopleAction(
   query: string
 ): Promise<ActionState<PersonOption[]>> {

@@ -130,6 +130,12 @@ const MALICIOUS_PKG = JSON.stringify({
   },
 });
 
+// These run a REAL `npm install`. The first one on a fresh CI runner pays for
+// an empty npm cache and has taken ~9s, past bun's 5s default — a timeout
+// that failed the CDK gate with nothing wrong in the code. The function under
+// test allows npm two minutes; a minute is ample here.
+const NPM_INSTALL_TEST_TIMEOUT_MS = 60_000;
+
 describe("installSkillDependencies (REV-INFRA-061)", () => {
   test("does NOT execute a malicious postinstall lifecycle script", () => {
     const dir = makeSkillDir();
@@ -140,7 +146,7 @@ describe("installSkillDependencies (REV-INFRA-061)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, NPM_INSTALL_TEST_TIMEOUT_MS);
 
   test("control: the same postinstall DOES run without --ignore-scripts (fixture is valid)", () => {
     const dir = makeSkillDir();
@@ -155,7 +161,7 @@ describe("installSkillDependencies (REV-INFRA-061)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, NPM_INSTALL_TEST_TIMEOUT_MS);
 
   test("a benign skill (no scripts, no deps) installs without error", () => {
     const dir = makeSkillDir();
@@ -168,7 +174,7 @@ describe("installSkillDependencies (REV-INFRA-061)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, NPM_INSTALL_TEST_TIMEOUT_MS);
 });
 
 describe("auditInstalledDeps (REV-INFRA-062)", () => {

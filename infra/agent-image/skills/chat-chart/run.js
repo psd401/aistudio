@@ -32,6 +32,7 @@
 
 const { randomUUID } = require('node:crypto');
 const { publishArtifact } = require('../_shared/artifact-publisher');
+const { firstPersonalDataKind } = require('../_shared/personal-data');
 const { renderChartPng } = require('./render_local');
 
 const RICH_ENVELOPE_OPEN = '<<<PSD_AGENT_RICH_V1>>>';
@@ -45,32 +46,17 @@ const ALLOWED_ENGINES = new Set(['auto', 'quickchart', 'local']);
 // the real safety knob), and a false positive costs nothing worse than
 // rendering on-host, which is where charts go by default anyway.
 //
-// Every quantifier is bounded. The email pattern's two character classes
-// both contain `.`, so unbounded `+`s backtrack quadratically: a single
-// 60KB label took 5s of CPU to reject, and argv allows twice that.
+// The patterns themselves are NOT written here any more (#1886). They come
+// from lib/safety/personal-data-patterns.json, the one file every runtime that
+// looks for a student number, an email, a phone number or an SSN reads them
+// from — this gate, the storage broker's public-link check, psd-tts's
+// narration check, and the app's lib/safety/types.ts.
 //
-// Bounding alone was not enough. Written as `<label>(?:\.<label>){0,4}\.<tld>`
-// the domain was both ambiguous (the trailing `\.[A-Za-z]{2,24}` can equally be
-// matched by an iteration of the group, since the label class is a superset of
-// the TLD class) and star-height 2 — a quantifier nested inside a quantified
-// group, which `security/detect-unsafe-regex` rejects however tight the bounds.
-//
-// Flattened to a single level: one dot-free label, a literal dot, then the rest
-// of the domain. The first class excludes `.`, so the literal dot can only land
-// at that run's boundary — one split, no nested repetition, nothing to
-// backtrack over. Subdomains still match because the tail class allows dots.
-// A backstop is allowed to be coarse; `--sensitive` is the real safety knob.
-const PII_PATTERNS = [
-  { name: 'email', re: /[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}\.[A-Za-z0-9.-]{1,63}/ },
-  { name: 'ssn', re: /\b\d{3}-\d{2}-\d{4}\b/ },
-  { name: 'us-phone', re: /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
-  { name: 'us-phone', re: /\(\d{3}\)\s\d{3}-\d{4}\b/ },
-  { name: 'us-phone', re: /\b1[-.\s]\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/ },
-  { name: 'us-phone', re: /\b1\d{10}\b/ },
-  // PSD student IDs: 7 digits starting with 2. Matches the convention used
-  // by lib/safety/types.ts in the Next.js app.
-  { name: 'psd-student-id', re: /\b2\d{6}\b/ },
-];
+// That file's comments carry the constraints these patterns have to keep:
+// every quantifier bounded (a 60KB label took 5s of CPU to reject when the
+// email pattern's `+`s were unbounded, and argv allows twice that), and no
+// nested quantification, which `security/detect-unsafe-regex` rejects however
+// tight the bounds. run.test.js holds the 120KB timing test that proves it.
 
 /**
  * A caller mistake: a bad flag, a malformed --data-json, a series missing a
@@ -159,11 +145,11 @@ function validateEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+// Kept as a named function rather than re-exporting the shared one: run.js's
+// own tests and callers address `detectPII`, and the shared module's name says
+// what it returns rather than what this gate calls it.
 function detectPII(text) {
-  for (const { name, re } of PII_PATTERNS) {
-    if (re.test(text)) return name;
-  }
-  return null;
+  return firstPersonalDataKind(text);
 }
 
 function chooseEngine(args, dataText) {

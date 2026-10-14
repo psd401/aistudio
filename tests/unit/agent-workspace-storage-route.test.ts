@@ -16,6 +16,7 @@ const deleteWorkspacePathMock = jest.fn()
 const releaseWorkspaceUploadsMock = jest.fn()
 const createDriveDeliveryUploadMock = jest.fn()
 const deliverStagedUploadToDriveMock = jest.fn()
+const executeQueryMock = jest.fn()
 
 jest.mock("@/lib/agent-workspace/invocation-context", () => ({
   verifyAgentInvocationContext: (...args: unknown[]) =>
@@ -24,6 +25,18 @@ jest.mock("@/lib/agent-workspace/invocation-context", () => ({
 jest.mock("@/lib/agent-workspace/storage-broker", () => ({
   WorkspaceStorageAdmissionError: class WorkspaceStorageAdmissionError extends Error {},
   WorkspaceStorageCompletionError: class WorkspaceStorageCompletionError extends Error {},
+  // #1886. Mirrors the real class's shape: a fixed `code` and the KINDS that
+  // matched, never the matched values.
+  WorkspacePublicArtifactRefusedError: class WorkspacePublicArtifactRefusedError extends Error {
+    readonly code = "personal_data_detected"
+    constructor(readonly kinds: readonly string[]) {
+      super(
+        `Public link refused: the file contains ${kinds.join(", ")}. ` +
+          "Deliver it privately instead.",
+      )
+      this.name = "WorkspacePublicArtifactRefusedError"
+    }
+  },
   listWorkspaceObjects: (...args: unknown[]) =>
     listWorkspaceObjectsMock(...args),
   createWorkspaceDownloadUrl: (...args: unknown[]) =>
@@ -34,6 +47,14 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
     createPublicArtifactUploadMock(...args),
   createPublicArtifactDownloadUrl: (...args: unknown[]) =>
     createPublicArtifactDownloadUrlMock(...args),
+  // The real one: a pure string helper, kept real so the log-redaction tests
+  // exercise the broker's own allowlist rather than a copy of it.
+  publicArtifactExtension: (name: string) =>
+    jest
+      .requireActual<typeof import("@/lib/agent-workspace/storage-broker")>(
+        "@/lib/agent-workspace/storage-broker",
+      )
+      .publicArtifactExtension(name),
   completeWorkspaceUpload: (...args: unknown[]) =>
     completeWorkspaceUploadMock(...args),
   ensureWorkspaceCheckpoint: (...args: unknown[]) =>
@@ -51,19 +72,32 @@ jest.mock("@/lib/agent-workspace/storage-broker", () => ({
   deliverStagedUploadToDrive: (...args: unknown[]) =>
     deliverStagedUploadToDriveMock(...args),
 }))
+// The route counts a #1886 refusal in `agent_failures`. Mocked at the query
+// layer so the assertion is on WHAT is written, with no database involved.
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeQuery: (...args: unknown[]) => executeQueryMock(...args),
+}))
+jest.mock("@/lib/db/schema", () => ({
+  agentFailures: "agent_failures_table",
+}))
 const mockLogInfo = jest.fn()
 const mockLogWarn = jest.fn()
+const mockLogError = jest.fn()
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
     info: (...args: unknown[]) => mockLogInfo(...args),
     warn: (...args: unknown[]) => mockLogWarn(...args),
+    error: (...args: unknown[]) => mockLogError(...args),
   }),
   generateRequestId: () => "storage-request-id",
   sanitizeForLogging: (value: unknown) => value,
 }))
 
 import { POST } from "@/app/api/agent/workspace-storage/route"
-import { WorkspaceStorageCompletionError } from "@/lib/agent-workspace/storage-broker"
+import {
+  WorkspacePublicArtifactRefusedError,
+  WorkspaceStorageCompletionError,
+} from "@/lib/agent-workspace/storage-broker"
 
 const CHECKPOINT_FINALIZATION_PROOF = "signed-checkpoint-finalization-proof"
 
@@ -75,6 +109,7 @@ function request(body: unknown): NextRequest {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  executeQueryMock.mockResolvedValue([{ id: 1 }])
   verifyContextMock.mockResolvedValue({
     ownerEmail: "owner@example.com",
     actorEmail: "owner@example.com",
@@ -822,5 +857,126 @@ describe("POST /api/agent/workspace-storage", () => {
       "memory/removed.md",
       "2".repeat(64),
     )
+  })
+})
+
+describe("POST /api/agent/workspace-storage — public link refused (#1886)", () => {
+  function refuse(kinds: readonly string[]) {
+    completeWorkspaceUploadMock.mockRejectedValue(
+      new WorkspacePublicArtifactRefusedError(kinds),
+    )
+    return POST(
+      request({
+        operation: "complete-upload",
+        reservationId: "11111111-2222-4333-8444-555555555555",
+      }),
+    )
+  }
+
+  // 422, not 409: a 409 is the "lost completion race, retry" status the broker
+  // uses elsewhere, and this refusal is the one rejection where a retry is
+  // exactly the wrong move.
+  it("answers 422 with the code, the kinds and the private-delivery guidance", async () => {
+    const response = await refuse(["psd-student-id"])
+
+    expect(response.status).toBe(422)
+    const body = (await response.json()) as {
+      error: string
+      code: string
+      kinds: string[]
+    }
+    expect(body.code).toBe("personal_data_detected")
+    expect(body.kinds).toEqual(["psd-student-id"])
+    expect(body.error).toContain("psd-student-id")
+    expect(body.error).toContain("Do NOT retry")
+    // Names BOTH private routes, so the agent does not have to remember them.
+    expect(body.error).toContain("--to drive")
+    expect(body.error).toContain("Atrium")
+  })
+
+  it("reports every kind that matched", async () => {
+    const response = await refuse(["email", "us-phone"])
+    await expect(response.json()).resolves.toMatchObject({
+      code: "personal_data_detected",
+      kinds: ["email", "us-phone"],
+    })
+  })
+
+  it("counts the refusal in agent_failures as a router warning", async () => {
+    await refuse(["ssn"])
+
+    const insert = executeQueryMock.mock.calls.find(
+      (call) => call[1] === "recordPublicArtifactPersonalDataRefusal",
+    )
+    expect(insert).toBeDefined()
+    const values: Record<string, unknown>[] = []
+    const db = {
+      insert: () => ({
+        values: (row: Record<string, unknown>) => {
+          values.push(row)
+          return row
+        },
+      }),
+    }
+    ;(insert![0] as (database: typeof db) => unknown)(db)
+    expect(values[0]).toMatchObject({
+      source: "router",
+      severity: "warn",
+      userId: "owner@example.com",
+      sessionId: "session-1",
+      errorClass: "PublicArtifactPersonalDataRefused",
+    })
+    expect(values[0]!.errorMessage).toContain("ssn")
+  })
+
+  it("still returns the refusal when the failure row cannot be written", async () => {
+    // Best-effort reporting: losing the count must not turn a clean refusal
+    // into a 502 the agent reads as "retry later".
+    executeQueryMock.mockRejectedValue(new Error("database unavailable"))
+    const response = await refuse(["ssn"])
+
+    expect(response.status).toBe(422)
+    await expect(response.json()).resolves.toMatchObject({
+      code: "personal_data_detected",
+    })
+    expect(mockLogError).toHaveBeenCalled()
+  })
+
+  it("never logs a public artifact's name, only its extension", async () => {
+    const studentFile = "Garcia_IEP_summary.pdf"
+    const body = {
+      operation: "publish",
+      path: studentFile,
+      contentType: "application/pdf",
+      contentLength: 10,
+      idempotencyKey: "publish-idempotency",
+      checksumSha256: "A".repeat(43) + "=",
+    }
+    mockLogInfo.mockClear()
+    mockLogWarn.mockClear()
+    await POST(request(body))
+    createPublicArtifactUploadMock.mockRejectedValueOnce(new Error("boom"))
+    await POST(request(body))
+    createPublicArtifactDownloadUrlMock.mockRejectedValueOnce(new Error("boom"))
+    await POST(
+      request({ operation: "download-public", path: "Maria.Garcia" }),
+    )
+
+    const logged = JSON.stringify([
+      ...mockLogInfo.mock.calls,
+      ...mockLogWarn.mock.calls,
+    ])
+    expect(mockLogWarn).toHaveBeenCalled()
+    expect(logged.toLowerCase()).not.toContain("garcia")
+    expect(logged).toContain('"path":"*.pdf"')
+    // A last dot-segment that is not a publishable type is not logged either.
+    expect(logged).toContain('"path":"*"')
+  })
+
+  it("logs the kinds and never the file name on a refusal", async () => {
+    await refuse(["psd-student-id"])
+    const logged = JSON.stringify(mockLogWarn.mock.calls)
+    expect(logged).toContain("psd-student-id")
+    expect(logged).not.toContain("2240393")
   })
 })

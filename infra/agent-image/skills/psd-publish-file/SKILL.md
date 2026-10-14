@@ -45,6 +45,7 @@ Ask one question: **would you hand this file to a stranger who found the URL?**
 | Anything with a named individual's data in it | **Drive** (default) |
 | An internal draft, a report for one person, a working document | **Drive** (default) |
 | A public flyer, a published agenda, a board packet already public, a chart | `--to public` |
+| Audio you made with psd-tts | public by link, with no expiry — see psd-tts |
 
 A Drive link opens **only for the user you are working for**. If they want
 someone else to have the file, they share it from their Drive themselves — do
@@ -59,6 +60,17 @@ existed.
 `publish.js` cannot make this judgement for you — it checks size and extension,
 never contents.
 
+**The broker does read the contents, though, and it will refuse you.** Since
+#1886, a `--to public` upload whose type a text check can read —
+<!-- scanned-types -->`.csv`, `.txt`, `.md`, `.json`, `.svg` and the text of a
+`.pdf`<!-- /scanned-types --> — is scanned for student and staff personal data
+before the link is minted. A match returns `personal_data_detected` and nothing
+is published. That is a backstop for mistakes, not a reason to stop judging: it
+looks for student numbers, Social Security numbers, email addresses and phone
+numbers only. It cannot see names, grades, discipline notes, IEP content or a
+photo of a class list, it does not read the scanned (image) pages of a PDF, and
+it does not read raster images, audio or video at all.
+
 ## What you can deliver
 
 **To Drive (default):** `.pdf` `.docx` `.xlsx` `.pptx` `.csv` `.md` `.txt`
@@ -69,6 +81,11 @@ never contents.
 
 Maximum 100 MB either way. Anything else is refused by name, and the error says
 whether the other destination accepts it.
+
+One tighter limit: a `.csv`, `.txt`, `.md`, `.json`, `.svg` or `.pdf` going to a
+**public link** may be at most **32 MiB**, because the personal-data check reads
+it in full. A larger one is refused before upload — deliver it to Drive, or
+split it.
 
 **Word, Excel and PowerPoint can ONLY go to Drive.** There is no public path for
 them, and that is deliberate: an Office file belongs somewhere it opens in
@@ -108,6 +125,38 @@ The error carries a machine-readable `code`:
   is. Convert, or use the destination it names.
 - `content_type_mismatch` — drop the `--content-type` flag and let the
   extension decide.
+
+## If a public link is refused for personal data
+
+`code: "personal_data_detected"`, and the message names what matched — a
+student number, an SSN, email addresses or phone numbers.
+
+**This refusal is final. Do not retry it.** Nothing was published and the
+staged bytes were deleted. Do one of these instead:
+
+1. **Deliver it privately** — run the same command without `--to public`. The
+   file goes into your Drive and is shared with the caller alone. This is
+   almost always the right answer, and it is why the refusal exists.
+2. **Publish it as a private Atrium page** (`psd-atrium`), if it is a document
+   the district should be able to find internally.
+3. **Redact and republish** — only when the file genuinely is meant to be
+   public and the personal data was a mistake in it. Remove the data, write a
+   new file, and publish that.
+
+**Do not change the file's type to get it past the check.** Re-rendering the
+same data as a `.png`, `.mp3` or `.mp4` — or as a scanned PDF — and publishing
+that would go through unread, and it would put exactly the same personal data
+on exactly the same kind of open link. The refusal is about the contents, not
+the format; a different format is still the wrong destination.
+
+Tell the user plainly what happened: the file has personal data in it, so it
+has been delivered privately rather than as a public link. Do not describe the
+refusal as a failure or an error — it worked.
+
+One contact detail is allowed through: a flyer carrying the school's own front
+office number is not a contact list, and refusing it would block exactly the
+public content this skill is for. Two or more distinct phone numbers or email
+addresses is a contact list, and that is refused.
 
 ## Pasting the link
 
