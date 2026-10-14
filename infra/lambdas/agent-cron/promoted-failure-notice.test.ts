@@ -247,14 +247,22 @@ describe('only a guard failure that MISSED the owner speaks', () => {
     ['fire-config'],
     ['fire-acquire'],
     ['fire-begin'],
-    ['fire-in-progress'],
-    ['fire-executing'],
-    ['fire-completed'],
     ['lock-config'],
     ['lock-acquire'],
     ['lock-contention'],
   ])('%s means the run never reached the owner', (phase) => {
     expect(guardFailureMissedTheOwner({ phase } as never)).toBe(true);
+  });
+
+  test.each([
+    ['fire-in-progress'],
+    ['fire-executing'],
+    ['fire-completed'],
+  ])('%s does NOT, because another invocation owns the fire', (phase) => {
+    // A duplicate invocation found the fire already claimed. The owning
+    // invocation can still deliver (or already did), so "has not reached
+    // you" would be told minutes before the brief arrives.
+    expect(guardFailureMissedTheOwner({ phase } as never)).toBe(false);
   });
 
   test('fire-completion does NOT, because the post already landed', () => {
@@ -278,5 +286,50 @@ describe('only a guard failure that MISSED the owner speaks', () => {
     expect(
       guardFailureMissedTheOwner({ phase: 'some-future-phase' } as never),
     ).toBe(false);
+  });
+});
+
+describe('a completion-marker gap never rewrites the delivered run', () => {
+  test('records a failure under the fire key and writes no run row', async () => {
+    // The run row for this fire already says `success`, under the same
+    // fire_key a run write would upsert onto. The gap must reach the failure
+    // feed and nothing else, or a delivered brief is counted as a failed run.
+    const recorded: unknown[] = [];
+    const telemetry = {
+      recordCronFailure: async (record: unknown) => {
+        recorded.push(record);
+      },
+    };
+
+    await agentCronTestHelpers.recordFireCompletionGap(
+      {
+        schedule: {
+          ownerEmail: 'owner@psd401.net',
+          scheduleId: 'sched-morning',
+        },
+        scheduleName: 'Morning brief',
+        sessionId: 'agent-rt-owner-sched',
+        runtimeSessionId: 'agent-rt-owner-sched',
+        workspaceLockId: 'owner',
+        startTime: 0,
+        fireIdentity: { key: FIRE_KEY },
+        log: silentLog(),
+      } as never,
+      'ConditionalCheckFailedException',
+      telemetry,
+    );
+
+    expect(recorded).toEqual([
+      {
+        userEmail: 'owner@psd401.net',
+        scheduleId: 'sched-morning',
+        fireKey: FIRE_KEY,
+        scheduleName: 'Morning brief',
+        sessionId: 'agent-rt-owner-sched',
+        errorMessage: 'ConditionalCheckFailedException',
+        severity: 'error',
+        context: { phase: 'fire-completion' },
+      },
+    ]);
   });
 });

@@ -98,6 +98,7 @@ import {
   reservePromotedRunId,
   settlePromotedTurnFailure,
   updatePromotedRunTerminal,
+  type RunTelemetry,
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
 import {
@@ -2364,20 +2365,22 @@ type ScheduleGuardFailure = JobLockFailure | ScheduleFireFailure;
  * not reached you" — a phase added later that fires after delivery would, by
  * default, tell someone a schedule they just received had not arrived.
  *
- * `fire-completion` is the case that matters today: `finalizeScheduleFire`
- * records an error with that phase when the completion marker cannot be
- * persisted AFTER the turn has already delivered. That is a durability gap
- * worth a failure row and an alarm, and it is not a missed run.
- * `lock-renew` is excluded for the same reason — a renewal failure happens
- * once the turn is already under way.
+ * Left out, deliberately:
+ * - `fire-in-progress` / `fire-executing` / `fire-completed`: each is a
+ *   duplicate invocation that found ANOTHER invocation already owning this
+ *   fire. That other one can still deliver (or already has), so a notice here
+ *   could tell the owner a run is missing minutes before it arrives. Today
+ *   these are `recordRun: false` and never reach this path at all; leaving
+ *   them out keeps that true if the flag ever changes.
+ * - `lock-renew`: a renewal failure happens once the turn is already under
+ *   way.
+ * - `fire-completion` never arrives here: `finalizeScheduleFire` records it
+ *   as a failure only, because it fires AFTER delivery.
  */
 const OWNER_MISSED_GUARD_PHASES: ReadonlySet<string> = new Set([
   'fire-config',
   'fire-acquire',
   'fire-begin',
-  'fire-in-progress',
-  'fire-executing',
-  'fire-completed',
   'lock-config',
   'lock-acquire',
   'lock-contention',
@@ -2564,16 +2567,37 @@ async function finalizeScheduleFire(
   // The scheduled turn has already reached a terminal external outcome. Make
   // the durability gap visible, but never release/retry the claim here: doing
   // so would replay AgentCore tools and Chat delivery after successful work.
-  await recordScheduleGuardFailure(
-    context,
+  await recordFireCompletionGap(context, completion.errorMessage);
+}
+
+/**
+ * A failure record ONLY, never a run row — which is why `telemetry` is typed to
+ * offer nothing else.
+ *
+ * The run row for this fire already holds its real outcome under the same
+ * `fire_key`, and a run write would upsert over it: a brief the owner just
+ * received would become an `error` that both streak readers count, that
+ * `list` reports as failing, and that a later genuine failure would cite in
+ * "has not reached you for N runs" (#1890).
+ */
+async function recordFireCompletionGap(
+  context: Omit<LockedScheduleContext, 'lambdaContext'>,
+  errorMessage: string,
+  telemetry: Pick<RunTelemetry, 'recordCronFailure'> = runTelemetry,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, log } = context;
+  await telemetry.recordCronFailure(
     {
-      phase: 'fire-completion',
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      fireKey: context.fireIdentity?.key,
+      scheduleName,
+      sessionId,
+      errorMessage,
       severity: 'error',
-      errorMessage: completion.errorMessage,
-      retryable: false,
-      recordRun: true,
+      context: { phase: 'fire-completion' },
     },
-    'error',
+    log,
   );
 }
 
@@ -2977,6 +3001,7 @@ export const agentCronTestHelpers = {
   deliverScheduledResultWithDependencies,
   scheduledDeliveryDependencies,
   guardFailureMissedTheOwner: missedTheOwner,
+  recordFireCompletionGap,
 };
 
 export async function handler(
