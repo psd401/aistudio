@@ -81,6 +81,7 @@ test('broker errors fail closed and preserve no secret response text', async () 
 const CLIS = [
   'put.js',
   'request_new.js',
+  'request_entry.js',
   'check_capability.js',
 ];
 

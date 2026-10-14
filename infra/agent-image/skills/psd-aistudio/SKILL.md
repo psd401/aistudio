@@ -40,14 +40,18 @@ node /opt/psd-skills/psd-aistudio/run.js connect --user <caller-email>
 node /opt/psd-skills/psd-aistudio/run.js disconnect --user <caller-email>
 ```
 
-Legacy API-key compatibility remains available (the value never appears in chat, logs, or files —
-though, like any CLI argument, `--value` is briefly visible in the machine's
-process list while `put.js` runs; same caveat psd-credentials documents):
+Legacy API-key compatibility remains available. Collect the key with a one-time
+entry link — never by asking the caller to paste it in chat (#1887). The value
+goes straight to encrypted storage without passing through you, your tool-call
+arguments, or the process list:
 
 ```bash
-node /opt/psd-skills/psd-credentials/put.js \
-  --name aistudio_personal_key --value <the caller's sk- key>
+node /opt/psd-skills/psd-credentials/request_entry.js \
+  --name aistudio_personal_key --label "AI Studio personal API key"
 ```
+
+Send the returned `url` on a line by itself — no markdown, no parens, no
+trailing period. It works once and expires in 15 minutes.
 
 The broker returns only which credential class it used (`oauth`, `personal`, or
 `shared`) — never the value. Provider tokens, API keys, Authorization headers,

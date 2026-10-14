@@ -99,15 +99,17 @@ function getApiKey(userEmail) {
 }
 
 /**
- * Print the structured prompt the agent should surface to the user when
- * they have not registered their Freshservice API key yet. Exits 2 so
- * the agent can detect the registration-needed state distinctly from
- * other failure modes.
+ * Print the structured prompt the agent should surface to the user when they
+ * have not registered their Freshservice API key yet. Exits 2 so the agent can
+ * detect the registration-needed state distinctly from other failure modes.
  *
- * Note: The storeCommand passes the secret via --value CLI argument,
- * which is visible in ps output for the process lifetime. This is a
- * known trade-off documented in psd-credentials/SKILL.md § "CLI argument
- * exposure". A future improvement will pipe the value via stdin.
+ * This used to tell the agent to ask the user to paste the key into chat, and
+ * handed it a `put.js --value %%VALUE%%` command to run with the pasted
+ * string. About 15 staff did exactly that between August and October 2026, so
+ * their ticketing keys are now sitting in `agent_message_content.content_text`
+ * unredacted (issue #1887). The replacement mints a one-time entry link: the
+ * user types the key into a password field on an AI Studio page and the value
+ * never reaches the model, the transcript, or a process argv.
  */
 function promptForKey(userEmail, reason) {
   process.stdout.write(JSON.stringify({
@@ -115,22 +117,26 @@ function promptForKey(userEmail, reason) {
     user: userEmail,
     reason: reason || 'credential not provisioned',
     instructions: [
-      'Open https://psd401.freshservice.com/agent/profile and copy your personal API key.',
-      'Paste it back to me in chat — I will store it securely in Secrets Manager so I can reuse it next time.',
-      'After you paste, I will retry the command via psd-credentials put.',
+      'Run the entryLinkCommand below to mint a one-time secure entry link.',
+      'Send the returned url to the user on a line by itself — no markdown, no parens, no trailing period.',
+      'Tell them to open https://psd401.freshservice.com/agent/profile, copy their personal API key, and paste it into that page (not into this chat).',
+      'The link works once and expires in 15 minutes. After they confirm they saved it, retry the original command.',
     ],
-    storeCommand: {
+    // There is no storeCommand on purpose: the agent never handles the value.
+    doNotAskForPaste:
+      'Never ask the user to paste, type, or read back an API key, token, or '
+      + 'password in chat. If they paste one anyway, do not repeat it and do NOT '
+      + 'store it with psd-credentials put.js — passing it as --value copies the '
+      + 'plaintext into your own tool-call record. Tell them the key is now in '
+      + 'the transcript and must be regenerated at Freshservice, then send a '
+      + 'fresh entry link for the new one.',
+    entryLinkCommand: {
       cmd: 'node',
       args: [
-        '/opt/psd-skills/psd-credentials/put.js',
+        '/opt/psd-skills/psd-credentials/request_entry.js',
         '--name', 'freshservice_api_key',
-        '--value', '%%VALUE%%',
+        '--label', 'Freshservice personal API key',
       ],
-      // The %%VALUE%% marker is where the agent must substitute the user's
-      // pasted API key. Using a distinctive marker (vs. natural language like
-      // "<PASTE THE KEY HERE>") makes substitution unambiguous in the args
-      // array and harder for the agent to mis-splice.
-      substitution: { '%%VALUE%%': 'Replace with the user-supplied Freshservice API key' },
     },
   }, null, 2) + '\n');
   process.exit(2);
@@ -287,6 +293,9 @@ module.exports = {
   validateEmail,
   requireUser,
   getApiKey,
+  // Exported for the no-chat-paste regression test (#1887). It calls
+  // process.exit(2), so that test drives it in a child process.
+  promptForKey,
   fsFetch,
   requireTicketId,
   parseJsonArg,
