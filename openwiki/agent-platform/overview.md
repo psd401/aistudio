@@ -10,6 +10,11 @@ openwiki:
     - lib/agent-workspace/storage-broker.ts
     - infra/agent-image/skills/psd-publish-file/publish.js
     - infra/agent-image/skills/_shared/drive-deliverer.js
+    - lib/agent-schedules/validation.ts
+    - lib/agent-schedules/schedule-description.ts
+    - lib/agent-schedules/schedule-audit.ts
+    - scripts/audit-agent-schedules.ts
+    - infra/agent-image/skills/psd-schedules/common.js
     - infra/lambdas/agent-cron/thread-session-map.ts
     - infra/lambdas/agent-router/thread-session-map.ts
     - infra/agent-image/skills/psd-atrium/SKILL.md
@@ -83,7 +88,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-atrium` — Read/search/create content in Atrium; artifact data persistence (list-data, submit); viewer-scoped PSD data queries from artifacts via shared connector resolution with Nexus; CSP guidance for artifact scripts/styles (inline preferred, CDN allowlist enforced); visibility/grant management with `read-grants` command and merge mode (`--add-grants`/`--remove-grants`) for safe audience changes (#1763); per-person sharing via `find-people` to resolve email/name to users.id plus `add-person` for staff who never signed in (#1860); "Live PSD data inside an artifact" section mirrors `lib/content/atrium-data-contract.ts` guidance but is hand-maintained — change both when the bridge contract changes (#1749)
 - `psd-freshservice` — Freshservice tickets, service catalog items, approvals, and team summaries using each caller's own API key; create catalog request forms with field validation
 - `psd-email-triage` — Smart email triage with three-stage classification (rules → content → LLM), human sender protection (never muted, never marked as news), rhetorical question guard (`hasDirectQuestion` requires second-person clause), automated-sender veto on question/action-request branch, bulk-publication detection (List-Unsubscribe or bulk Precedence, publication wording, and marketing footers) filed as News (#1866), keyword rules with stable IDs, preferences system for user-stated classification intent, and real digest counts from daily stats. Configured entirely from chat. See `/docs/operations/email-triage.md` for runtime architecture and Phase 3 (#1855, #1861) details
-- `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM
+- `psd-schedules` — Scheduled agent tasks (cron/rate/at) with read access for scheduled-mode turns; reply IS the delivery — never hunt for DM; confirms saved schedules from the broker's `description` and `nextRuns` read-back, see [Agent Schedules](agent-schedules.md)
 - `psd-rules` — Tier-1 governance rules for agent behavior
 - `psd-conversation-coach` — Crucial Conversations framework coaching for difficult conversations
 - `psd-morning-brief` — Personalized daily newspaper/podcast delivered through private Atrium artifacts
@@ -1355,6 +1360,8 @@ Schedule management routes use a **read/write split** for authorization:
 This allows scheduled runs to audit their own schedules without mutating them. A scheduled-mode turn that attempts `create`, `update`, or `delete` receives a 403 after the same cryptographic verification as owner-mode requests.
 
 The `SCHEDULED_READ_OPERATIONS` allowlist ensures new write operations default to owner-only rather than silently inheriting scheduled access.
+
+Expression validation (the EventBridge cron dialect rules), the `description` and `nextRuns` read-back that every schedule response carries, and the read-only audit of stored schedules are documented in **[agent-schedules.md](agent-schedules.md)**.
 
 ### Scheduled Run Authoring Rules
 
