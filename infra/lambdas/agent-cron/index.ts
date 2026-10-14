@@ -85,6 +85,7 @@ import {
   ownerWorkspaceLockId,
   scheduledConversationSessionId,
 } from './workspace-identity';
+import { recordThreadSession } from './thread-session-map';
 import {
   createPromotedRun,
   createRunTelemetry,
@@ -206,6 +207,12 @@ const scheduleRecordDynamoClient = {
   get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
     dynamoClient.send(new GetCommand(input)),
 };
+const threadSessionDynamoClient = {
+  put: (input: ConstructorParameters<typeof PutCommand>[0]) =>
+    dynamoClient.send(new PutCommand(input)),
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
+};
 
 const agentCoreCredentials = defaultProvider();
 const agentCoreSigner = new SignatureV4({
@@ -228,6 +235,7 @@ const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const AGENT_INVOCATION_SIGNING_SECRET_ID =
   process.env.AGENT_INVOCATION_SIGNING_SECRET_ID || '';
 const SESSION_LOCKS_TABLE = process.env.SESSION_LOCKS_TABLE || '';
+const THREAD_SESSIONS_TABLE = process.env.THREAD_SESSIONS_TABLE || '';
 const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
 const ROUTER_QUEUE_URL = process.env.ROUTER_QUEUE_URL || '';
 const SCHEDULE_RECONCILIATION_QUEUE_URL =
@@ -1278,21 +1286,26 @@ async function sendPreparedChatMessage(
   prepared: PreparedScheduledChatMessage,
   log: Logger,
   requestId?: string,
-): Promise<void> {
+): Promise<string | null> {
   const chatClient = await getChatClient();
-  await chatClient.spaces.messages.create({
+  const created = await chatClient.spaces.messages.create({
     parent: spaceName,
     ...(requestId ? { requestId } : {}),
     requestBody: prepared.requestBody,
   });
+  // Google assigns the thread on create. It is the only handle a staff member
+  // can reply into, so it is what the thread → session mapping is keyed on.
+  const threadName = created?.data?.thread?.name ?? null;
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
+    thread: threadName,
     responseLength: prepared.responseLength,
     responseBytes: prepared.responseBytes,
     truncatedAtCap: prepared.truncated,
     hasCards: prepared.hasCards,
     hasAccessoryWidgets: prepared.hasAccessoryWidgets,
   });
+  return threadName;
 }
 
 async function sendChatMessage(
@@ -1300,7 +1313,7 @@ async function sendChatMessage(
   text: string,
   log: Logger,
   requestId?: string,
-): Promise<void> {
+): Promise<string | null> {
   return sendPreparedChatMessage(
     spaceName,
     prepareScheduledChatMessage(spaceName, text, log),
@@ -1406,11 +1419,19 @@ async function sendPromotionAcknowledgement(
       ? "⏳ This run grew too large to finish in one pass, so I'm starting it over in the background with a longer budget. I'll post the result here when it's done."
       : "⏳ This is taking longer than one pass allows — I've moved it to a background job and will post the result here when it's done.";
   try {
-    await sendChatMessage(
+    const ackThreadName = await sendChatMessage(
       schedule.dmSpaceName,
       `📋 **${scheduleName}**\n\n${acknowledgement}`,
       log,
     );
+    // Map the ack's thread so "did this ever run?" in that thread reaches the
+    // run's transcript (#1891). Only for a deadline promotion: a
+    // context-overflow promotion deliberately RESTARTS the conversation
+    // (resolveJobInvocation), so pointing a reply at the original session
+    // would hand it the transcript that just overflowed.
+    if (reason !== 'context-overflow') {
+      await recordScheduledThreadSession(context, ackThreadName);
+    }
   } catch (error) {
     // The job is already running, so acknowledgement delivery is best-effort.
     log.warn('Promotion ack delivery failed; job still running', {
@@ -1723,8 +1744,33 @@ async function tryPromoteScheduledResult(
   return true;
 }
 
-async function deliverScheduledResult(
+/**
+ * The two boundary calls the delivery path makes after the agent has answered.
+ * Injected so a test can prove the mapping row is written with THIS run's
+ * identity — the wiring, not just `recordThreadSession` in isolation.
+ */
+interface ScheduledDeliveryDependencies {
+  sendPreparedChatMessage: typeof sendPreparedChatMessage;
+  recordThreadSession: typeof recordThreadSession;
+}
+
+const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
+  sendPreparedChatMessage,
+  recordThreadSession,
+};
+
+function deliverScheduledResult(
   context: ScheduledResultContext,
+): Promise<HandlerResult> {
+  return deliverScheduledResultWithDependencies(
+    context,
+    scheduledDeliveryDependencies,
+  );
+}
+
+async function deliverScheduledResultWithDependencies(
+  context: ScheduledResultContext,
+  dependencies: ScheduledDeliveryDependencies,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   if (result.silent) {
@@ -1744,8 +1790,9 @@ async function deliverScheduledResult(
     log,
   );
   const deliveryRequestId = crypto.randomUUID();
+  let deliveredThreadName: string | null = null;
   try {
-    await sendPreparedChatMessage(
+    deliveredThreadName = await dependencies.sendPreparedChatMessage(
       schedule.dmSpaceName,
       preparedDelivery,
       log,
@@ -1787,7 +1834,66 @@ async function deliverScheduledResult(
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
   }
+  // A reply in this thread is about THIS post, so point it at the run's
+  // transcript instead of the generic space+thread session the router would
+  // otherwise derive (#1891). Deliberately outside the delivery try/catch:
+  // mapping must never be mistaken for a delivery failure and re-queue the
+  // post.
+  //
+  // Two properties of the mapping worth naming, both inherited from the
+  // schedule's own identity rather than added here:
+  //   - the row is written AFTER the post lands, so a reply in the gap before
+  //     the PutItem keeps the pre-#1891 key. Writing it first would be worse:
+  //     a post that then failed to deliver would leave a row pointing at a
+  //     message nobody can see.
+  //   - two fires of the same schedule on the same UTC day share one
+  //     conversation (scheduledConversationSessionId is keyed by schedule and
+  //     date), so both threads map to that one transcript and a reply in
+  //     either joins it. That is the existing "one transcript per schedule per
+  //     day" design — the posts already share it — not something the mapping
+  //     introduces.
+  //
+  // Two scheduled posts are knowingly left unmapped, and both degrade to the
+  // pre-#1891 key rather than failing:
+  //   - a post that only lands via the durable outbox, because the retry
+  //     happens in the router with no thread name to record;
+  //   - the result of a run promoted to the background job-runner, which posts
+  //     from the ECS task through the router's shared Chat helper. That helper
+  //     returns a delivery outcome, not the created message, and it is on the
+  //     path of every interactive reply — widening it is a change for its own
+  //     issue, not a rider on this one. The promotion acknowledgement this
+  //     Lambda posts first IS mapped (see sendPromotionAcknowledgement), so a
+  //     reply asking after a promoted run still reaches the run's transcript.
+  await recordScheduledThreadSession(
+    context,
+    deliveredThreadName,
+    dependencies,
+  );
   return recordScheduledCompletion(context);
+}
+
+/**
+ * Best-effort thread → conversation mapping for a scheduled post. Never
+ * throws: the post is already delivered by the time this runs.
+ */
+async function recordScheduledThreadSession(
+  context: ScheduledResultContext,
+  threadName: string | null,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
+): Promise<void> {
+  if (!threadName) return;
+  const { schedule, sessionId, log } = context;
+  await dependencies.recordThreadSession(
+    threadSessionDynamoClient,
+    {
+      tableName: THREAD_SESSIONS_TABLE,
+      spaceName: schedule.dmSpaceName,
+      threadName,
+      conversationSessionId: sessionId,
+      workspacePrefix: schedule.workspacePrefix,
+    },
+    log,
+  );
 }
 
 async function recordScheduledCompletion(
@@ -2411,6 +2517,7 @@ export const agentCronTestHelpers = {
   toInvokeResult,
   shouldRetainScheduledTurnLock,
   deliverScheduledResult,
+  deliverScheduledResultWithDependencies,
 };
 
 export async function handler(

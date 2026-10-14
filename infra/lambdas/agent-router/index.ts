@@ -96,6 +96,11 @@ import {
 import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
 import {
+  conversationSessionIdHash,
+  lookupThreadSession,
+  resolveThreadConversationSessionId,
+} from './thread-session-map';
+import {
   sanitizeDiagnostic,
   sanitizeEmailForLog,
 } from './log-sanitization';
@@ -5150,7 +5155,12 @@ function ownerSessionId(
  * A stable sentinel preserves continuity for legacy events without a thread.
  */
 function ownerConversationSessionId(
-  human: HumanMessage,
+  /**
+   * Narrowed to the two fields the key is built from: a full `HumanMessage`
+   * still satisfies it, and widening the function later is then a compile
+   * error rather than a silently-undefined read in a test double.
+   */
+  human: Pick<HumanMessage, 'spaceName' | 'threadName'>,
   user: Pick<AgentUser, 'workspacePrefix'>
 ): string {
   return scopedAgentSessionId(
@@ -5158,6 +5168,69 @@ function ownerConversationSessionId(
     'chat',
     `space:${human.spaceName}\nthread:${human.threadName ?? '__unthreaded__'}`
   );
+}
+
+/** Read-only: scheduled posts are written by the cron, never by the router. */
+const threadSessionDynamoClient = {
+  get: (input: ConstructorParameters<typeof GetCommand>[0]) =>
+    dynamoClient.send(new GetCommand(input)),
+};
+
+/**
+ * Conversation identity for an owner turn, with one exception to the plain
+ * `space + thread` key: a thread that a scheduled post STARTED resolves to
+ * that run's transcript, so a reply to a morning brief can see the brief
+ * (#1891). Every other thread — including a new top-level message, which
+ * Google gives a brand-new thread name — keeps today's key.
+ *
+ * Fails open: no table, no row, an owner mismatch or a lookup error all fall
+ * back to the unmapped key rather than dropping the turn.
+ */
+async function resolveConversationSessionIdWithDependencies(
+  human: Pick<HumanMessage, 'spaceName' | 'threadName'>,
+  user: Pick<AgentUser, 'workspacePrefix'>,
+  log: ReturnType<typeof createLogger>,
+  dependencies: {
+    tableName?: string;
+    lookup: typeof lookupThreadSession;
+  }
+): Promise<string> {
+  const fallback = ownerConversationSessionId(human, user);
+  const { tableName } = dependencies;
+  if (!tableName || !human.threadName) return fallback;
+  const mapped = await dependencies.lookup(
+    threadSessionDynamoClient,
+    { tableName, spaceName: human.spaceName, threadName: human.threadName },
+    log
+  );
+  const resolved = resolveThreadConversationSessionId(
+    {
+      mapped,
+      workspacePrefix: user.workspacePrefix,
+      fallbackConversationSessionId: fallback,
+    },
+    log
+  );
+  if (resolved !== fallback) {
+    // Hashed: a scheduled run's conversation id embeds the owner's email
+    // local part, and every other session id in this file is hashed too.
+    log.info('Reply resolved to a scheduled run conversation', {
+      conversationSessionIdHash: conversationSessionIdHash(resolved),
+      thread: human.threadName,
+    });
+  }
+  return resolved;
+}
+
+function resolveOwnerConversationSessionId(
+  human: HumanMessage,
+  user: Pick<AgentUser, 'workspacePrefix'>,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  return resolveConversationSessionIdWithDependencies(human, user, log, {
+    tableName: process.env.THREAD_SESSIONS_TABLE,
+    lookup: lookupThreadSession,
+  });
 }
 
 /**
@@ -5497,12 +5570,18 @@ async function invokeOwnerAgentWithDependencies(
   dependencies: OwnerInvocationDependencies
 ): Promise<OwnerAgentTurn | null> {
   const mainSessionId = ownerSessionId(human, user);
-  const mainConversationSessionId = ownerConversationSessionId(human, user);
   const workspaceLockId = ownerWorkspaceLockId(user);
   const ownerDm = human.chatEvent.space.type === 'DM' && !human.isSharedSpace;
   const asideInvocation = ownerDm
     ? parseAsideInvocation(human.message)
     : null;
+  // Scheduled posts only ever land in the owner's own DM space, and an aside
+  // deliberately gets its own transcript — so neither a room turn nor a `/btw`
+  // pays for the mapping lookup.
+  const mainConversationSessionId =
+    ownerDm && !asideInvocation
+      ? await resolveOwnerConversationSessionId(human, user, log)
+      : ownerConversationSessionId(human, user);
 
   if (asideInvocation && !asideInvocation.messageText) {
     await dependencies.sendGoogleChatResponse(
@@ -5868,6 +5947,8 @@ export const agentRouterTestHelpers = {
   parseAsideInvocation,
   ownerSessionId,
   ownerConversationSessionId,
+  resolveOwnerConversationSessionId,
+  resolveConversationSessionIdWithDependencies,
   ownerWorkspaceLockId,
   asideSessionId,
   invokeOwnerAgentWithDependencies,

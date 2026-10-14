@@ -155,6 +155,7 @@ class AgentPlatformBuildResources {
   vpc!: ec2.IVpc;
   interAgentTable!: dynamodb.Table;
   schedulesTable!: dynamodb.Table;
+  threadSessionsTable!: dynamodb.Table;
   googleOAuthClientSecret!: secretsmanager.Secret;
   plaudOAuthClientSecret!: secretsmanager.Secret;
   canvaOAuthClientSecret!: secretsmanager.Secret;
@@ -723,6 +724,29 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(resources.schedulesTable).add('Environment', environment);
     cdk.Tags.of(resources.schedulesTable).add('ManagedBy', 'cdk');
+
+    // 4f. Thread → conversation-session map (#1891). A scheduled post (morning
+    // brief, report, digest) is sent top-level by agent-cron and lives in its
+    // own run transcript, so a staff member replying in that thread used to
+    // land in the generic `space + thread` session and the agent could not see
+    // the post it was being asked about. Cron writes one row per delivered
+    // scheduled post; the router reads it and resolves the reply to that run's
+    // conversation. Threads with no row keep today's key.
+    //
+    // No PITR: every row is a 14-day TTL pointer that cron rewrites on the
+    // next run, and losing one degrades to exactly the old behaviour.
+    resources.threadSessionsTable = new dynamodb.Table(this, 'AgentThreadSessionsTable', {
+      tableName: `psd-agent-thread-sessions-${environment}`,
+      partitionKey: { name: 'threadKey', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(resources.threadSessionsTable).add('Environment', environment);
+    cdk.Tags.of(resources.threadSessionsTable).add('ManagedBy', 'cdk');
   }
 
   private createPrimaryCredentials(
@@ -2009,6 +2033,23 @@ export class AgentPlatformStack extends cdk.Stack {
         ],
       }),
     );
+
+    // Thread → conversation map (#1891). Cron writes one pointer row per
+    // delivered scheduled post and never reads the table back.
+    resources.cronLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ThreadSessionMapWrite',
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:PutItem'],
+        resources: [resources.threadSessionsTable.tableArn],
+        conditions: {
+          StringEquals: {
+            'aws:ResourceTag/Environment': environment,
+            'aws:ResourceTag/ManagedBy': 'cdk',
+          },
+        },
+      }),
+    );
   }
 
   private createAgentRuntimeAndPolicies(
@@ -2418,6 +2459,9 @@ export class AgentPlatformStack extends cdk.Stack {
         ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
         SCHEDULE_RECONCILIATION_QUEUE_URL:
           resources.cronReconciliationQueue.queueUrl,
+        // Write-only here: one row per delivered scheduled post so a reply in
+        // that Chat thread reaches this run's conversation (#1891).
+        THREAD_SESSIONS_TABLE: resources.threadSessionsTable.tableName,
       },
     });
 
@@ -3373,6 +3417,9 @@ export class AgentPlatformStack extends cdk.Stack {
         MESSAGE_DEDUP_TABLE: resources.messageDedupTable.tableName,
         ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
         SESSION_LOCKS_TABLE: resources.sessionLocksTable.tableName,
+        // Read-only here: the router resolves a reply in a scheduled post's
+        // thread to that run's conversation (#1891). Cron owns the writes.
+        THREAD_SESSIONS_TABLE: resources.threadSessionsTable.tableName,
         INTERAGENT_TABLE: resources.interAgentTable.tableName,
         MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
         GUARDRAIL_ID: props.guardrailId,
@@ -3429,6 +3476,22 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(resources.routerLambda).add('Environment', environment);
     cdk.Tags.of(resources.routerLambda).add('ManagedBy', 'cdk');
+
+    // Thread → conversation map (#1891). The router only ever reads it, so it
+    // is granted here instead of in the role factory's read/write table list.
+    // Tag conditions kept so a dev router still cannot read the prod table.
+    resources.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'ThreadSessionMapRead',
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:GetItem'],
+      resources: [resources.threadSessionsTable.tableArn],
+      conditions: {
+        StringEquals: {
+          'aws:ResourceTag/Environment': environment,
+          'aws:ResourceTag/ManagedBy': 'cdk',
+        },
+      },
+    }));
 
     // #1233: the router reads the internal API key to authenticate its
     // account-request call to the Next.js app. (The router role's `secrets: []`
