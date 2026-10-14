@@ -541,7 +541,7 @@ function parseDraftFlags(argv: readonly string[]): {
     // matches any identifier called token in an equality comparison, and this
     // one is a command-line flag, not a credential.
     const argument = argv[index]
-    if (argument === "--html") {
+    if ((DRAFT_BOOLEAN_FLAGS as readonly string[]).includes(argument)) {
       html = true
       continue
     }
@@ -683,7 +683,9 @@ function draftMessageHeaders(values: Map<string, string>): string[] {
     const name = flag === "--to" ? "To" : flag === "--cc" ? "Cc" : "Bcc"
     headers.push(`${name}: ${encodeAddressHeader(value)}`)
   }
-  if (!headers.some((header) => header.startsWith("To: "))) {
+  // Checked on the value, not the built header: `--to ""` still yields a
+  // `To: ` line, which would pass a prefix test with no recipient in it.
+  if (!values.get("--to")?.trim()) {
     throw new Error("Workspace draft requires --to")
   }
 
@@ -702,6 +704,9 @@ function draftMessageHeaders(values: Map<string, string>): string[] {
   if (inReplyTo !== undefined) {
     assertNoHeaderInjection("--in-reply-to", inReplyTo)
     const trimmed = inReplyTo.trim()
+    if (!trimmed) {
+      throw new Error("Workspace draft --in-reply-to requires a Message-ID")
+    }
     const messageId = /^<.*>$/.test(trimmed) ? trimmed : `<${trimmed}>`
     headers.push(`In-Reply-To: ${messageId}`)
     headers.push(`References: ${messageId}`)
@@ -718,7 +723,9 @@ function draftRawMessage(values: Map<string, string>, isHtml: boolean): string {
   // because `+draft` has no `--json` for the skill to reach. Re-marking is
   // skipped so revising a draft (read body -> edit -> `--draft-id`) cannot
   // stack the footer, matching how the Drive `[Agent] ` prefix guards itself.
-  const body = authored.includes(DRAFT_AGENT_MARKER)
+  // Only a TRAILING footer counts: a body quoting the marker mid-text (e.g.
+  // lifted from an injected thread) must not suppress the real one.
+  const body = authored.trimEnd().endsWith(DRAFT_AGENT_MARKER)
     ? authored
     : `${authored}${isHtml ? "<br><br>" : "\n\n"}${DRAFT_AGENT_MARKER}`
 

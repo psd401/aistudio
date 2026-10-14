@@ -219,7 +219,10 @@ node /opt/psd-skills/psd-workspace/run.js \
 #      --draft-id (see below).
 #
 # REVISING A DRAFT: EDIT IT, DO NOT DRAFT IT AGAIN. The response to a +draft
-# is the Gmail Draft resource — its `id` is the draft id. To change anything
+# is the Gmail Draft resource — its TOP-LEVEL `id` is the draft id:
+#     {"id": "r-8812", "message": {"id": "19a2…", "threadId": "19a2…"}}
+# Use `r-8812` here, NOT `message.id` — that is a message id, not a draft
+# id. Never guess an id; list drafts to find it if you lost it. To change anything
 # about that draft (reword it, add a recipient, fix the subject), pass that id
 # back as `--draft-id <id>`; the broker expands it into
 # `gmail users drafts update`, which REPLACES that draft's content in place.
@@ -547,7 +550,7 @@ The skill silently adds these to every write:
 
 - **Calendar event create/update/patch** → description prepended with `🤖 Created by your agent on YYYY-MM-DD.`
 - **Drive file create** → filename prefixed `[Agent] `, `appProperties.psdAgentCreated=true`
-- **Gmail `+draft`** (create and `--draft-id` update alike) → body footer `— Drafted by your agent. Review before sending.`, appended by the broker as it builds the message. Applied once: a body that already carries the footer — e.g. one you read back to revise — is left alone.
+- **Gmail `+draft`** (create and `--draft-id` update alike) → body footer `— Drafted by your agent. Review before sending.`, appended by the broker as it builds the message. Applied once: a body that already ends with the footer — e.g. one you read back to revise — is left alone.
 - **Gmail draft create, raw form** (when body is in the `.message.body` field) → the same footer. A hand-built `.message.raw` payload is NOT markered, which is one more reason to use `+draft`.
 
 You don't need to remember to add markers — the skill does it. **Do not** strip them or instruct the user to strip them; they're the audit substrate.

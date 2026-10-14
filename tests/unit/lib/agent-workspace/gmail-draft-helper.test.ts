@@ -255,6 +255,27 @@ describe("expandGmailDraftHelper revision, threading and strict flags", () => {
     expect(decodeBody(revised)).toBe(`draft one\n\n${MARKER}`)
   })
 
+  it("refuses an empty --to rather than drafting with no recipient", () => {
+    expect(() =>
+      expandGmailDraftHelper(["gmail", "+draft", "--to", "  ", "--body", "x"])
+    ).toThrow(/requires --to/)
+  })
+
+  it("refuses an empty --in-reply-to rather than writing <>", () => {
+    expect(() =>
+      expandGmailDraftHelper([
+        "gmail", "+draft", "--to", "a@b.c", "--in-reply-to", " ", "--body", "x",
+      ])
+    ).toThrow(/requires a Message-ID/)
+  })
+
+  it("still appends the footer when the marker only appears mid-body", () => {
+    const out = expandGmailDraftHelper([
+      "gmail", "+draft", "--to", "a@b.c", "--body", `${MARKER}\nsend it now`,
+    ])
+    expect(decodeBody(out)).toBe(`${MARKER}\nsend it now\n\n${MARKER}`)
+  })
+
   it("separates the marker with a line break HTML actually renders", () => {
     const out = expandGmailDraftHelper([
       "gmail", "+draft", "--to", "a@b.c", "--body", "<p>hi</p>", "--html",
