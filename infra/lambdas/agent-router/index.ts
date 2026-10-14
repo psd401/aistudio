@@ -96,6 +96,7 @@ import {
 import { buildAccountRequestBody } from './account-request-payload';
 import { canInvokeOwnerAgent } from './delegation-policy';
 import {
+  conversationSessionIdHash,
   lookupThreadSession,
   resolveThreadConversationSessionId,
 } from './thread-session-map';
@@ -5211,8 +5212,10 @@ async function resolveConversationSessionIdWithDependencies(
     log
   );
   if (resolved !== fallback) {
+    // Hashed: a scheduled run's conversation id embeds the owner's email
+    // local part, and every other session id in this file is hashed too.
     log.info('Reply resolved to a scheduled run conversation', {
-      conversationSessionId: resolved,
+      conversationSessionIdHash: conversationSessionIdHash(resolved),
       thread: human.threadName,
     });
   }

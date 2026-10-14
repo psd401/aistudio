@@ -7,6 +7,7 @@
  * sides or a reply lands back in the generic `space + thread` session.
  */
 import type { GetCommandInput, PutCommandInput } from '@aws-sdk/lib-dynamodb';
+import * as crypto from 'node:crypto';
 
 /**
  * Scheduled posts stay repliable for two weeks. Long enough that a brief read
@@ -37,6 +38,22 @@ export interface ThreadSessionReader {
 interface ThreadSessionLogger {
   info: (message: string, metadata?: Record<string, unknown>) => void;
   warn: (message: string, metadata?: Record<string, unknown>) => void;
+}
+
+/**
+ * A conversation session id is NOT safe to log: a scheduled run's id embeds
+ * `workspacePrefix`, which is the owner's email local part plus a uuid suffix
+ * (`scheduledConversationSessionId`). Every other session id in this stack is
+ * hashed; log this instead, which still correlates a log line to a row.
+ */
+export function conversationSessionIdHash(
+  conversationSessionId: string,
+): string {
+  return crypto
+    .createHash('sha256')
+    .update(conversationSessionId)
+    .digest('hex')
+    .slice(0, 12);
 }
 
 /**
@@ -91,13 +108,12 @@ export async function recordThreadSession(
           Math.floor(nowMs / 1000) + THREAD_SESSION_TTL_SECONDS,
       },
     });
-    // The owner's own conversation id is logged here, as cron already logs it
-    // on every scheduled run ('Scheduled task started'). Only the cross-owner
-    // path below withholds identifiers.
     log.info('thread_session_map_recorded', {
       space: input.spaceName,
       thread: input.threadName,
-      conversationSessionId: input.conversationSessionId,
+      conversationSessionIdHash: conversationSessionIdHash(
+        input.conversationSessionId,
+      ),
     });
     return true;
   } catch (error) {

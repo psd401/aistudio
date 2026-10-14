@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { agentCronTestHelpers } from './index';
 import {
   THREAD_SESSION_TTL_SECONDS,
+  conversationSessionIdHash,
   lookupThreadSession,
   recordThreadSession,
   resolveThreadConversationSessionId,
@@ -95,6 +96,14 @@ describe('recordThreadSession', () => {
     expect(put.Item.workspacePrefix).toBe('owner-prefix');
     expect(put.Item.expiresAt).toBe(
       Math.floor(nowMs / 1000) + THREAD_SESSION_TTL_SECONDS,
+    );
+    // The id goes in the ROW, never in a log line: a scheduled run's id
+    // embeds the owner's email local part.
+    const logged = JSON.stringify(log.messages);
+    expect(logged).not.toContain('owner-sched-abc-2026-10-13');
+    expect(logged).not.toContain('owner-prefix');
+    expect(logged).toContain(
+      conversationSessionIdHash('owner-sched-abc-2026-10-13'),
     );
   });
 
