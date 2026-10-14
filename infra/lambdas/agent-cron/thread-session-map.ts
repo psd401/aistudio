@@ -20,6 +20,8 @@ export interface ThreadSessionRow {
   conversationSessionId: string;
   /** Owner the mapped session belongs to; the reader must re-check it. */
   workspacePrefix: string;
+  /** Epoch seconds. The reader enforces it; DynamoDB TTL only sweeps. */
+  expiresAt: number;
 }
 
 /** Only the cron writes rows. */
@@ -89,6 +91,9 @@ export async function recordThreadSession(
           Math.floor(nowMs / 1000) + THREAD_SESSION_TTL_SECONDS,
       },
     });
+    // The owner's own conversation id is logged here, as cron already logs it
+    // on every scheduled run ('Scheduled task started'). Only the cross-owner
+    // path below withholds identifiers.
     log.info('thread_session_map_recorded', {
       space: input.spaceName,
       thread: input.threadName,
@@ -106,6 +111,23 @@ export async function recordThreadSession(
 }
 
 /**
+ * A row is only usable with all three fields intact. A partial row is a bug or
+ * a half-written item, never something to route a conversation on.
+ */
+function parseThreadSessionRow(
+  item: Record<string, unknown> | undefined,
+): ThreadSessionRow | null {
+  if (!item) return null;
+  const { conversationSessionId, workspacePrefix, expiresAt } = item;
+  if (typeof conversationSessionId !== 'string' || !conversationSessionId) {
+    return null;
+  }
+  if (typeof workspacePrefix !== 'string' || !workspacePrefix) return null;
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return null;
+  return { conversationSessionId, workspacePrefix, expiresAt };
+}
+
+/**
  * Returns the mapped row, or null when this thread did not start with a
  * scheduled post. Lookup errors resolve to null so the caller falls back to
  * the unmapped key rather than dropping the turn.
@@ -116,6 +138,7 @@ export async function lookupThreadSession(
     tableName: string;
     spaceName: string;
     threadName: string | null | undefined;
+    nowMs?: number;
   },
   log: ThreadSessionLogger,
 ): Promise<ThreadSessionRow | null> {
@@ -127,23 +150,28 @@ export async function lookupThreadSession(
         threadKey: threadSessionKey(input.spaceName, input.threadName),
       },
     });
-    const item = result?.Item;
-    if (!item) return null;
-    const conversationSessionId = item.conversationSessionId;
-    const workspacePrefix = item.workspacePrefix;
-    if (
-      typeof conversationSessionId !== 'string' ||
-      !conversationSessionId ||
-      typeof workspacePrefix !== 'string' ||
-      !workspacePrefix
-    ) {
-      log.warn('thread_session_map_row_malformed', {
+    const row = parseThreadSessionRow(result?.Item);
+    if (!row) {
+      if (result?.Item) {
+        log.warn('thread_session_map_row_malformed', {
+          space: input.spaceName,
+          thread: input.threadName,
+        });
+      }
+      return null;
+    }
+    // TTL deletion is asynchronous — DynamoDB keeps serving an expired item to
+    // reads for up to ~48 hours after its timestamp passes. Enforce the window
+    // here so the advertised 14 days is the real one, not a floor.
+    const nowSeconds = Math.floor((input.nowMs ?? Date.now()) / 1000);
+    if (row.expiresAt <= nowSeconds) {
+      log.info('thread_session_map_row_expired', {
         space: input.spaceName,
         thread: input.threadName,
       });
       return null;
     }
-    return { conversationSessionId, workspacePrefix };
+    return row;
   } catch (error) {
     log.warn('thread_session_map_read_failed', {
       space: input.spaceName,
@@ -170,12 +198,13 @@ export function resolveThreadConversationSessionId(
   const { mapped, workspacePrefix, fallbackConversationSessionId } = input;
   if (!mapped) return fallbackConversationSessionId;
   if (mapped.workspacePrefix !== workspacePrefix) {
-    // Deliberately value-free: `workspacePrefix` embeds the owner's email
-    // local part, and this line fires on a cross-owner row — the one case
-    // where logging both would put two people's identifiers in one record.
-    log.warn('thread_session_map_owner_mismatch', {
-      mappedConversationSessionId: mapped.conversationSessionId,
-    });
+    // Value-free on purpose. `workspacePrefix` embeds the owner's email local
+    // part and the conversation id embeds the prefix, and this line fires
+    // precisely when a row belongs to a DIFFERENT owner — the one case where
+    // logging either side would put two people's identifiers in one record.
+    // The caller's own lines carry the space and thread, which is what an
+    // operator needs to find the row.
+    log.warn('thread_session_map_owner_mismatch', {});
     return fallbackConversationSessionId;
   }
   return mapped.conversationSessionId;

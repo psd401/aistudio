@@ -22,6 +22,9 @@ function human(threadName: string | undefined, spaceName = SPACE): Human {
   return { spaceName, threadName };
 }
 
+/** Shape of the unmapped key, pinned so the tests are not self-referential. */
+const UNMAPPED_KEY = /^agent-chat-[0-9a-f]{64}$/;
+
 function lookupReturning(row: ThreadSessionRow | null) {
   const keys: Array<{ spaceName: string; threadName?: string | null }> = [];
   const lookup = (async (
@@ -42,6 +45,7 @@ describe('conversation session resolution for owner turns', () => {
     const { lookup, keys } = lookupReturning({
       conversationSessionId: RUN_SESSION,
       workspacePrefix: OWNER.workspacePrefix,
+      expiresAt: 1_900_000_000,
     });
 
     const resolved = await resolveConversationSessionIdWithDependencies(
@@ -72,14 +76,16 @@ describe('conversation session resolution for owner turns', () => {
       { tableName: 'threads', lookup }
     );
 
+    expect(resolved).toMatch(UNMAPPED_KEY);
     expect(resolved).toBe(ownerConversationSessionId(topLevel, OWNER));
     expect(resolved).not.toBe(RUN_SESSION);
     expect(resolved).not.toBe(ownerConversationSessionId(brief, OWNER));
   });
 
-  test('a reply in a normal thread keeps that thread session', async () => {
+  test('two messages in one normal thread share that thread session', async () => {
     const first = human(`${SPACE}/threads/normal`);
     const laterInSameThread = human(`${SPACE}/threads/normal`);
+    const otherNormalThread = human(`${SPACE}/threads/other`);
     const { lookup } = lookupReturning(null);
 
     const resolved = await resolveConversationSessionIdWithDependencies(
@@ -89,7 +95,12 @@ describe('conversation session resolution for owner turns', () => {
       { tableName: 'threads', lookup }
     );
 
+    expect(resolved).toMatch(UNMAPPED_KEY);
     expect(resolved).toBe(ownerConversationSessionId(first, OWNER));
+    // ...and a different normal thread stays a different conversation.
+    expect(resolved).not.toBe(
+      ownerConversationSessionId(otherNormalThread, OWNER)
+    );
   });
 
   test('a mapped row for another owner is ignored', async () => {
@@ -97,6 +108,7 @@ describe('conversation session resolution for owner turns', () => {
     const { lookup } = lookupReturning({
       conversationSessionId: 'someone-else-sched-2026-10-13',
       workspacePrefix: 'other-owner',
+      expiresAt: 1_900_000_000,
     });
 
     const resolved = await resolveConversationSessionIdWithDependencies(
@@ -115,6 +127,7 @@ describe('conversation session resolution for owner turns', () => {
     const mapped = lookupReturning({
       conversationSessionId: RUN_SESSION,
       workspacePrefix: OWNER.workspacePrefix,
+      expiresAt: 1_900_000_000,
     });
 
     expect(

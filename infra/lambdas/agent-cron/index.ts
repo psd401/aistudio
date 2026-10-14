@@ -1840,6 +1840,19 @@ async function deliverScheduledResultWithDependencies(
   // mapping must never be mistaken for a delivery failure and re-queue the
   // post.
   //
+  // Two properties of the mapping worth naming, both inherited from the
+  // schedule's own identity rather than added here:
+  //   - the row is written AFTER the post lands, so a reply in the gap before
+  //     the PutItem keeps the pre-#1891 key. Writing it first would be worse:
+  //     a post that then failed to deliver would leave a row pointing at a
+  //     message nobody can see.
+  //   - two fires of the same schedule on the same UTC day share one
+  //     conversation (scheduledConversationSessionId is keyed by schedule and
+  //     date), so both threads map to that one transcript and a reply in
+  //     either joins it. That is the existing "one transcript per schedule per
+  //     day" design — the posts already share it — not something the mapping
+  //     introduces.
+  //
   // Two scheduled posts are knowingly left unmapped, and both degrade to the
   // pre-#1891 key rather than failing:
   //   - a post that only lands via the durable outbox, because the retry

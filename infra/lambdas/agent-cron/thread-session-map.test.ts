@@ -169,6 +169,7 @@ describe('lookupThreadSession', () => {
             Item: {
               conversationSessionId: 'owner-sched-abc-2026-10-13',
               workspacePrefix: 'owner-prefix',
+              expiresAt: Math.floor(Date.now() / 1000) + 60,
             },
           };
         },
@@ -181,10 +182,8 @@ describe('lookupThreadSession', () => {
       log,
     );
 
-    expect(row).toEqual({
-      conversationSessionId: 'owner-sched-abc-2026-10-13',
-      workspacePrefix: 'owner-prefix',
-    });
+    expect(row?.conversationSessionId).toBe('owner-sched-abc-2026-10-13');
+    expect(row?.workspacePrefix).toBe('owner-prefix');
   });
 
   test('is null for an unmapped thread, a malformed row, and a read failure', async () => {
@@ -205,6 +204,21 @@ describe('lookupThreadSession', () => {
         log,
       ),
     ).toBeNull();
+    // A row with no usable TTL is as untrustworthy as one with no session id.
+    expect(
+      await lookupThreadSession(
+        {
+          get: async () => ({
+            Item: {
+              conversationSessionId: 'session',
+              workspacePrefix: 'owner-prefix',
+            },
+          }),
+        },
+        base,
+        log,
+      ),
+    ).toBeNull();
     expect(
       await lookupThreadSession(
         {
@@ -219,6 +233,48 @@ describe('lookupThreadSession', () => {
   });
 });
 
+describe('lookupThreadSession enforces the retention window itself', () => {
+  // DynamoDB keeps serving an expired item to reads for up to ~48h after its
+  // TTL timestamp, so without this check the advertised 14 days is a floor
+  // and a reply weeks later could still be routed into an old transcript.
+  const expiredItem = {
+    Item: {
+      conversationSessionId: 'owner-sched-abc-2026-09-01',
+      workspacePrefix: 'owner-prefix',
+      expiresAt: 1_700_000_000,
+    },
+  };
+  const base = {
+    tableName: 'threads',
+    spaceName: 'spaces/dm',
+    threadName: 'spaces/dm/threads/old-brief',
+  };
+
+  test('an expired row DynamoDB has not swept yet is ignored', async () => {
+    const log = silentLog();
+    expect(
+      await lookupThreadSession({ get: async () => expiredItem }, base, log),
+    ).toBeNull();
+    expect(log.messages.map((m) => m.message)).toContain(
+      'thread_session_map_row_expired',
+    );
+  });
+
+  test('a row still inside its window is honoured', async () => {
+    const log = silentLog();
+    const row = await lookupThreadSession(
+      {
+        get: async () => ({
+          Item: { ...expiredItem.Item, expiresAt: 1_900_000_000 },
+        }),
+      },
+      { ...base, nowMs: 1_800_000_000_000 },
+      log,
+    );
+    expect(row?.conversationSessionId).toBe('owner-sched-abc-2026-09-01');
+  });
+});
+
 describe('resolveThreadConversationSessionId', () => {
   test('follows a mapped row for the same owner', () => {
     expect(
@@ -227,6 +283,7 @@ describe('resolveThreadConversationSessionId', () => {
           mapped: {
             conversationSessionId: 'owner-sched-abc-2026-10-13',
             workspacePrefix: 'owner-prefix',
+            expiresAt: 1_900_000_000,
           },
           workspacePrefix: 'owner-prefix',
           fallbackConversationSessionId: 'agent-chat-hash',
@@ -244,6 +301,7 @@ describe('resolveThreadConversationSessionId', () => {
           mapped: {
             conversationSessionId: 'someone-else-sched',
             workspacePrefix: 'other-prefix',
+            expiresAt: 1_900_000_000,
           },
           workspacePrefix: 'owner-prefix',
           fallbackConversationSessionId: 'agent-chat-hash',
@@ -258,6 +316,8 @@ describe('resolveThreadConversationSessionId', () => {
     // embeds an email local part, and this is the one case with two owners.
     expect(JSON.stringify(log.messages)).not.toContain('other-prefix');
     expect(JSON.stringify(log.messages)).not.toContain('owner-prefix');
+    // The conversation id embeds the prefix, so it is withheld too.
+    expect(JSON.stringify(log.messages)).not.toContain('someone-else-sched');
   });
 
   test('falls back when there is no row', () => {

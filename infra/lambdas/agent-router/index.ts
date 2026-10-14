@@ -5567,16 +5567,18 @@ async function invokeOwnerAgentWithDependencies(
   dependencies: OwnerInvocationDependencies
 ): Promise<OwnerAgentTurn | null> {
   const mainSessionId = ownerSessionId(human, user);
-  const mainConversationSessionId = await resolveOwnerConversationSessionId(
-    human,
-    user,
-    log
-  );
   const workspaceLockId = ownerWorkspaceLockId(user);
   const ownerDm = human.chatEvent.space.type === 'DM' && !human.isSharedSpace;
   const asideInvocation = ownerDm
     ? parseAsideInvocation(human.message)
     : null;
+  // Scheduled posts only ever land in the owner's own DM space, and an aside
+  // deliberately gets its own transcript — so neither a room turn nor a `/btw`
+  // pays for the mapping lookup.
+  const mainConversationSessionId =
+    ownerDm && !asideInvocation
+      ? await resolveOwnerConversationSessionId(human, user, log)
+      : ownerConversationSessionId(human, user);
 
   if (asideInvocation && !asideInvocation.messageText) {
     await dependencies.sendGoogleChatResponse(
