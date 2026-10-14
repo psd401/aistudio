@@ -64,7 +64,7 @@ the status is `"unknown"` instead of being reported as never run.
 node /opt/psd-skills/psd-schedules/update.js \
   --schedule-id <id> \
   [--name "<name>"] [--prompt "<prompt>"] [--cron "<cron>"] \
-  [--timezone "<tz>"] [--enabled true|false]
+  [--timezone "<tz>"] [--enabled true|false] [--confirm-new]
 ```
 
 ### `delete_schedule` — remove a schedule permanently
@@ -282,6 +282,12 @@ schedule's id:
 |---|---|---|
 | `name_conflict` | A schedule with that name already exists | `update` the schedule at `existingScheduleId`, or `delete` it first |
 | `possible_duplicate` | An **enabled** schedule already runs the same cadence and the same opening prompt | `update` the schedule at `existingScheduleId`, or pass `--confirm-new` |
+
+`update` gets the same `possible_duplicate` refusal when it would leave the
+schedule an enabled copy of another one — re-enabling it, or changing the
+cadence or prompt of an enabled one. A rename alone is never refused. If the
+user is replacing the other schedule, retire that one first, then retry the
+update.
 
 A 409 that carries no `code` is neither of these — it is a data-integrity
 refusal on an existing record, not a duplicate. Report its message to the user

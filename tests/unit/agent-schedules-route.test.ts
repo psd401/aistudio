@@ -243,6 +243,22 @@ describe("POST /api/agent/schedules duplicate refusals", () => {
     )
   })
 
+  it("forwards confirmNew on update, which is refused the same way", async () => {
+    const response = await POST(
+      request({
+        operation: "update",
+        scheduleId: "schedule-1",
+        enabled: true,
+        confirmNew: true,
+      })
+    )
+    expect(response.status).toBe(200)
+    expect(updateMock).toHaveBeenCalledWith(
+      "owner@psd401.net",
+      expect.objectContaining({ confirmNew: true })
+    )
+  })
+
   it("returns conflict details so the agent can update instead of renaming", async () => {
     // The whole point of #1889: a prose-only 409 is what let the agent retry
     // under a new name. The code and the existing id must reach the caller.

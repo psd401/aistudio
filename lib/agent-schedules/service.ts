@@ -133,6 +133,7 @@ export interface UpdateAgentScheduleInput {
   cron?: unknown;
   timezone?: unknown;
   enabled?: unknown;
+  confirmNew?: unknown;
 }
 
 function hasScheduleUpdates(input: UpdateAgentScheduleInput): boolean {
@@ -337,7 +338,7 @@ export class AgentSchedulePossibleDuplicateError extends AgentScheduleConflictEr
     super(
       `An enabled schedule with the same cadence and prompt already exists: ` +
         `"${existingScheduleName}" (${existingScheduleId}). Update that ` +
-        `schedule, or pass confirmNew to create a second one anyway.`,
+        `schedule, or pass confirmNew to keep both anyway.`,
       {
         code: "possible_duplicate",
         existingScheduleId,
@@ -638,9 +639,17 @@ const DUPLICATE_PROMPT_PREFIX_LENGTH = 200;
 
 /** The fields that decide whether two schedules are the same job. */
 interface DuplicateCandidate {
+  name: string;
   schedulerExpression: string;
   timezone: string;
   prompt: string;
+  /** The schedule being updated, which must not match itself. */
+  scheduleId?: string;
+}
+
+/** The name normalization the name guard row is keyed by. */
+function guardedName(name: string): string {
+  return name.trim().toLowerCase();
 }
 
 function normalizedForComparison(value: string): string {
@@ -655,11 +664,11 @@ function normalizedPromptPrefix(prompt: string): string {
 }
 
 /**
- * Refuses a create that duplicates an existing schedule.
+ * Refuses a create or update that duplicates an existing schedule.
  *
- * Called before the EventBridge schedule is created, so a refusal leaves
- * nothing to roll back and the agent gets the id of the schedule it should
- * have updated instead.
+ * Called before any DynamoDB or EventBridge write, so a refusal leaves nothing
+ * to roll back and the agent gets the id of the schedule it should have
+ * updated instead.
  *
  * Best-effort by construction, and deliberately so: it decides from a snapshot
  * read before the transaction, and `create` takes no owner-level lock, so two
@@ -688,6 +697,11 @@ function refuseIfLikelyDuplicate(
  * same cadence. Exact name equality is handled by the name guard row; this is
  * the "same job, slightly different name" case that had no check at all.
  *
+ * A same-name record is skipped rather than matched: the name guard reports
+ * it as `name_conflict`, which `confirmNew` cannot clear. Matching it here
+ * would answer an identical retry with `possible_duplicate` and send the agent
+ * to `--confirm-new`, only to hit the name conflict on the next attempt.
+ *
  * The timezone is part of the cadence, not decoration: the same cron text in
  * `America/Los_Angeles` and `America/New_York` fires three hours apart, so two
  * such schedules are genuinely different jobs and must not be refused as
@@ -701,14 +715,42 @@ function findLikelyDuplicate(
   const expression = normalizedForComparison(candidate.schedulerExpression);
   const timezone = normalizedForComparison(candidate.timezone);
   const promptPrefix = normalizedPromptPrefix(candidate.prompt);
+  const name = guardedName(candidate.name);
   return (
     records.find(
       (record) =>
         record.enabled &&
+        record.scheduleId !== candidate.scheduleId &&
+        guardedName(record.name) !== name &&
         normalizedForComparison(record.schedulerExpression) === expression &&
         normalizedForComparison(record.timezone) === timezone &&
         normalizedPromptPrefix(record.prompt) === promptPrefix,
     ) ?? null
+  );
+}
+
+/**
+ * Whether an update turns a schedule into a job it was not already running:
+ * enabling it, or changing the cadence or prompt of an enabled one.
+ *
+ * Without this, `update` was a way around the create-time refusal — disable a
+ * schedule, retime or re-prompt it to match another, re-enable it. A rename
+ * alone is not checked, so a legacy pair that already double-fires can still
+ * be edited without first being forced apart.
+ */
+function becomesRunningJob(
+  current: AgentScheduleRecord,
+  next: Pick<
+    AgentScheduleRecord,
+    "enabled" | "schedulerExpression" | "timezone" | "prompt"
+  >,
+): boolean {
+  if (!next.enabled) return false;
+  return (
+    !current.enabled ||
+    current.schedulerExpression !== next.schedulerExpression ||
+    current.timezone !== next.timezone ||
+    current.prompt !== next.prompt
   );
 }
 
@@ -739,7 +781,7 @@ export class AgentScheduleService {
     scheduleId: string;
   } {
     const digest = createHash("sha256")
-      .update(name.trim().toLowerCase())
+      .update(guardedName(name))
       .digest("hex")
       .slice(0, 32);
     return { userId: ownerEmail, scheduleId: `__name__${digest}` };
@@ -1172,6 +1214,7 @@ export class AgentScheduleService {
     const existingRecords = await this.reconcileOwnerMetadata(ownerEmail);
     if (!confirmNew) {
       refuseIfLikelyDuplicate(existingRecords, {
+        name,
         schedulerExpression,
         timezone,
         prompt,
@@ -1400,11 +1443,16 @@ export class AgentScheduleService {
   ): Promise<PublicAgentSchedule> {
     const ownerEmail = normalizeOwnerEmail(owner);
     const scheduleId = validateScheduleId(input.scheduleId);
-    await this.reconcileOwnerMetadata(ownerEmail);
+    const confirmNew = parseOptionalFlag(input.confirmNew, "confirmNew");
+    const existingRecords = await this.reconcileOwnerMetadata(ownerEmail);
     return this.withScheduleMutationLock(
       ownerEmail,
       scheduleId,
-      () => this.updateWhileLocked(ownerEmail, scheduleId, input),
+      () =>
+        this.updateWhileLocked(ownerEmail, scheduleId, input, {
+          existingRecords,
+          confirmNew,
+        }),
     );
   }
 
@@ -1412,9 +1460,19 @@ export class AgentScheduleService {
     ownerEmail: string,
     scheduleId: string,
     input: UpdateAgentScheduleInput,
+    duplicateCheck: {
+      existingRecords: AgentScheduleRecord[];
+      confirmNew: boolean;
+    },
   ): Promise<PublicAgentSchedule> {
     const current = await this.getRecord(ownerEmail, scheduleId);
     const fields = resolvedScheduleFields(current, input);
+    if (!duplicateCheck.confirmNew && becomesRunningJob(current, fields)) {
+      refuseIfLikelyDuplicate(duplicateCheck.existingRecords, {
+        ...fields,
+        scheduleId,
+      });
+    }
     const profile = await this.trustedOwnerProfile(ownerEmail);
     const updated: AgentScheduleRecord = {
       ...current,

@@ -1105,7 +1105,154 @@ function defineCancellationReasonSuite() {
   })
 }
 
+/**
+ * The refusal on the paths that bypassed it (#1889 review).
+ *
+ * An identical retry under the same name has to come back as `name_conflict`
+ * — `confirmNew` cannot clear that, so answering `possible_duplicate` sent the
+ * agent round a second failed attempt. And `update` could disable, retime and
+ * re-enable a schedule into a duplicate the create-time check refuses.
+ */
+const OTHER_SCHEDULE_ID = "7d1c4f0e-2b6a-4c39-9e51-3a8f0d2c6b14"
+
+function defineDuplicateBypassSuite() {
+  it("reports an identical same-name retry as name_conflict", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+      .mockRejectedValueOnce(
+        cancellationWithReasons(["None", "ConditionalCheckFailed", "None"]),
+      )
+      .mockResolvedValueOnce({ Item: { targetScheduleId: SCHEDULE_ID } })
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .create(OWNER, {
+        name: "  MORNING brief ",
+        prompt: "Summarize my day",
+        cron: "0 8 * * *",
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentScheduleNameConflictError)
+    expect(error).not.toBeInstanceOf(AgentSchedulePossibleDuplicateError)
+  })
+
+  it("refuses an update that re-enables a schedule into a duplicate", async () => {
+    const retired = scheduleRecord({
+      scheduleId: OTHER_SCHEDULE_ID,
+      name: "Old brief",
+      cronExpression: "0 15 * * *",
+      schedulerExpression: "cron(0 15 * * ? *)",
+      enabled: false,
+    })
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend.mockResolvedValue({})
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord(), retired] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: retired })
+    schedulerSend.mockResolvedValue({})
+
+    const error = await service
+      .update(OWNER, {
+        scheduleId: OTHER_SCHEDULE_ID,
+        cron: "0 8 * * *",
+        enabled: true,
+      })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(AgentSchedulePossibleDuplicateError)
+    expect((error as AgentSchedulePossibleDuplicateError).details).toEqual({
+      code: "possible_duplicate",
+      existingScheduleId: SCHEDULE_ID,
+      existingScheduleName: "Morning brief",
+    })
+    expect(schedulerSend).not.toHaveBeenCalled()
+    const recordWrites = dynamoSend.mock.calls.filter(
+      ([command]) =>
+        command instanceof PutCommand &&
+        command.input.Item?.scheduleId === OTHER_SCHEDULE_ID,
+    )
+    expect(recordWrites).toHaveLength(0)
+  })
+
+  it("lets an update through with confirmNew", async () => {
+    const retired = scheduleRecord({
+      scheduleId: OTHER_SCHEDULE_ID,
+      name: "Old brief",
+      enabled: false,
+    })
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend.mockResolvedValue({})
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord(), retired] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: retired })
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+    schedulerSend.mockResolvedValue({})
+
+    await expect(
+      service.update(OWNER, {
+        scheduleId: OTHER_SCHEDULE_ID,
+        enabled: true,
+        confirmNew: true,
+      }),
+    ).resolves.toMatchObject({ enabled: true })
+    expect(schedulerSend.mock.calls[0][0]).toBeInstanceOf(UpdateScheduleCommand)
+  })
+
+  it("does not refuse a rename of a schedule that already has a twin", async () => {
+    // A legacy pair that already double-fires must stay editable; only a
+    // change that makes the schedule a running copy of another is refused.
+    const twin = scheduleRecord({
+      scheduleId: OTHER_SCHEDULE_ID,
+      name: "Morning brief copy",
+    })
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend.mockResolvedValue({})
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord(), twin] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: twin })
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+    schedulerSend.mockResolvedValue({})
+
+    await expect(
+      service.update(OWNER, {
+        scheduleId: OTHER_SCHEDULE_ID,
+        name: "Morning brief (to delete)",
+      }),
+    ).resolves.toMatchObject({ name: "Morning brief (to delete)" })
+  })
+
+  it("does not match the schedule being updated against itself", async () => {
+    const { service, dynamoSend, schedulerSend } = harness()
+    dynamoSend.mockResolvedValue({})
+    dynamoSend
+      .mockResolvedValueOnce({ Items: [scheduleRecord()] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ Item: scheduleRecord() })
+      .mockResolvedValueOnce(OWNER_ROW_RESPONSE)
+    schedulerSend.mockResolvedValue({})
+
+    await expect(
+      service.update(OWNER, {
+        scheduleId: SCHEDULE_ID,
+        prompt: "Summarize my day and my calendar",
+      }),
+    ).resolves.toMatchObject({ prompt: "Summarize my day and my calendar" })
+  })
+}
+
 describe("AgentScheduleService name collision mapping", defineNameCollisionMappingSuite)
+describe("AgentScheduleService duplicate refusal bypasses", defineDuplicateBypassSuite)
 describe(
   "AgentScheduleService cancellation reasons",
   defineCancellationReasonSuite,

@@ -140,13 +140,22 @@ describe('duplicate-prevention guidance', () => {
     expect(SKILL).toMatch(/409 that carries no `code`/);
   });
 
-  test('create.js surfaces the code the SKILL.md table tells the agent to read', () => {
+  test('create.js and update.js surface the code the SKILL.md table tells the agent to read', () => {
     // The broker returns `code` in the JSON body, which requestAgentBroker
     // hangs off error.responseBody. Printing only error.message meant the
-    // documented field never reached the agent.
+    // documented field never reached the agent. Both scripts can be refused.
+    const common = fs.readFileSync(path.join(__dirname, 'common.js'), 'utf8');
+    expect(common).toContain('responseBody');
     const create = fs.readFileSync(path.join(__dirname, 'create.js'), 'utf8');
-    expect(create).toContain('refusalDetail');
-    expect(create).toContain('responseBody');
-    expect(create).toContain('failWithRefusal');
+    const update = fs.readFileSync(path.join(__dirname, 'update.js'), 'utf8');
+    expect(create).toContain('main().catch(failWithRefusal)');
+    expect(update).toContain('main().catch(failWithRefusal)');
+  });
+
+  test('matches the flag update.js actually accepts', () => {
+    const update = fs.readFileSync(path.join(__dirname, 'update.js'), 'utf8');
+    expect(update).toContain("args['confirm-new']");
+    expect(update).toContain('[--confirm-new]');
+    expect(SKILL).toMatch(/\[--enabled true\|false\] \[--confirm-new\]/);
   });
 });

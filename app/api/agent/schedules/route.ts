@@ -101,6 +101,7 @@ async function executeScheduleOperation(
           cron: body.cron,
           timezone: body.timezone,
           enabled: body.enabled,
+          confirmNew: body.confirmNew,
         }),
       })
     case "runs":
