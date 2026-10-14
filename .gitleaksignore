@@ -63,3 +63,6 @@ f29829b89e7e3655aaba10a788bf3ec3dfeb9e0b:app/api/nexus/voice/availability/__test
 dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-list.test.ts:generic-api-key:41
 dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts:generic-api-key:306
 dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/retired-exec-approvals.test.ts:generic-api-key:15
+# PR #1915 (#1887): test fixture "fs-key-abcdef123456" in two unit tests, since replaced with a low-entropy placeholder.
+cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/agent-credential-entry.test.ts:generic-api-key:79
+cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/credential-entry-form.test.tsx:generic-api-key:31

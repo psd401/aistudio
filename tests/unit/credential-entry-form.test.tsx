@@ -28,7 +28,7 @@ import { CredentialEntryForm } from "@/app/agent-connect-credential/_components/
 const TOKEN = "signed.consent.token"
 const OWNER = "owner@psd401.net"
 const CREDENTIAL = "freshservice_api_key"
-const SECRET = "fs-key-abcdef123456"
+const SECRET = "not-a-real-key"
 
 function ok(outcome: CredentialEntrySubmission) {
   return { isSuccess: true as const, message: "ok", data: outcome }
@@ -179,40 +179,6 @@ describe("credential entry form — outcomes", () => {
     expect(screen.queryByTestId("credential-entry-input")).toBeNull()
   })
 
-  it("ignores a stale reply so a late loser cannot overwrite the win", async () => {
-    // Two submits dispatched before isPending commits: the server's atomic
-    // claim means only one can write, but the loser's reply must not repaint
-    // "saved" as "already used". Submitted on the FORM rather than the button
-    // because the button is disabled the moment the first submit is in flight.
-    let resolveFirst: (value: unknown) => void = () => {}
-    const first = new Promise((resolve) => {
-      resolveFirst = resolve
-    })
-    storeCredentialMock
-      .mockReturnValueOnce(first)
-      .mockResolvedValueOnce(
-        ok({ status: "stored", credentialName: CREDENTIAL, action: "created" })
-      )
-    const { container } = renderForm()
-    fireEvent.change(field(), { target: { value: SECRET } })
-    const form = container.querySelector("form") as HTMLFormElement
-    fireEvent.submit(form)
-    fireEvent.submit(form)
-    expect(storeCredentialMock).toHaveBeenCalledTimes(2)
-
-    await waitFor(() =>
-      expect(screen.getByText(/Credential saved/i)).toBeInTheDocument()
-    )
-
-    // The first (superseded) call now reports a spent link; it must be ignored.
-    await act(async () => {
-      resolveFirst(ok({ status: "already-used" }))
-      await first
-    })
-    expect(screen.getByText(/Credential saved/i)).toBeInTheDocument()
-    expect(screen.queryByText(/Link already used/i)).toBeNull()
-  })
-
   it("reports a spent link and removes the field", async () => {
     storeCredentialMock.mockResolvedValue(ok({ status: "already-used" }))
     renderForm()
@@ -273,5 +239,60 @@ describe("credential entry form — outcomes", () => {
       ).toBeInTheDocument()
     )
     expect(document.body.textContent).not.toContain(SECRET)
+  })
+})
+
+describe("credential entry form — duplicate submits", () => {
+  it("never sends a second submit while the first is in flight", async () => {
+    // Two submits dispatched before isPending commits. Only one can win the
+    // server's atomic claim and the UI cannot tell which, so the second must
+    // never be sent — otherwise the loser's "already used" reply could repaint
+    // a stored credential as a failure. Submitted on the FORM rather than the
+    // button because the button is disabled once the first submit commits.
+    let resolveFirst: (value: unknown) => void = () => {}
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve
+    })
+    storeCredentialMock
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce(ok({ status: "already-used" }))
+    const { container } = renderForm()
+    fireEvent.change(field(), { target: { value: SECRET } })
+    const form = container.querySelector("form") as HTMLFormElement
+    fireEvent.submit(form)
+    fireEvent.submit(form)
+    expect(storeCredentialMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveFirst(
+        ok({ status: "stored", credentialName: CREDENTIAL, action: "created" })
+      )
+      await first
+    })
+    await waitFor(() =>
+      expect(screen.getByText(/Credential saved/i)).toBeInTheDocument()
+    )
+    expect(screen.queryByText(/Link already used/i)).toBeNull()
+    expect(storeCredentialMock).toHaveBeenCalledTimes(1)
+  })
+
+  it("allows a resubmit after a rejected value", async () => {
+    storeCredentialMock
+      .mockResolvedValueOnce(ok({ status: "invalid-value", credentialName: CREDENTIAL, reason: "Too short." }))
+      .mockResolvedValueOnce(
+        ok({ status: "stored", credentialName: CREDENTIAL, action: "created" })
+      )
+    const { container } = renderForm()
+    fireEvent.change(field(), { target: { value: SECRET } })
+    const form = container.querySelector("form") as HTMLFormElement
+    fireEvent.submit(form)
+    await waitFor(() => expect(screen.getByText(/Too short/i)).toBeInTheDocument())
+
+    fireEvent.change(field(), { target: { value: SECRET } })
+    fireEvent.submit(form)
+    await waitFor(() =>
+      expect(screen.getByText(/Credential saved/i)).toBeInTheDocument()
+    )
+    expect(storeCredentialMock).toHaveBeenCalledTimes(2)
   })
 })

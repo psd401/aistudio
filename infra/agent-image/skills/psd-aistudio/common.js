@@ -99,8 +99,9 @@ function handleTerminalMcpStatus(brokerResult, httpStatus, keySource) {
     const guidance = {
       oauth: 'Your delegated connection expired or was revoked — run connect again.',
       personal:
-        'Your stored AI Studio key is invalid or revoked — re-store a current ' +
-        'key with psd-credentials put --name aistudio_personal_key.',
+        'Your stored AI Studio key is invalid or revoked. Send the caller a ' +
+        'one-time entry link for a current key (never ask for it in chat): ' +
+        'node /opt/psd-skills/psd-credentials/request_entry.js --name aistudio_personal_key',
       shared: 'The shared key must be a valid sk- key holding at least platform:read.',
     };
     emit({

@@ -84,8 +84,8 @@ function usage() {
       "      Raw MCP tools/list — every tool name, description, and inputSchema the",
       "      resolved key can see.",
       "",
-      "Actions (need the caller's own scoped key — store it with",
-      "psd-credentials put --name aistudio_personal_key):",
+      "Actions (need the caller's own scoped key — collect it with a one-time link,",
+      "psd-credentials/request_entry.js --name aistudio_personal_key):",
       "  list-assistants   [--user <email>] [--search <t>] [--status <s>] [--limit N] [--cursor C]",
       '  execute-assistant [--user <email>] --id <n> [--inputs \'{"field":"value"}\']',
       "      API-key execution runs only APPROVED assistants (the owner/admin draft",
@@ -254,6 +254,13 @@ function requiredScopeForTool(toolName) {
   return repositoryScopes[toolName] || `mcp:${toolName}`;
 }
 
+/** How the agent collects a personal key: a one-time entry link the caller
+ *  fills in themselves, so the value never passes through chat or tool-call
+ *  arguments (#1887). Never point at `psd-credentials put --value` here. */
+const ENTRY_LINK_HINT =
+  "Send the caller a one-time entry link (never ask for the key in chat): " +
+  "node /opt/psd-skills/psd-credentials/request_entry.js --name aistudio_personal_key";
+
 /** The remediation hint for an insufficient-scope failure — different when the
  *  caller is already on a personal key (re-mint) vs the shared key (store one). */
 function scopeHint(keySource, scope) {
@@ -266,8 +273,7 @@ function scopeHint(keySource, scope) {
   if (keySource === "personal") {
     return (
       `Your stored AI Studio key lacks ${scope}. Mint a NEW key that includes ` +
-      `${scope} in AI Studio (Settings → API Keys) and re-store it: ` +
-      `psd-credentials put --name aistudio_personal_key --value sk-...`
+      `${scope} in AI Studio (Settings → API Keys). ${ENTRY_LINK_HINT}`
     );
   }
   if (scope.startsWith("repositories:")) {
@@ -279,9 +285,8 @@ function scopeHint(keySource, scope) {
   }
   return (
     `You are on the shared, read-only platform:read key, which lacks ${scope}. ` +
-    `Store your own AI Studio API key to use this: ` +
-    `psd-credentials put --name aistudio_personal_key --value sk-... ` +
-    `(the key must include ${scope}).`
+    `The caller needs their own AI Studio API key (it must include ${scope}). ` +
+    ENTRY_LINK_HINT
   );
 }
 

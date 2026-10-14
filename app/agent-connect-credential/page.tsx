@@ -1,9 +1,9 @@
 /**
  * Agent Connect — one-time credential entry page (issue #1887).
  *
- * Public route (NOT under (protected), NOT in nav) but deliberately NOT in
- * middleware's PUBLIC_PATHS: a signed link proves integrity, not who opened
- * it, so a live AI Studio session is the second factor.
+ * Session-gated route outside (protected) and not in nav. It is deliberately
+ * NOT in middleware's PUBLIC_PATHS: a signed link proves integrity, not who
+ * opened it, so a live AI Studio session is the second factor.
  *
  * Accepts `?token=<signed-jwt>` issued by `/api/agent/consent-link` with
  * `kind: "credential_entry"`. The user clicks this link from their chat with

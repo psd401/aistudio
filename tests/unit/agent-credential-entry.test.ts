@@ -76,7 +76,7 @@ import {
 } from "@/lib/agent-workspace/credential-entry"
 
 const OWNER = "owner@psd401.net"
-const SECRET_VALUE = "fs-key-abcdef123456"
+const SECRET_VALUE = "not-a-real-key"
 
 function payload(overrides: Partial<FakePayload> = {}): FakePayload {
   return {

@@ -97,10 +97,11 @@ export function CredentialEntryForm({
   const inputRef = useRef<HTMLInputElement>(null)
   // `isPending` only flips once React commits, so two submits dispatched in the
   // same task can both get through. The server's atomic nonce claim means only
-  // one of them can ever write — but without this counter the LOSER's
-  // "already-used" reply could land after the winner's "saved" and tell the
-  // user their credential was not stored when it was.
-  const submission = useRef(0)
+  // one of them could ever write, and the UI cannot tell which one won — the
+  // loser's "already-used" reply would tell the user their credential was not
+  // stored when it was. So a second submit is never sent: this ref is set
+  // synchronously, before the first await, and cleared when the reply lands.
+  const inFlight = useRef(false)
 
   const errorMessage = state.phase === "entry" ? state.error : null
   // Put the cursor back where the fix has to happen. This waits for the
@@ -116,11 +117,16 @@ export function CredentialEntryForm({
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (inFlight.current) return
+    inFlight.current = true
     const submitted = value
-    const attempt = ++submission.current
     startTransition(async () => {
-      const result = await storeCredentialFromEntryLink(token, submitted)
-      if (attempt !== submission.current) return
+      let result: Awaited<ReturnType<typeof storeCredentialFromEntryLink>>
+      try {
+        result = await storeCredentialFromEntryLink(token, submitted)
+      } finally {
+        inFlight.current = false
+      }
 
       if (!result.isSuccess) {
         setState({ phase: "failed", message: result.message })
