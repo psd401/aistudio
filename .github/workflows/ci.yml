@@ -161,6 +161,25 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # psd-credentials skill gate (Bun, #1887). These tests sat beside the skill
+    # with no `test` script and no CI step, so the credential-broker client —
+    # including the new one-time entry-link command, the only sanctioned way to
+    # collect a user's secret — had no coverage in any runner. It does now.
+    - name: Run psd-credentials skill tests (Bun)
+      run: bun run test:skill:credentials
+      env:
+        CI: true
+
+    # Credential-entry consent token (Bun, #1887). Same reason as the Atrium
+    # smokes: consent-token.ts imports pure-ESM `jose`, which next/jest cannot
+    # transform. The 15-minute expiry on a secret-entry link is the security
+    # property, so it is verified against real sign/verify, not a mock.
+    - name: Run credential-entry consent token smoke (Bun)
+      run: bun run test:smoke:agent-credential-entry
+      env:
+        CI: true
+        AUTH_SECRET: ci-credential-entry-secret-0123456789
+
     # psd-workspace skill gate (Bun). infra/agent-image/skills/psd-workspace is
     # plain CJS outside the Next.js/jest roots, so `test:ci` never saw it — the
     # regex gate that is the ONLY barrier against the agent sending mail,
