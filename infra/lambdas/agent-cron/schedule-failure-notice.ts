@@ -147,7 +147,11 @@ export function buildScheduleFailureNoticeText(
   const headline =
     input.reason === 'auth'
       ? `⚠️ *${input.scheduleName}* could not run: my access to your Google account has expired or been turned off.`
-      : `⚠️ *${input.scheduleName}* has now failed ${input.consecutiveFailures} times in a row, so you have not been getting it.`;
+      // "has not reached you", not "has failed": a streak can be made of runs
+      // whose Chat post is still on the retry queue (`deferred`), which may
+      // yet land. Either way the owner has nothing in hand, and that is the
+      // part they can act on.
+      : `⚠️ *${input.scheduleName}* has not reached you for ${input.consecutiveFailures} runs in a row.`;
   const reasonLine =
     input.reason === 'auth'
       ? 'Nothing is wrong with the schedule itself — it just cannot reach your mail, calendar, or files until the connection is renewed.'

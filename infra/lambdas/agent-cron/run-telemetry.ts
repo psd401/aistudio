@@ -206,7 +206,13 @@ function streakFromResult(result: unknown): ScheduleFailureStreak {
 }
 
 /**
- * Aggregate one schedule's current failure streak.
+ * The streak aggregate, as one statement.
+ *
+ * Exported because this SQL is the load-bearing half of the owner notice and
+ * substring assertions cannot prove it: `tests/smoke/agent-schedule-failure-
+ * streak.smoke.ts` runs THIS text against real PostgreSQL. A mistake in the
+ * `recent.id > bound.last_success_id` bound or the `BOOL_OR` placement would
+ * reproduce the repeat-message bug with every unit test still green.
  *
  * Two statements' worth of work in one: the newest success bounds the streak,
  * and every failed run after it is counted, checked for the owner's stamp, and
@@ -214,19 +220,7 @@ function streakFromResult(result: unknown): ScheduleFailureStreak {
  * `lib/agent-schedules/run-reader.ts`, which answers the same question for the
  * whole list at once.
  */
-export async function readFailureStreak(
-  config: RunTelemetryConfig,
-  rdsDataClient: RunTelemetryRdsClient,
-  params: { userEmail: string; scheduleId: string },
-): Promise<ScheduleFailureStreak> {
-  if (!config.databaseResourceArn || !config.databaseSecretArn) {
-    throw new Error('Scheduled-run telemetry database is not configured');
-  }
-  const result = await rdsDataClient.execute({
-    resourceArn: config.databaseResourceArn,
-    secretArn: config.databaseSecretArn,
-    database: config.databaseName,
-    sql: `WITH recent AS (
+export const FAILURE_STREAK_SQL = `WITH recent AS (
             SELECT id, status, error_message, owner_notified_at
             FROM agent_scheduled_runs
             WHERE user_id = :user_id
@@ -255,7 +249,21 @@ export async function readFailureStreak(
             AND (
               bound.last_success_id IS NULL
               OR recent.id > bound.last_success_id
-            )`,
+            )`;
+
+export async function readFailureStreak(
+  config: RunTelemetryConfig,
+  rdsDataClient: RunTelemetryRdsClient,
+  params: { userEmail: string; scheduleId: string },
+): Promise<ScheduleFailureStreak> {
+  if (!config.databaseResourceArn || !config.databaseSecretArn) {
+    throw new Error('Scheduled-run telemetry database is not configured');
+  }
+  const result = await rdsDataClient.execute({
+    resourceArn: config.databaseResourceArn,
+    secretArn: config.databaseSecretArn,
+    database: config.databaseName,
+    sql: FAILURE_STREAK_SQL,
     parameters: [
       { name: 'user_id', value: { stringValue: params.userEmail } },
       { name: 'schedule_id', value: { stringValue: params.scheduleId } },

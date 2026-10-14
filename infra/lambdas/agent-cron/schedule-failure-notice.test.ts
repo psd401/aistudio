@@ -232,7 +232,7 @@ describe('buildScheduleFailureNoticeText', () => {
     });
 
     expect(text).toContain('Morning brief');
-    expect(text).toContain('3 times in a row');
+    expect(text).toContain('3 runs in a row');
     expect(text).toContain('Agent temporarily unavailable');
     expect(text).toContain('ask your agent to check this schedule');
   });

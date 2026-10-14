@@ -240,7 +240,7 @@ describe('the owner hears about a schedule that keeps failing', () => {
     expect(recorded.runs[0]).toMatchObject({ status: 'error' });
     expect(recorded.dms).toHaveLength(1);
     expect(recorded.dms[0]).toContain('Morning brief');
-    expect(recorded.dms[0]).toContain('3 times in a row');
+    expect(recorded.dms[0]).toContain('3 runs in a row');
     expect(recorded.dms[0]).toContain('ask your agent to check this schedule');
     // No consent link is minted for a non-authorization failure.
     expect(recorded.consentCalls).toBe(0);
