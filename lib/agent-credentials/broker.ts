@@ -33,6 +33,16 @@ const SAFE_CAPABILITY_RE = /^[a-z0-9._-]{1,64}$/
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_LISTED_CREDENTIALS = 500
+// The write-audit insert runs AFTER the secret is live and cannot fail the
+// write (see put()), so a dropped row is the only cost of a DB blip. Give it a
+// longer transient-error budget than executeQuery's default (3 attempts from
+// 100ms, under a second): 6 attempts backing off 250ms → 4s, ~8s worst case,
+// enough to ride out a connection reset or an Aurora scale event.
+export const CREDENTIAL_AUDIT_RETRY = {
+  maxRetries: 6,
+  initialDelay: 250,
+  maxDelay: 4000,
+} as const
 
 export class AgentCredentialInputError extends Error {
   constructor(message: string) {
@@ -255,7 +265,8 @@ export class AgentCredentialBroker {
     // reported as a failed write: the caller would tell the user their
     // credential was not saved when it was, and (on the #1887 entry-link path)
     // that costs them a one-time link over a write that actually succeeded.
-    // Record the gap loudly and return the truth about the secret.
+    // Retry transient failures on a longer budget; only once that is spent,
+    // record the gap loudly and return the truth about the secret.
     try {
       await executeQuery(
         (db) =>
@@ -265,7 +276,8 @@ export class AgentCredentialBroker {
             action,
             details: { user_email: ownerEmail },
           }),
-        "agentCredentialWriteAudit"
+        "agentCredentialWriteAudit",
+        CREDENTIAL_AUDIT_RETRY
       )
     } catch (error) {
       log.error(
