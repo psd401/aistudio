@@ -28,8 +28,10 @@ const STREAK_DECIDING_STATUSES = ["success", ...FAILED_RUN_STATUSES] as const;
  * are both legal; against a 90-day cutoff every earlier failure of such a
  * schedule is already outside the window by the next run, its streak is
  * permanently 1, and it can never be marked `failing`. Counting runs behaves
- * identically for a five-minute schedule and a yearly one, and still bounds
- * the scan. Kept in step with `FAILURE_STREAK_RUN_LIMIT` in
+ * identically for a five-minute schedule and a yearly one, and — applied as a
+ * per-schedule LATERAL `LIMIT` rather than a filter on `ROW_NUMBER()` —
+ * genuinely stops the index scan rather than discarding rows after reading
+ * them. Kept in step with `FAILURE_STREAK_RUN_LIMIT` in
  * `infra/lambdas/agent-cron/run-telemetry.ts`.
  */
 export const FAILURE_STREAK_RUN_LIMIT = 500;
@@ -130,15 +132,17 @@ export class DrizzleAgentScheduleRunReader
   ): Promise<Map<string, number>> {
     if (scheduleIds.length === 0) return new Map();
 
-    const scheduleList = sql.join(
-      scheduleIds.map((scheduleId) => sql`${scheduleId}`),
+    // A VALUES list, not an IN list: each id drives its own LATERAL lookup
+    // below, which is what makes the per-schedule bound a real one.
+    const scheduleRows = sql.join(
+      scheduleIds.map((scheduleId) => sql`(${scheduleId})`),
       sql`, `,
     );
     const failedStatuses = sql.join(
       FAILED_RUN_STATUSES.map((status) => sql`${status}`),
       sql`, `,
     );
-    // Narrowed before the ranking, not only in the outer filter: `skipped` and
+    // Narrowed inside the LATERAL, not only in the outer filter: `skipped` and
     // `promoted` rows decide nothing, and an owner with contended five-minute
     // schedules accumulates far more of those than real runs — leaving them in
     // would spend the per-schedule run budget on rows that cannot affect the
@@ -147,38 +151,43 @@ export class DrizzleAgentScheduleRunReader
       STREAK_DECIDING_STATUSES.map((status) => sql`${status}`),
       sql`, `,
     );
-    // One pass with a window function rather than N per-schedule queries: the
-    // last successful run's id per schedule is the streak boundary, and every
-    // failed run after it is in the current streak. `id` is the tiebreaker the
-    // rest of this reader already orders by, so two runs recorded in the same
-    // second cannot invert the boundary.
+    // The last successful run's id per schedule is the streak boundary, and
+    // every failed run after it is in the current streak. `id` is the
+    // tiebreaker the rest of this reader already orders by, so two runs
+    // recorded in the same second cannot invert the boundary.
+    //
+    // The bound is applied by a LATERAL `ORDER BY ... LIMIT` per schedule
+    // rather than by filtering a `ROW_NUMBER()`. That distinction is the whole
+    // point: a window function must process every row of its partition before
+    // an outer predicate on its result can apply, so `WHERE recency <= N`
+    // reads the owner's entire history and only then discards most of it. The
+    // LIMIT inside the LATERAL stops the index scan itself, which is what
+    // keeps an owner whose five-minute schedule has been failing for a year
+    // from being read whole on every `list` call.
     const result = await executeQuery(
       (db) =>
         db.execute(sql`
           SELECT bounded.schedule_id AS schedule_id,
                  COUNT(*)::int AS failures
           FROM (
-            SELECT ranked.id,
-                   ranked.schedule_id,
-                   ranked.status,
+            SELECT requested.schedule_id AS schedule_id,
+                   recent.id AS id,
+                   recent.status AS status,
                    MAX(
-                     CASE WHEN ranked.status = 'success' THEN ranked.id END
-                   ) OVER (PARTITION BY ranked.schedule_id)
+                     CASE WHEN recent.status = 'success' THEN recent.id END
+                   ) OVER (PARTITION BY requested.schedule_id)
                      AS last_success_id
-            FROM (
-              SELECT id,
-                     schedule_id,
-                     status,
-                     ROW_NUMBER() OVER (
-                       PARTITION BY schedule_id
-                       ORDER BY created_at DESC, id DESC
-                     ) AS recency
+            FROM (VALUES ${scheduleRows})
+                   AS requested(schedule_id)
+            CROSS JOIN LATERAL (
+              SELECT id, status
               FROM agent_scheduled_runs
               WHERE user_id = ${ownerEmail}
-                AND schedule_id IN (${scheduleList})
+                AND schedule_id = requested.schedule_id
                 AND status IN (${streakDecidingStatuses})
-            ) AS ranked
-            WHERE ranked.recency <= ${FAILURE_STREAK_RUN_LIMIT}
+              ORDER BY created_at DESC, id DESC
+              LIMIT ${FAILURE_STREAK_RUN_LIMIT}
+            ) AS recent
           ) AS bounded
           WHERE bounded.status IN (${failedStatuses})
             AND (
