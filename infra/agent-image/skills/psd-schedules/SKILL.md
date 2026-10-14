@@ -39,8 +39,13 @@ node /opt/psd-skills/psd-schedules/create.js \
   --name "<display name>" \
   --prompt "<what to prompt the agent at fire time>" \
   --cron "<5-field cron>" \
-  --timezone "<IANA TZ, default America/Los_Angeles>"
+  --timezone "<IANA TZ, default America/Los_Angeles>" \
+  [--confirm-new]
 ```
+
+**Run `list` before every `create`.** Not as a courtesy — the broker refuses
+creates that look like duplicates, and `list` is how you find the schedule you
+should have been changing instead.
 
 ### `list_schedules` — list the caller's schedules
 
@@ -212,11 +217,41 @@ context the future-you will have. So:
 ## Workflow
 
 **Creating.** Gather name, prompt, time-of-day, day(s), timezone (default
-Pacific). Translate to cron. State the full schedule back in plain language
-and confirm. Run `create`. Tell the user when the first fire will be.
+Pacific). Translate to cron. **Run `list` first** and check whether this job
+already exists. State the full schedule back in plain language and confirm.
+Run `create`. Tell the user when the first fire will be.
 
 **Modifying.** If you don't know the `scheduleId`, run `list` first. Then
 `update` or `delete`. Confirm what changed — don't echo raw JSON.
+
+## Never create a second schedule for the same job
+
+Creating is not how you change a schedule. `update` is.
+
+- **The user is changing an existing job** — a different time, a tweaked
+  prompt, a new name — then `list`, find it, and `update` it. Do not create.
+- **You are replacing a job** with a differently-shaped one, then `delete` the
+  old schedule (or `update` it with `--enabled false`) in the same turn. An
+  old schedule left enabled beside its replacement keeps firing; one assistant
+  principal received both for weeks.
+- **A `create` failed** — read the error and act on it. Never retry the same
+  create under a new name.
+
+The broker enforces this, and both refusals are HTTP 409 carrying the existing
+schedule's id:
+
+| `code` | Meaning | What to do |
+|---|---|---|
+| `name_conflict` | A schedule with that name already exists | `update` the schedule at `existingScheduleId`, or `delete` it first |
+| `possible_duplicate` | An **enabled** schedule already runs the same cadence and the same opening prompt | `update` the schedule at `existingScheduleId`, or pass `--confirm-new` |
+
+`--confirm-new` is for the rare case where a second copy is genuinely wanted
+(same cadence, deliberately duplicated job). It is **not** the way past an
+error — if you cannot explain to the user why they want two, you want
+`update`. Four near-identical 15-minute form watchers landed in one counselor's
+account in a single day because each failed create was retried under a new
+name; one of them had a stale baseline and messaged "no new submissions" every
+ten minutes.
 
 **Rules.**
 

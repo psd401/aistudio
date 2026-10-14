@@ -18,7 +18,12 @@ async function main() {
   if (args.help) {
     process.stdout.write(
       'Usage: create.js --name <name> --prompt <prompt> --cron <cron> ' +
-        '[--timezone <tz>] [--disabled]\n',
+        '[--timezone <tz>] [--disabled] [--confirm-new]\n\n' +
+        'Run list.js first. The broker refuses a second enabled schedule ' +
+        'with the same cadence and prompt (code "possible_duplicate") and a ' +
+        'name that is already taken (code "name_conflict"), both HTTP 409 ' +
+        'with the existing schedule id. Pass --confirm-new only when a ' +
+        'second copy is genuinely wanted.\n',
     );
     return;
   }
@@ -38,6 +43,7 @@ async function main() {
       cron: args.cron,
       timezone,
       disabled: args.disabled === true,
+      confirmNew: args['confirm-new'] === true,
     }),
   );
 }

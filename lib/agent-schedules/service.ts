@@ -97,6 +97,8 @@ export interface CreateAgentScheduleInput {
   cron: unknown;
   timezone?: unknown;
   disabled?: unknown;
+  /** Opt out of the likely-duplicate refusal when a second copy is intended. */
+  confirmNew?: unknown;
 }
 
 export interface UpdateAgentScheduleInput {
@@ -199,9 +201,66 @@ export class AgentScheduleNotFoundError extends Error {
 }
 
 export class AgentScheduleConflictError extends Error {
-  constructor(message: string) {
+  /**
+   * Extra fields the broker route merges into the 409 body.
+   *
+   * The agent acts on the machine-readable `code` and the existing schedule's
+   * id; a prose message alone is what let it retry under a new name and create
+   * a real duplicate.
+   */
+  readonly details?: Record<string, unknown>;
+
+  constructor(message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = "AgentScheduleConflictError";
+    this.details = details;
+  }
+}
+
+/**
+ * The owner already has a schedule with this name.
+ *
+ * Previously every `TransactionCanceledException` from `create` became
+ * `AgentScheduleQuotaError`, so a name collision on the `__name__<hash>` guard
+ * row told the agent "Schedule quota exceeded (maximum 50)". The agent then
+ * retried under a slightly different name — one counselor ended up with four
+ * near-identical form watchers in a day.
+ */
+export class AgentScheduleNameConflictError extends AgentScheduleConflictError {
+  constructor(scheduleName: string, existingScheduleId: string | null) {
+    super(
+      `A schedule named "${scheduleName}" already exists` +
+        (existingScheduleId ? ` (${existingScheduleId})` : "") +
+        ". Update or delete it instead of creating another.",
+      {
+        code: "name_conflict",
+        existingScheduleId,
+      },
+    );
+    this.name = "AgentScheduleNameConflictError";
+  }
+}
+
+/**
+ * An enabled schedule already runs the same prompt on the same cadence.
+ *
+ * Refused unless the caller passes `confirmNew: true`, because the common case
+ * is an agent re-creating a job it should have updated: one counselor's daily
+ * report ran twice every morning for exactly that reason.
+ */
+export class AgentSchedulePossibleDuplicateError extends AgentScheduleConflictError {
+  constructor(existingScheduleId: string, existingScheduleName: string) {
+    super(
+      `An enabled schedule with the same cadence and prompt already exists: ` +
+        `"${existingScheduleName}" (${existingScheduleId}). Update that ` +
+        `schedule, or pass confirmNew to create a second one anyway.`,
+      {
+        code: "possible_duplicate",
+        existingScheduleId,
+        existingScheduleName,
+      },
+    );
+    this.name = "AgentSchedulePossibleDuplicateError";
   }
 }
 
@@ -459,6 +518,64 @@ function parseDisabled(value: unknown): boolean {
   return value;
 }
 
+function parseConfirmNew(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new AgentScheduleInputError("confirmNew must be a boolean");
+  }
+  return value;
+}
+
+/** Position of each condition in `create`'s TransactWrite, for cancellation mapping. */
+const CREATE_QUOTA_ITEM_INDEX = 0;
+const CREATE_NAME_GUARD_ITEM_INDEX = 1;
+const DUPLICATE_PROMPT_PREFIX_LENGTH = 200;
+
+function normalizedForComparison(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizedPromptPrefix(prompt: string): string {
+  return normalizedForComparison(prompt).slice(
+    0,
+    DUPLICATE_PROMPT_PREFIX_LENGTH,
+  );
+}
+
+/**
+ * Which TransactWrite conditions failed, or `null` when the SDK gave us no
+ * reasons (older clients, a wrapped error) and the caller must probe instead.
+ */
+function transactionCancellationCodes(error: unknown): string[] | null {
+  if (!isObject(error)) return null;
+  const reasons = error.CancellationReasons;
+  if (!Array.isArray(reasons)) return null;
+  return reasons.map((reason) =>
+    isObject(reason) && typeof reason.Code === "string" ? reason.Code : "",
+  );
+}
+
+/**
+ * An enabled schedule for this owner already running the same prompt on the
+ * same cadence. Exact name equality is handled by the name guard row; this is
+ * the "same job, slightly different name" case that had no check at all.
+ */
+function findLikelyDuplicate(
+  records: AgentScheduleRecord[],
+  candidate: { schedulerExpression: string; prompt: string },
+): AgentScheduleRecord | null {
+  const expression = normalizedForComparison(candidate.schedulerExpression);
+  const promptPrefix = normalizedPromptPrefix(candidate.prompt);
+  return (
+    records.find(
+      (record) =>
+        record.enabled &&
+        normalizedForComparison(record.schedulerExpression) === expression &&
+        normalizedPromptPrefix(record.prompt) === promptPrefix,
+    ) ?? null
+  );
+}
+
 export class AgentScheduleService {
   constructor(
     private readonly config: AgentScheduleServiceConfig,
@@ -662,15 +779,26 @@ export class AgentScheduleService {
    * transactional admission scheme. New mutations require the reconciled
    * marker, so concurrent creates cannot increment an unseeded zero counter.
    */
-  private async ensureOwnerMetadata(ownerEmail: string): Promise<void> {
+  /**
+   * Reconciles the quota and name-guard rows, and hands back the owner's
+   * current schedule records.
+   *
+   * Returning them is what lets `create` run its duplicate check without a
+   * second consistent query — this method has already read every row.
+   */
+  private async ensureOwnerMetadata(
+    ownerEmail: string,
+  ): Promise<AgentScheduleRecord[]> {
+    let latestRecords: AgentScheduleRecord[] = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const items = await this.ownerItems(ownerEmail);
       const { records, quota, guards } = ownerMetadataSnapshot(items, ownerEmail);
+      latestRecords = records;
       const transactItems = [
         ...this.planQuotaReconciliation(ownerEmail, records.length, quota),
         ...this.planNameGuardReconciliation(ownerEmail, records, guards),
       ];
-      if (transactItems.length === 0) return;
+      if (transactItems.length === 0) return latestRecords;
       try {
         await this.dynamo.send(
           new TransactWriteCommand({
@@ -682,7 +810,7 @@ export class AgentScheduleService {
             TransactItems: transactItems,
           }),
         );
-        return;
+        return latestRecords;
       } catch (error) {
         if (
           error instanceof Error &&
@@ -694,6 +822,7 @@ export class AgentScheduleService {
         throw error;
       }
     }
+    return latestRecords;
   }
 
   private planQuotaReconciliation(
@@ -898,7 +1027,25 @@ export class AgentScheduleService {
       input.timezone ?? DEFAULT_TIMEZONE,
     );
     const enabled = !parseDisabled(input.disabled);
-    await this.ensureOwnerMetadata(ownerEmail);
+    const confirmNew = parseConfirmNew(input.confirmNew);
+    const existingRecords = await this.ensureOwnerMetadata(ownerEmail);
+    // Refuse before the EventBridge schedule exists: nothing to roll back, and
+    // the agent gets the id of the schedule it should have updated instead.
+    if (!confirmNew) {
+      const duplicate = findLikelyDuplicate(existingRecords, {
+        schedulerExpression,
+        prompt,
+      });
+      if (duplicate) {
+        log.warn("Refusing a likely duplicate schedule", {
+          existingScheduleId: duplicate.scheduleId,
+        });
+        throw new AgentSchedulePossibleDuplicateError(
+          duplicate.scheduleId,
+          duplicate.name,
+        );
+      }
+    }
     const profile = await this.trustedOwnerProfile(ownerEmail);
     const scheduleId = randomUUID();
     const version = 1;
@@ -1007,11 +1154,72 @@ export class AgentScheduleService {
         error instanceof Error &&
         error.name === "TransactionCanceledException"
       ) {
-        throw new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner);
+        throw await this.createCancellationError(ownerEmail, name, error);
       }
       throw error;
     }
     return publicSchedule(record);
+  }
+
+  /**
+   * Tells a name collision apart from quota exhaustion.
+   *
+   * Both cancel the same transaction, and reporting the quota error for a name
+   * collision is what drove agents to retry under a new name. The SDK's
+   * `CancellationReasons` names the failing condition; when it is absent we
+   * probe the guard row, because its existence is itself the collision.
+   */
+  private async createCancellationError(
+    ownerEmail: string,
+    name: string,
+    error: unknown,
+  ): Promise<Error> {
+    const codes = transactionCancellationCodes(error);
+    const nameGuardFailed = codes
+      ? codes[CREATE_NAME_GUARD_ITEM_INDEX] === "ConditionalCheckFailed"
+      : null;
+    if (nameGuardFailed !== false) {
+      const existingScheduleId = await this.nameGuardTarget(ownerEmail, name);
+      if (nameGuardFailed === true || existingScheduleId !== null) {
+        return new AgentScheduleNameConflictError(name, existingScheduleId);
+      }
+    }
+    if (
+      codes &&
+      codes[CREATE_QUOTA_ITEM_INDEX] !== "ConditionalCheckFailed" &&
+      codes.some((code) => code && code !== "None")
+    ) {
+      // A condition we do not model failed (a concurrent create racing the
+      // record put). Surfacing it as a quota error would be a lie.
+      return new AgentScheduleSyncError(
+        `Schedule creation was cancelled (${codes.join(",")})`,
+      );
+    }
+    return new AgentScheduleQuotaError(this.config.maxSchedulesPerOwner);
+  }
+
+  private async nameGuardTarget(
+    ownerEmail: string,
+    name: string,
+  ): Promise<string | null> {
+    try {
+      const response = await this.dynamo.send(
+        new GetCommand({
+          TableName: this.config.schedulesTable,
+          Key: this.ownerNameKey(ownerEmail, name),
+          ConsistentRead: true,
+        }),
+      );
+      const target = response.Item?.targetScheduleId;
+      return typeof target === "string" ? target : null;
+    } catch (error) {
+      // The conflict is still a conflict without the id; never let this
+      // diagnostic read mask it.
+      log.warn("Could not read the schedule name guard row", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   async update(

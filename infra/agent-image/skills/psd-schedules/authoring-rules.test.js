@@ -82,3 +82,47 @@ describe('scheduled-run capability documentation', () => {
     expect(operations).toEqual(['list', 'runs']);
   });
 });
+
+/**
+ * Duplicate-prevention guidance (#1889).
+ *
+ * The broker now refuses a name collision (`name_conflict`) and a likely
+ * duplicate (`possible_duplicate`), both HTTP 409 with the existing schedule's
+ * id. That only stops duplicates if the SKILL.md tells the agent to list
+ * first, to update rather than re-create, and to retire the schedule it is
+ * replacing — the old behaviour was to retry the failed create under a new
+ * name, which is exactly how one counselor got four form watchers in a day.
+ */
+describe('duplicate-prevention guidance', () => {
+  test('tells the agent to list before create', () => {
+    expect(SKILL).toMatch(/Run `list` before every `create`/);
+  });
+
+  test('tells the agent to update rather than create a second schedule', () => {
+    expect(SKILL).toContain('Never create a second schedule for the same job');
+    expect(SKILL).toMatch(/Creating is not how you change a schedule/);
+  });
+
+  test('tells the agent to retire the schedule it replaces', () => {
+    expect(SKILL).toMatch(/`delete` the\s*\n?\s*old schedule/);
+    expect(SKILL).toMatch(/--enabled false/);
+  });
+
+  test('documents both refusal codes the broker returns', () => {
+    expect(SKILL).toContain('name_conflict');
+    expect(SKILL).toContain('possible_duplicate');
+    expect(SKILL).toMatch(/existingScheduleId/);
+  });
+
+  test('documents --confirm-new and warns against using it to bypass errors', () => {
+    expect(SKILL).toContain('--confirm-new');
+    expect(SKILL).toMatch(/It is \*\*not\*\* the way past an\s*\n?error/);
+  });
+
+  test('matches the flag create.js actually accepts', () => {
+    const create = fs.readFileSync(path.join(__dirname, 'create.js'), 'utf8');
+    expect(create).toContain("args['confirm-new']");
+    expect(create).toContain('confirmNew:');
+    expect(create).toContain('[--confirm-new]');
+  });
+});

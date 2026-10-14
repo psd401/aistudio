@@ -87,6 +87,7 @@ async function executeScheduleOperation(
             cron: body.cron,
             timezone: body.timezone,
             disabled: body.disabled,
+            confirmNew: body.confirmNew,
           }),
         },
         { status: 201 }
@@ -129,7 +130,14 @@ function scheduleErrorResponse(error: unknown, requestId: string): NextResponse 
     return NextResponse.json({ error: error.message }, { status: 404 })
   }
   if (error instanceof AgentScheduleConflictError) {
-    return NextResponse.json({ error: error.message }, { status: 409 })
+    // `details` carries the machine-readable `code` ("name_conflict",
+    // "possible_duplicate") and the existing schedule's id. Without them the
+    // agent could only read prose, and it retried under a new name instead of
+    // updating the schedule it already had.
+    return NextResponse.json(
+      { error: error.message, ...error.details },
+      { status: 409 }
+    )
   }
   if (error instanceof AgentScheduleQuotaError) {
     return NextResponse.json({ error: error.message }, { status: 429 })

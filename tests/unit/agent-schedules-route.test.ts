@@ -74,6 +74,7 @@ jest.mock("@/lib/logger", () => ({
 }))
 
 import type { NextRequest } from "next/server"
+import { AgentScheduleConflictError } from "@/lib/agent-schedules/service"
 import { POST } from "@/app/api/agent/schedules/route"
 
 function request(body: unknown): NextRequest {
@@ -218,6 +219,78 @@ describe("POST /api/agent/schedules", () => {
       cron: spec.cron,
       timezone: spec.timezone,
       disabled: false,
+      confirmNew: undefined,
+    })
+  })
+
+})
+
+describe("POST /api/agent/schedules duplicate refusals", () => {
+  it("forwards confirmNew so a deliberate second copy can be created", async () => {
+    const response = await POST(
+      request({
+        operation: "create",
+        name: "Morning brief",
+        prompt: "Summarize my day",
+        cron: "0 8 * * *",
+        confirmNew: true,
+      })
+    )
+    expect(response.status).toBe(201)
+    expect(createMock).toHaveBeenCalledWith(
+      "owner@psd401.net",
+      expect.objectContaining({ confirmNew: true })
+    )
+  })
+
+  it("returns conflict details so the agent can update instead of renaming", async () => {
+    // The whole point of #1889: a prose-only 409 is what let the agent retry
+    // under a new name. The code and the existing id must reach the caller.
+    const conflict = Object.assign(
+      new AgentScheduleConflictError("A schedule named \"Morning brief\" already exists"),
+      {
+        details: {
+          code: "name_conflict",
+          existingScheduleId: "schedule-1",
+        },
+      }
+    )
+    createMock.mockRejectedValue(conflict)
+
+    const response = await POST(
+      request({
+        operation: "create",
+        name: "Morning brief",
+        prompt: "Summarize my day",
+        cron: "0 8 * * *",
+      })
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({
+      error: 'A schedule named "Morning brief" already exists',
+      code: "name_conflict",
+      existingScheduleId: "schedule-1",
+    })
+  })
+
+  it("still answers 409 for a conflict that carries no details", async () => {
+    createMock.mockRejectedValue(
+      new AgentScheduleConflictError("Legacy schedules contain duplicate names")
+    )
+
+    const response = await POST(
+      request({
+        operation: "create",
+        name: "Morning brief",
+        prompt: "Summarize my day",
+        cron: "0 8 * * *",
+      })
+    )
+
+    expect(response.status).toBe(409)
+    await expect(response.json()).resolves.toEqual({
+      error: "Legacy schedules contain duplicate names",
     })
   })
 })
