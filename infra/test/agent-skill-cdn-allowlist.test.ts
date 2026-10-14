@@ -108,6 +108,8 @@ const NON_ASSET_REFERENCE_HOSTS = [
   'github.com',
   'api.github.com',
   'docs.google.com',
+  // Drive webViewLinks psd-publish-file returns for a private delivery (#1885)
+  'drive.google.com',
   'accounts.google.com',
   'developers.google.com',
   // The Google Fonts *browser* — a human-facing catalogue page, not the
