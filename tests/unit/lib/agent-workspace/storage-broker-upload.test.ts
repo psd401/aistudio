@@ -151,16 +151,23 @@ function installCheckpointAwareS3(
   })
 }
 
+// The default public fixture is an IMAGE on purpose. Since #1886 a public
+// upload whose type a text check can read (csv/txt/md/json/pdf) is fetched and
+// scanned between staging verification and promotion, which would add an
+// unrelated GetObject to every strict S3 call sequence in this file. These
+// tests are about promotion, settlement and capacity mechanics; the contents
+// gate has its own suites — public-artifact-personal-data.test.ts for the rule
+// and storage-broker-public-artifact-scan.test.ts for the broker wiring.
 function claimed(overrides: Record<string, unknown> = {}) {
   return {
     id: RESERVATION,
     ownerKey: OWNER,
     publicArtifact: true,
     stagingKey: `.upload-staging/public/owner/${RESERVATION}`,
-    targetKey: "public-images/owner/report.pdf",
+    targetKey: "public-images/owner/report.png",
     expectedBytes: 4,
     checksumSha256: CHECKSUM,
-    contentType: "application/pdf",
+    contentType: "image/png",
     byteLeaseId: BYTE_LEASE,
     objectLeaseId: OBJECT_LEASE,
     status: "verifying",
@@ -245,8 +252,8 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
   it("signs exact length/checksum and never exposes a public URL before verification", async () => {
     const prepared = await createPublicArtifactUpload({
                              ownerEmail: OWNER,
-                             fileName: "report.pdf",
-                             contentType: "application/pdf",
+                             fileName: "report.png",
+                             contentType: "image/png",
                              contentLength: 4,
                              contextKey: "session:nonce",
                              idempotencyKey: "idempotency-1",
@@ -257,7 +264,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
       reservationId: RESERVATION,
       requiredHeaders: {
         "Content-Length": "4",
-        "Content-Type": "application/pdf",
+        "Content-Type": "image/png",
         "x-amz-checksum-sha256": CHECKSUM,
       },
     })
@@ -268,7 +275,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
     expect(put.input).toMatchObject({
       ContentLength: 4,
       ChecksumSHA256: CHECKSUM,
-      ContentType: "application/pdf",
+      ContentType: "image/png",
     })
     expect(String(put.input.Key)).toMatch(/^\.upload-staging\/public\//)
   })
@@ -346,8 +353,8 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part1() {
 
     await createPublicArtifactUpload({
             ownerEmail: OWNER,
-            fileName: "report.pdf",
-            contentType: "application/pdf",
+            fileName: "report.png",
+            contentType: "image/png",
             contentLength: 4,
             contextKey: "session:nonce",
             idempotencyKey: "idempotency-reconciled",
@@ -380,8 +387,8 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part2() {it("keeps an ol
 
     await createPublicArtifactUpload({
             ownerEmail: OWNER,
-            fileName: "report.pdf",
-            contentType: "application/pdf",
+            fileName: "report.png",
+            contentType: "image/png",
             contentLength: 4,
             contextKey: "session:nonce",
             idempotencyKey: "idempotency-retained",
@@ -396,13 +403,13 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part2() {it("keeps an ol
       claimed({
         status: "reserved",
         targetKey:
-          "public-images/c8cd3c6427301eaf6665bcca/report.pdf",
+          "public-images/c8cd3c6427301eaf6665bcca/report.png",
       }),
     ])
     const first = await createPublicArtifactUpload({
                           ownerEmail: OWNER,
-                          fileName: "report.pdf",
-                          contentType: "application/pdf",
+                          fileName: "report.png",
+                          contentType: "image/png",
                           contentLength: 4,
                           contextKey: "session:nonce",
                           idempotencyKey: "idempotency-retry",
@@ -473,15 +480,15 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not re
       claimed({
         status: "reserved",
         targetKey:
-          "public-images/c8cd3c6427301eaf6665bcca/report.pdf",
+          "public-images/c8cd3c6427301eaf6665bcca/report.png",
         expiresAt: new Date(Date.now() - 1),
       }),
     ])
     await expect(
       createPublicArtifactUpload({
         ownerEmail: OWNER,
-        fileName: "report.pdf",
-        contentType: "application/pdf",
+        fileName: "report.png",
+        contentType: "image/png",
         contentLength: 4,
         contextKey: "session:nonce",
         idempotencyKey: "expired-idempotency",
@@ -510,7 +517,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not re
       .mockResolvedValueOnce({
         ContentLength: 4,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "staging-version",
       })
       .mockResolvedValueOnce({ VersionId: "verified-version" })
@@ -519,8 +526,8 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not re
     await expect(
       completeWorkspaceUpload(OWNER, RESERVATION),
     ).resolves.toEqual({
-      key: "public-images/owner/report.pdf",
-      publicUrl: expect.stringContaining("public-images/owner/report.pdf"),
+      key: "public-images/owner/report.png",
+      publicUrl: expect.stringContaining("public-images/owner/report.png"),
     })
     expect(finishMock).toHaveBeenCalledWith(BYTE_LEASE, 4)
     expect(finishMock).toHaveBeenCalledWith(OBJECT_LEASE, 1)
@@ -541,7 +548,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not re
       .mockResolvedValueOnce({
         ContentLength: 5,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "wrong-version",
       })
       .mockResolvedValueOnce({})
@@ -567,7 +574,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part3() {it("does not re
       .mockResolvedValueOnce({
         ContentLength: 5,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "unclean-version",
       })
       .mockRejectedValueOnce(new Error("delete denied"))
@@ -588,7 +595,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part4() {it("rolls back 
       .mockResolvedValueOnce({
         ContentLength: 4,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "staging-version",
       })
       .mockResolvedValueOnce({ VersionId: "promoted-version" })
@@ -626,7 +633,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part4() {it("rolls back 
       .mockResolvedValueOnce({
         ContentLength: 4,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "staging-version",
       })
       .mockResolvedValueOnce({ VersionId: "promoted-version" })
@@ -659,7 +666,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part4() {it("rolls back 
       .mockResolvedValueOnce({
         ContentLength: 4,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "staging-version",
       })
       .mockResolvedValueOnce({ VersionId: "promoted-version" })
@@ -691,7 +698,7 @@ function defineVerifiedWorkspaceUploadReservationsSuite1Part4() {it("rolls back 
       .mockResolvedValueOnce({
         ContentLength: 4,
         ChecksumSHA256: CHECKSUM,
-        ContentType: "application/pdf",
+        ContentType: "image/png",
         VersionId: "staging-version",
       })
       .mockResolvedValueOnce({ VersionId: "promoted-version" })

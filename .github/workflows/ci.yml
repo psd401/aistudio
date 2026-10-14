@@ -317,6 +317,11 @@ jobs:
         set -euo pipefail
         test_files=(
           infra/agent-image/skills/_shared/agent-broker.test.js
+          # The #1886 public-link / narration personal-data gate. Shared by
+          # chat-chart and psd-tts, and the one rule the web broker applies to
+          # the same bytes — so a drift here is a privacy regression, not a
+          # test-only one.
+          infra/agent-image/skills/_shared/personal-data.test.js
           infra/agent-image/skills/chat-chart/run.test.js
           infra/agent-image/skills/psd-aistudio/common.test.js
           infra/agent-image/skills/psd-aistudio/run.test.js

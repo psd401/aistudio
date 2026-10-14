@@ -1879,27 +1879,53 @@ function validateSynthesis(raw, snapshot, config) {
   };
 }
 
+/**
+ * The personal-data kinds psd-tts refused the narration for, or null if this
+ * failure was something else (#1886).
+ *
+ * psd-tts emits `{"status":"error","error":"personal_data_detected",...}` on
+ * stdout and exits 1, and externalJson folds that JSON into the thrown error's
+ * message. Matched on the code, not on the English.
+ */
+function narrationRefusalDetail(error) {
+  const message = String((error && error.message) || '');
+  return message.includes('personal_data_detected') ? message : null;
+}
+
 function synthesizePodcast(synthesis, user, config, runExternal) {
   if (!config.podcast.enabled) {
     return { enabled: false, url: null };
   }
-  const result = externalJson(
-    runExternal,
-    {
-      skill: 'tts',
-      args: [
-        '--user',
-        user,
-        '--voice',
-        config.podcast.voice,
-        '--engine',
-        config.podcast.engine,
-      ],
-      input: synthesis.podcastScript,
-      timeoutMs: 900_000,
-    },
-    'psd-tts',
-  );
+  let result;
+  try {
+    result = externalJson(
+      runExternal,
+      {
+        skill: 'tts',
+        args: [
+          '--user',
+          user,
+          '--voice',
+          config.podcast.voice,
+          '--engine',
+          config.podcast.engine,
+        ],
+        input: synthesis.podcastScript,
+        timeoutMs: 900_000,
+      },
+      'psd-tts',
+    );
+  } catch (error) {
+    // A REFUSAL is not a failure, and it must not cost the user their brief.
+    // psd-tts declines to narrate a phone number, email address, SSN or
+    // student number because its MP3s are public by link and never expire
+    // (#1886). The edition is still written and delivered; only the audio is
+    // withheld, and the page says so. Every other psd-tts failure keeps its
+    // existing hard-fail behaviour — a broken relay should still be loud.
+    const refusal = narrationRefusalDetail(error);
+    if (!refusal) throw error;
+    return { enabled: true, url: null, refused: 'personal_data_detected' };
+  }
   const url = safeUrl(result.url);
   if (!url) {
     throw new BriefError(
@@ -2047,6 +2073,15 @@ function deliveryMessage(snapshot, created, podcast) {
   ];
   if (podcast.enabled && podcast.url) {
     lines.push('', 'Podcast edition:', podcast.url);
+  } else if (podcast.refused === 'personal_data_detected') {
+    // Say it plainly rather than leaving the missing audio unexplained — and
+    // without repeating the personal data that caused it (#1886).
+    lines.push(
+      '',
+      'No podcast today: the spoken script included personal data (a phone ' +
+        'number, email address or student number) and podcast audio is a ' +
+        'public, permanent link, so it was not recorded.',
+    );
   }
   return lines.join('\n');
 }

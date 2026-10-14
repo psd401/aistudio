@@ -1,9 +1,12 @@
 """Regression tests for psd-tts's OpenClaw exec-to-root-relay boundary."""
 
+import contextlib
 import importlib.util
+import io
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
+import pathlib
 from pathlib import Path
 import subprocess
 import sys
@@ -193,6 +196,125 @@ print(f"{audio.hex()}:{chunks}")
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertNotRegex(source, r"(?m)^\s*import boto3\b")
         self.assertNotRegex(source, r"(?m)^\s*from (?:boto3|botocore)\b")
+
+
+class TestNarrationPersonalDataGate(unittest.TestCase):
+    """
+    Issue #1886. Every MP3 this skill makes is uploaded public-by-link with no
+    expiry, and seven morning-brief podcasts were found sitting on open URLs.
+    Once the text is sound no later check can read it, so the refusal has to
+    happen BEFORE synthesis — nothing sent to Polly, nothing uploaded.
+    """
+
+    def _run_main(self, text):
+        """Drive main() with --text and return (exit_code, parsed stdout)."""
+        argv = ["synthesize.py", "--user", "staff@psd401.net", "--text", text]
+        synthesized = []
+        uploaded = []
+        buffer = io.StringIO()
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(
+                    synthesize_module,
+                    "synthesize",
+                    side_effect=lambda *a, **k: (
+                        synthesized.append(a) or (b"mp3", 1)
+                    ),
+                ), \
+                mock.patch.object(
+                    synthesize_module,
+                    "upload_mp3",
+                    side_effect=lambda *a, **k: (
+                        uploaded.append(a) or ("https://example.invalid/a.mp3", "k")
+                    ),
+                ), \
+                mock.patch.object(
+                    synthesize_module,
+                    "_record_narration_refusal",
+                ) as recorded, \
+                contextlib.redirect_stdout(buffer):
+            try:
+                synthesize_module.main()
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return {
+            "code": code,
+            # Whole buffer: _emit() pretty-prints over several lines while
+            # _fail() emits one. Both are the only thing the command writes.
+            "stdout": json.loads(buffer.getvalue()),
+            "synthesized": synthesized,
+            "uploaded": uploaded,
+            "recorded": recorded,
+        }
+
+    def test_a_staff_phone_number_is_refused_and_nothing_is_uploaded(self):
+        result = self._run_main(
+            "Good morning. Reach Mrs Hall on 253-555-0147 before Friday."
+        )
+
+        self.assertEqual(result["code"], 1)
+        self.assertEqual(result["stdout"]["error"], "personal_data_detected")
+        self.assertIn("us-phone", result["stdout"]["message"])
+        # Refused BEFORE synthesis: no Polly call and no upload at all.
+        self.assertEqual(result["synthesized"], [])
+        self.assertEqual(result["uploaded"], [])
+        # Counted, so the gate's false-positive rate is measurable.
+        self.assertEqual(result["recorded"].call_count, 1)
+        self.assertEqual(
+            result["recorded"].call_args.args,
+            ("staff@psd401.net", ["us-phone"]),
+        )
+
+    def test_the_refusal_names_the_kind_and_not_the_number(self):
+        result = self._run_main("Call 253-555-0147 or email a.hall@psd401.net.")
+        message = result["stdout"]["message"]
+        self.assertNotIn("253-555-0147", message)
+        self.assertNotIn("a.hall@psd401.net", message)
+
+    def test_a_student_number_is_refused(self):
+        result = self._run_main("Student 2240393 moves to third period.")
+        self.assertEqual(result["stdout"]["error"], "personal_data_detected")
+        self.assertIn("psd-student-id", result["stdout"]["message"])
+
+    def test_an_ordinary_brief_still_synthesizes_and_uploads(self):
+        result = self._run_main(
+            "Good morning. Three meetings today and the board packet is ready."
+        )
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(result["stdout"]["status"], "ok")
+        self.assertEqual(len(result["synthesized"]), 1)
+        self.assertEqual(len(result["uploaded"]), 1)
+
+    def test_the_gate_fails_closed_when_the_pattern_file_is_unavailable(self):
+        # A missing pattern file means the IMAGE is broken, not that this text
+        # is safe. Refusing is the only safe reading, and the ship test in
+        # tests/unit/agent-image-personal-data-ship.test.ts is what keeps this
+        # from ever being the live behaviour.
+        with mock.patch.object(
+            synthesize_module,
+            "narration_personal_data",
+            side_effect=RuntimeError("patterns missing"),
+        ):
+            result = self._run_main("Anything at all.")
+        self.assertEqual(result["code"], 1)
+        self.assertEqual(result["stdout"]["error"], "gate_unavailable")
+        self.assertEqual(result["uploaded"], [])
+
+    def test_the_narration_policy_is_stricter_than_the_public_file_policy(self):
+        # The shared module, read directly: one contact detail is allowed in a
+        # public FILE (a flyer footer) and never in narration.
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        from personal_data import (
+            NARRATION_POLICY,
+            PUBLIC_FILE_POLICY,
+            personal_data_kinds,
+        )
+
+        flyer = "Open house Thursday. Questions? Call 253-530-1000."
+        self.assertEqual(personal_data_kinds(flyer, PUBLIC_FILE_POLICY), [])
+        self.assertEqual(
+            personal_data_kinds(flyer, NARRATION_POLICY), ["us-phone"]
+        )
 
 
 if __name__ == "__main__":

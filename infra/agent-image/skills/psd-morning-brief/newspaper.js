@@ -221,6 +221,20 @@ function renderPodcast(podcast) {
   if (!podcast || podcast.enabled === false) return '';
   const url = safeUrl(podcast.url);
   if (!url) {
+    // Distinguish "the relay was down" from "we chose not to record this"
+    // (#1886): psd-tts refuses to narrate a phone number, email address, SSN
+    // or student number, because its audio is public by link and never
+    // expires. The edition is still delivered; only the recording is withheld,
+    // and the reader is told which it was.
+    if (podcast.refused === 'personal_data_detected') {
+      return (
+        '<aside class="podcast"><p class="kicker">Podcast edition</p>' +
+        '<p>No recording today. The spoken script included personal data — a ' +
+        'phone number, email address or student number — and audio links are ' +
+        'public and permanent, so it was not recorded. Read the edition above; ' +
+        'tomorrow’s script will avoid reading contact details aloud.</p></aside>'
+      );
+    }
     return '<aside class="podcast"><p class="kicker">Podcast edition</p><p>Audio was disabled or unavailable for this run.</p></aside>';
   }
   return [

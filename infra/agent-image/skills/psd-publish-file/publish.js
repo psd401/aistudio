@@ -30,13 +30,19 @@
  * path used to be the public one, so files with student and staff data in them
  * went onto public links because nothing else existed.
  *
+ * --to public IS CONTENT-CHECKED (#1886). The broker reads a csv, txt, md,
+ * json or pdf upload and refuses the link when the file carries student or
+ * staff personal data, returning `personal_data_detected`. That refusal is
+ * final: the fix is private delivery, not a retry. See main()'s catch.
+ *
  * NOT for HTML. `.html` is accepted by neither destination: HTML pages are
  * district documents and go to Atrium, where they carry an owner, a visibility
  * level and a publication record. Use psd-html-artifact.
  *
  * Exit codes:
  *   0  delivered (JSON with the link on stdout)
- *   1  bad arguments / unsupported type / delivery failure (JSON error on stdout)
+ *   1  bad arguments / unsupported type / delivery failure / refused for
+ *      personal data (JSON error on stdout, `error` carries the code)
  */
 
 'use strict';
@@ -314,5 +320,22 @@ main().catch((err) => {
     body && typeof body === 'object' && typeof body.code === 'string'
       ? body.code
       : 'error';
+  // #1886: the broker read the file's own contents and refused to mint a public
+  // link. Replace the broker-rejected wrapper with the instruction, because the
+  // one wrong move here is retrying the same file at the same destination.
+  // `kinds` names the patterns that matched and never the values.
+  if (code === 'personal_data_detected') {
+    const kinds = Array.isArray(body.kinds) ? body.kinds.join(', ') : 'personal data';
+    fail(
+      `This file contains ${kinds}, so it cannot be given a public link. ` +
+        'Do NOT retry with --to public; it will be refused again. Deliver it ' +
+        'privately instead: run this same command WITHOUT --to public (the ' +
+        'default --to drive creates the file in your Drive and shares it with ' +
+        'the caller alone), or publish it as a private Atrium page with ' +
+        'psd-atrium. If the file really is meant to be public, remove the ' +
+        'personal data first and publish the redacted version.',
+      code
+    );
+  }
   fail(err instanceof Error ? err.message : String(err), code);
 });

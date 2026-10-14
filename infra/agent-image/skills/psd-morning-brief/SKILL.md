@@ -258,3 +258,11 @@ It never searches and deletes by title or by another owner’s content.
 Podcast audio uses Polly long-form by default and is public-by-link under the
 same artifact-delivery model as `psd-tts`. Disabling it is a per-owner config
 choice.
+
+**Write the spoken script without contact details.** The audio URL is public
+and never expires, so `psd-tts` refuses to narrate a phone number, email
+address, SSN or student number (#1886). When that happens the edition is still
+written and delivered — only the recording is withheld, and both the page and
+the DM say so. Write "call the front office" rather than the number, and refer
+to people by name or role rather than reading an address aloud. Every other
+`psd-tts` failure still fails the run, so a broken relay stays visible.

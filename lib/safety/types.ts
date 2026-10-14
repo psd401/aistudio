@@ -4,6 +4,8 @@
  * Types for K-12 content safety filtering and detect-only PII services.
  */
 
+import { PSD_STUDENT_ID_PATTERN } from "@/lib/safety/personal-data-scan";
+
 /**
  * Result of content safety evaluation
  */
@@ -308,9 +310,14 @@ export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
   {
     type: 'STUDENT_ID',
     description: 'PSD401 student numbers - 7 digits starting with 2 (e.g., 2240393)',
-    // Matches: 2000000-2999999 (7 digits starting with 2)
-    // Word boundaries prevent matching within larger numbers
-    pattern: /\b2\d{6}\b/,
+    // Matches: 2000000-2999999 (7 digits starting with 2). Word boundaries
+    // prevent matching within larger numbers.
+    //
+    // The regex itself is NOT written here: it comes from
+    // lib/safety/personal-data-patterns.json, the one place every runtime that
+    // looks for a student number reads it from (#1886). This used to be a
+    // third hand-maintained copy alongside chat-chart's and the broker's.
+    pattern: PSD_STUDENT_ID_PATTERN,
     confidence: 1.0,
   },
   // Add more district-specific patterns below:

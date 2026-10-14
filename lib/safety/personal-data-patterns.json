@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "_comment": [
+    "CANONICAL personal-data patterns. Issue #1886.",
+    "",
+    "This file is the ONLY place these regexes are written. Three runtimes read",
+    "it, so it is data rather than code:",
+    "",
+    "  - lib/safety/personal-data-scan.ts        (Next.js app: the storage broker)",
+    "  - infra/agent-image/skills/_shared/personal-data.js   (agent image, CJS)",
+    "  - infra/agent-image/personal_data.py                  (agent image, Python)",
+    "",
+    "The agent image is built from a SEPARATE Docker context (infra/agent-image),",
+    "so build-and-push.sh stages this exact committed file into",
+    "skills/_shared/personal-data-patterns.json, the same way it stages",
+    "lib/agent-workspace/workspace-policy.json. Guarded by",
+    "tests/unit/agent-image-personal-data-ship.test.ts.",
+    "",
+    "`source` must be valid in BOTH JavaScript and Python `re` — no named groups,",
+    "no lookbehind, no \\p{...}. Matching is always done case-insensitively and",
+    "globally by each loader; flags are deliberately not stored here."
+  ],
+  "patterns": [
+    {
+      "kind": "psd-student-id",
+      "source": "\\b2\\d{6}\\b",
+      "description": "PSD student numbers: 7 digits starting with 2 (e.g. 2240393)"
+    },
+    {
+      "kind": "ssn",
+      "source": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      "description": "US Social Security number, hyphenated"
+    },
+    {
+      "kind": "email",
+      "source": "[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}\\.[A-Za-z0-9.-]{1,63}",
+      "description": "Email address"
+    },
+    {
+      "kind": "us-phone",
+      "source": "\\b\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}\\b",
+      "description": "US phone, 253-530-1000 / 253.530.1000 / 253 530 1000"
+    },
+    {
+      "kind": "us-phone",
+      "source": "\\(\\d{3}\\)\\s\\d{3}-\\d{4}\\b",
+      "description": "US phone, (253) 530-1000"
+    },
+    {
+      "kind": "us-phone",
+      "source": "\\b1[-.\\s]\\d{3}[-.\\s]\\d{3}[-.\\s]\\d{4}\\b",
+      "description": "US phone with country code, 1-253-530-1000"
+    },
+    {
+      "kind": "us-phone",
+      "source": "\\b1\\d{10}\\b",
+      "description": "US phone with country code, unpunctuated"
+    }
+  ],
+  "_policy_comment": [
+    "publicFileMinDistinct — how many DISTINCT matched values of a kind make a",
+    "text-extractable file unfit for a public link.",
+    "",
+    "  1  An identifier that is personal on its own. A single student number or",
+    "     SSN in a file means that file is about a person.",
+    "  2  A contact detail that public district content legitimately carries ONE",
+    "     of: the school phone number in a flyer footer, a department address on",
+    "     a job posting, the author's own signature line. TWO or more distinct",
+    "     ones is a contact list, which is what #1886 found on public links",
+    "     (substitute call lists, rosters).",
+    "",
+    "The narration policy (psd-tts) deliberately does NOT use these thresholds:",
+    "see `narrationMinDistinct`."
+  ],
+  "publicFileMinDistinct": {
+    "psd-student-id": 1,
+    "ssn": 1,
+    "email": 2,
+    "us-phone": 2
+  },
+  "_narration_policy_comment": [
+    "Narration (psd-tts) refuses on the FIRST match of any kind.",
+    "",
+    "Audio is the one public surface with no expiry — `psd-tts` uploads every",
+    "MP3 as public-by-link forever, by design (#1886), and once synthesised the",
+    "bytes are opaque audio that no later text check can read. There is also no",
+    "legitimate reason to speak a phone number or an address into a shareable",
+    "recording: the agent can say \"call the front office\" and lose nothing. So",
+    "the cheap, strict rule applies here and the flyer-footer allowance does not."
+  ],
+  "narrationMinDistinct": {
+    "psd-student-id": 1,
+    "ssn": 1,
+    "email": 1,
+    "us-phone": 1
+  }
+}

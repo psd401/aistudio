@@ -51,6 +51,7 @@ import {
   validateWorkspaceRelativePath,
   workspaceRelativePathRejectionReason,
 } from "@/lib/agent-workspace/path-policy"
+import { scanPublicArtifactForPersonalData } from "@/lib/agent-workspace/public-artifact-personal-data"
 import {
   MAX_RETIRED_EXEC_APPROVALS_BYTES,
   RETIRED_EXEC_APPROVALS_CLAIM_PATH,
@@ -271,6 +272,30 @@ export class WorkspaceStorageCompletionError extends Error {
   constructor(message: string) {
     super(message)
     this.name = "WorkspaceStorageCompletionError"
+  }
+}
+
+/**
+ * A public link was refused because the file's own contents carry student or
+ * staff personal data (#1886).
+ *
+ * Not a `WorkspaceStorageCompletionError`: that class means "the upload did not
+ * settle, try again", and this is the opposite — the request was understood and
+ * declined, and retrying it unchanged will be declined again. The agent has to
+ * deliver the file privately instead.
+ *
+ * `kinds` names WHICH patterns matched and never the matched values; the whole
+ * point of the gate is that the personal data does not travel any further, log
+ * lines and error bodies included.
+ */
+export class WorkspacePublicArtifactRefusedError extends Error {
+  readonly code = "personal_data_detected" as const
+  constructor(readonly kinds: readonly string[]) {
+    super(
+      `Public link refused: the file contains ${kinds.join(", ")}. ` +
+        "Deliver it privately instead.",
+    )
+    this.name = "WorkspacePublicArtifactRefusedError"
   }
 }
 
@@ -3232,6 +3257,67 @@ async function inspectStagedUpload(
   }
 }
 
+/**
+ * Read a staged PUBLIC upload's own contents and refuse the link if they carry
+ * student or staff personal data (#1886).
+ *
+ * Runs after staging is verified and before the copy into `public-images/`, so
+ * a refusal leaves no public object behind: the caller's catch routes this
+ * through `rejectFailedUpload`, which deletes the staged version and marks the
+ * reservation rejected.
+ *
+ * Only the KINDS that matched are logged, never the values, and never the
+ * object key — a published file's name is chosen by the agent and the one
+ * thing we know about a refused file is that it is about somebody.
+ */
+async function assertPublicArtifactCarriesNoPersonalData(
+  claimed: WorkspaceUploadReservation,
+  bucket: string,
+  stagingVersion: string,
+): Promise<void> {
+  const fileName = claimed.targetKey.slice(
+    claimed.targetKey.lastIndexOf("/") + 1,
+  )
+  const extension = fileName.slice(fileName.lastIndexOf("."))
+  const result = await scanPublicArtifactForPersonalData({
+    fileName,
+    contentType: claimed.contentType,
+    byteLength: claimed.expectedBytes,
+    readBytes: async (maxBytes) => {
+      const response = await s3Client().send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: claimed.stagingKey,
+          VersionId: stagingVersion,
+          Range: `bytes=0-${maxBytes - 1}`,
+        }),
+      )
+      if (!response.Body) {
+        throw new WorkspaceStorageCompletionError(
+          "Staged public upload could not be read for its contents check",
+        )
+      }
+      return response.Body.transformToByteArray()
+    },
+  })
+  if (result.refused) {
+    log.warn("Public link refused: file contents carry personal data", {
+      extension,
+      bytes: claimed.expectedBytes,
+      kinds: result.kinds,
+    })
+    throw new WorkspacePublicArtifactRefusedError(result.kinds)
+  }
+  if (!result.scanned) {
+    // "Nothing was found" and "nothing was looked at" must not read the same.
+    log.info("Public link allowed without a contents check", {
+      extension,
+      bytes: claimed.expectedBytes,
+      reason: result.reason,
+    })
+  }
+}
+
 async function supersededUploadVersions(
   ownerKey: string,
   targetKey: string,
@@ -3567,6 +3653,17 @@ async function finishClaimedUpload(
       )
     }
     stagingVerified = true
+    // The contents gate for public links (#1886). Private workspace uploads
+    // and Drive deliveries are not scanned: they are not readable without the
+    // owner's own credential, and #1885 made private delivery the ANSWER a
+    // refusal here points at.
+    if (claimed.publicArtifact) {
+      await assertPublicArtifactCarriesNoPersonalData(
+        claimed,
+        bucket,
+        stagingVersion,
+      )
+    }
     if (generationFence) {
       const prefix = `${validateTrustedPrefix(
         generationFence.signedWorkspacePrefix,

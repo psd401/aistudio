@@ -124,11 +124,78 @@ def synthesize(text, voice, engine, synthesize_chunk=None):
     return bytes(audio), len(chunks)
 
 
+def _add_image_modules_to_path():
+    """
+    Put the image's /app modules (and, under test, the repository's
+    infra/agent-image) on sys.path.
+
+    Done lazily rather than at import time because the unit suite loads this
+    file by path, outside any package.
+    """
+    candidates = [
+        os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+        ),
+        "/app",
+    ]
+    for candidate in candidates:
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+
+
 def upload_mp3(audio, user_email, region):
-    sys.path.insert(0, "/app")
+    _add_image_modules_to_path()
     from artifact_publisher import publish_artifact
     _ = (user_email, region)
     return publish_artifact(audio, ".mp3", "audio/mpeg")
+
+
+def narration_personal_data(text):
+    """
+    The kinds of personal data in the narration, or [] — the #1886 gate.
+
+    WHY THIS IS STRICTER THAN THE PUBLIC-FILE GATE. Every MP3 this skill
+    produces is uploaded public-by-link with no expiry, by design, and once
+    synthesised the bytes are opaque audio that no later text check can read.
+    A morning-brief podcast that spoke a staff member's phone number sat on an
+    open URL indefinitely, and seven of them did. There is also nothing to
+    lose by refusing: the narration can say "call the front office" instead.
+    So this uses the `narration` policy, which refuses on the FIRST match,
+    while a public *file* is allowed one contact detail (a school phone number
+    in a flyer footer).
+
+    FAILS CLOSED. If the canonical pattern file cannot be loaded the skill
+    refuses rather than synthesising unchecked — the file is staged into the
+    image by build-and-push.sh and its presence is a build-time test, so a
+    load failure means the image is broken, not that this text is safe.
+    """
+    _add_image_modules_to_path()
+    from personal_data import NARRATION_POLICY, personal_data_kinds
+
+    return personal_data_kinds(text, NARRATION_POLICY)
+
+
+def _record_narration_refusal(user_email, kinds):
+    """
+    Count the refusal in `agent_failures` so the gate's false-positive rate is
+    measurable (#1886 asks for every refusal to be logged). Best-effort: the
+    refusal is reported to the caller whether or not the row lands.
+    """
+    try:
+        _add_image_modules_to_path()
+        from agent_failures import record_failure
+
+        record_failure(
+            "harness",
+            "warn",
+            # The kinds, never the matched values.
+            "psd-tts refused: narration contains " + ", ".join(kinds),
+            user_id=user_email,
+            error_class="NarrationPersonalDataRefused",
+            context={"skill": "psd-tts", "kinds": list(kinds)},
+        )
+    except Exception:  # noqa: BLE001 - never let the reporter mask the refusal
+        pass
 
 
 def resolve_text(args):
@@ -163,6 +230,26 @@ def main():
         _fail("no text provided (use --text, --file, or stdin)", "bad_args")
     if len(text) > MAX_TEXT_CHARS:
         _fail(f"text is {len(text)} chars; maximum is {MAX_TEXT_CHARS}", "too_large")
+
+    # The #1886 gate, BEFORE synthesis: nothing is sent to Polly and nothing is
+    # uploaded. The audio would be public by link with no expiry.
+    try:
+        refused_kinds = narration_personal_data(text)
+    except Exception as exc:  # noqa: BLE001 - fails closed, see the docstring
+        _fail(f"personal-data check unavailable: {exc}", "gate_unavailable")
+    if refused_kinds:
+        _record_narration_refusal(args.user, refused_kinds)
+        _fail(
+            "the narration contains personal data ("
+            + ", ".join(refused_kinds)
+            + "). Audio is uploaded public-by-link with NO expiry and cannot be "
+            "re-checked once it is sound, so this is refused rather than "
+            "published. Rewrite the narration without it — say \"call the front "
+            "office\" rather than the number, and refer to people by first name "
+            "or role rather than reading out contact details — then run this "
+            "again. Do not retry the same text.",
+            "personal_data_detected",
+        )
 
     region = os.environ.get("AWS_REGION", "us-east-1")
 

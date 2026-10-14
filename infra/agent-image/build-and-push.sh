@@ -54,6 +54,8 @@ BUILD_DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
 BOOTSTRAP_SOURCE_DIR="${SCRIPT_DIR}"
 CANONICAL_WORKSPACE_POLICY="${REPO_ROOT}/lib/agent-workspace/workspace-policy.json"
 STAGED_WORKSPACE_POLICY="${SCRIPT_DIR}/workspace_policy.json"
+CANONICAL_PERSONAL_DATA_PATTERNS="${REPO_ROOT}/lib/safety/personal-data-patterns.json"
+STAGED_PERSONAL_DATA_PATTERNS="${SCRIPT_DIR}/skills/_shared/personal-data-patterns.json"
 CANDIDATE_STAGING=""
 CANDIDATE_METADATA=""
 CANDIDATE_ID=""
@@ -77,6 +79,7 @@ cleanup_build() {
   fi
   rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
   rm -f "${STAGED_WORKSPACE_POLICY}"
+  rm -f "${STAGED_PERSONAL_DATA_PATTERNS}"
   case "${CANDIDATE_STAGING}" in
     "${SCRIPT_DIR}"/.candidate-staging.*)
       rm -rf -- "${CANDIDATE_STAGING}"
@@ -97,6 +100,9 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
     lib/agent-workspace/path-policy.ts \
     lib/agent-workspace/retired-exec-approvals.ts \
     lib/agent-workspace/workspace-policy.json \
+    lib/agent-workspace/public-artifact-personal-data.ts \
+    lib/safety/personal-data-patterns.json \
+    lib/safety/personal-data-scan.ts \
     scripts/agent-workspace/audit-live-workspace-paths.ts \
     scripts/agent-workspace/workspace-policy-probe.py \
     tests/unit/agent-image-openclaw-runtime-patch.test.ts \
@@ -105,7 +111,9 @@ if [ -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=all -- \
     tests/unit/lib/agent-workspace/storage-broker-checkpoint.test.ts \
     tests/unit/lib/agent-workspace/storage-broker-list.test.ts \
     tests/unit/lib/agent-workspace/storage-broker-upload.test.ts \
-    tests/unit/lib/agent-workspace/storage-broker.test.ts)" ]; then
+    tests/unit/lib/agent-workspace/storage-broker.test.ts \
+    tests/unit/lib/agent-workspace/public-artifact-personal-data.test.ts \
+    tests/unit/agent-image-personal-data-ship.test.ts)" ]; then
   echo "ERROR: agent-image sources are dirty; commit them before building." >&2
   echo "       Image provenance must identify the exact source content." >&2
   exit 1
@@ -327,6 +335,11 @@ cp "${SCRIPT_DIR}/../validated-fs.cjs" "${SCRIPT_DIR}/skills/validated-fs.cjs"
 # Docker/CDK asset includes it. Stage that exact committed file into the
 # separate agent-image build context; workspace_sync.py loads it from /app.
 cp "${CANONICAL_WORKSPACE_POLICY}" "${STAGED_WORKSPACE_POLICY}"
+# Same arrangement for the personal-data patterns (#1886). The regexes are
+# written once, in lib/safety/, because the Next.js broker, chat-chart and
+# psd-tts all have to refuse the same things; staged (gitignored) rather than
+# committed twice so the image's copy can never drift from the app's.
+cp "${CANONICAL_PERSONAL_DATA_PATTERNS}" "${STAGED_PERSONAL_DATA_PATTERNS}"
 DOCKER_BUILD_ARGS=(
   --platform linux/arm64
   --build-arg "AISTUDIO_SOURCE_COMMIT=${SOURCE_COMMIT}"
@@ -350,6 +363,7 @@ fi
 docker build "${DOCKER_BUILD_ARGS[@]}" "${SCRIPT_DIR}"
 rm -f "${SCRIPT_DIR}/skills/validated-fs.cjs"
 rm -f "${STAGED_WORKSPACE_POLICY}"
+rm -f "${STAGED_PERSONAL_DATA_PATTERNS}"
 
 # ---------------------------------------------------------------------------
 # Build-time eval gate (issue #1161): runtime boot probe + signed canary turn.
