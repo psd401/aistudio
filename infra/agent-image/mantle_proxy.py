@@ -820,6 +820,9 @@ def _workspace_flush_request_allowed(
         "publish",
         "download-public",
         "complete-upload",
+        # Private Drive delivery (#1885): psd-publish-file's default path.
+        "drive-upload",
+        "deliver-to-drive",
     }:
         return False
     # Model-callable public operations remain available during an active turn,

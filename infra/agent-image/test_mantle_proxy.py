@@ -608,16 +608,17 @@ class TestAgentBrokerRoute(unittest.TestCase):
                     sync_token,
                 )
             )
-        self.assertFalse(
-            _workspace_flush_request_allowed(
-                "/api/agent/workspace-storage",
-                {"operation": "publish"},
-                flush_token,
-                flush_token,
-                sync_token,
-                sync_token,
+        for operation in ("publish", "drive-upload", "deliver-to-drive"):
+            self.assertFalse(
+                _workspace_flush_request_allowed(
+                    "/api/agent/workspace-storage",
+                    {"operation": operation},
+                    flush_token,
+                    flush_token,
+                    sync_token,
+                    sync_token,
+                )
             )
-        )
         self.assertFalse(
             _workspace_flush_request_allowed(
                 "/api/agent/credentials",
@@ -682,7 +683,12 @@ class TestAgentBrokerRoute(unittest.TestCase):
                 sync_token,
             )
         )
-        for operation in ("publish", "download-public"):
+        for operation in (
+            "publish",
+            "download-public",
+            "drive-upload",
+            "deliver-to-drive",
+        ):
             self.assertTrue(
                 _workspace_flush_request_allowed(
                     "/api/agent/workspace-storage",

@@ -21,7 +21,11 @@ import {
   gt,
   inArray,
   isNotNull,
+  isNull,
   lt,
+  ne,
+  notLike,
+  or,
   sql,
   sum,
 } from "drizzle-orm"
@@ -54,6 +58,18 @@ import {
   validateRetiredExecApprovalsPath,
   validateRetiredExecApprovalsRead,
 } from "@/lib/agent-workspace/retired-exec-approvals"
+import {
+  assertDriveDeliveryContentType,
+  createAgentDriveFile,
+  deleteAgentDriveFile,
+  driveFileWebViewLink,
+  isDriveDeliverableName,
+  shareDriveFileWithUser,
+  DriveDeliveryError,
+  MAX_DRIVE_DELIVERY_BYTES,
+  type DriveDeliveryDeps,
+} from "@/lib/agent-workspace/drive-delivery"
+import { mintAgentWorkspaceTokenViaBoundary } from "@/lib/agent-workspace/mint-client"
 
 export { validateWorkspaceRelativePath } from "@/lib/agent-workspace/path-policy"
 
@@ -525,6 +541,17 @@ async function createUploadReservation(params: {
             params.publicArtifact,
           ),
           inArray(workspaceUploadReservations.status, RETAINED_UPLOAD_STATUSES),
+          // A Drive delivery's bytes leave S3 once delivered — its COMMITTED
+          // row is not retained storage and must not feed this S3-spend signal.
+          // Its in-flight row still counts: the staged bytes sit in S3 until
+          // delivery.
+          or(
+            ne(workspaceUploadReservations.status, "committed"),
+            notLike(
+              workspaceUploadReservations.targetKey,
+              `${DRIVE_DELIVERY_PREFIX}/%`,
+            ),
+          ),
         )
         const [byteRows, objectRows] = await Promise.all([
           tx
@@ -1045,15 +1072,116 @@ export function publicArtifactKey(ownerEmail: string, fileName: string): string 
   if (!PUBLIC_EXTENSIONS.has(extension)) {
     throw new Error("Public artifact type is not allowed")
   }
-  const owner = createHash("sha256").update(ownerEmail.toLowerCase()).digest("hex").slice(0, 24)
+  const owner = ownerKeyHash(ownerEmail)
   return `public-images/${owner}/${safeName}`
+}
+
+/**
+ * Control prefix for Drive-delivery staging targets (#1885).
+ *
+ * A Drive delivery reuses the ordinary staged-upload machinery — signed PUT to
+ * `.upload-staging/…`, checksum/length verification, reservation lifecycle —
+ * but its bytes end up in Google Drive, never in a retained S3 object. Its
+ * `target_key` therefore names a slot that is never written: it exists so the
+ * reservation has the owner-scoped identity every other code path keys off,
+ * and so a Drive reservation cannot be redirected anywhere else.
+ *
+ * It is deliberately NOT under `public-images/` (that prefix is unsigned and
+ * public-by-link) and NOT under any workspace prefix. That exclusion is what
+ * makes `complete-upload` unable to consume one of these reservations:
+ * the public path requires `public_artifact = true`, and the private path
+ * requires the target to sit inside the caller's signed workspace prefix and be
+ * checkpoint-managed. Neither is true here, so the ONLY operation that can
+ * finish a Drive reservation is `deliver-to-drive`.
+ */
+const DRIVE_DELIVERY_PREFIX = ".drive-delivery"
+
+function ownerKeyHash(ownerEmail: string): string {
+  return createHash("sha256")
+    .update(ownerEmail.toLowerCase())
+    .digest("hex")
+    .slice(0, 24)
+}
+
+const DRIVE_DELIVERY_SLOT_RE = /^[0-9a-f]{24}$/
+
+/**
+ * The owner-scoped staging target for one Drive delivery:
+ * `.drive-delivery/<ownerHash>/<slot>/<fileName>`.
+ *
+ * Both halves are load-bearing:
+ *
+ *  - `<slot>` is derived from the caller's idempotency key, so the key is
+ *    DETERMINISTIC for a given attempt (an idempotency replay recomputes the
+ *    same key and can compare it against the stored row, exactly as
+ *    `createPublicArtifactUpload` does) while two different attempts at the
+ *    same file name never collide. Without the slot, a delivery that failed
+ *    after reserving would make the retry trip
+ *    `uq_workspace_upload_target_active (owner_key, target_key)` and die on a
+ *    bare `Failed query` for the remaining five minutes of the lease — the
+ *    dead window #1365 and `releaseWorkspaceUploads` exist to close.
+ *  - `<fileName>` is carried here because it is also the name the file gets in
+ *    Drive. `deliverStagedUploadToDrive` reads it back out of the key rather
+ *    than trusting a second model-supplied parameter at delivery time.
+ */
+export function driveDeliveryTargetKey(
+  ownerEmail: string,
+  idempotencyKey: string,
+  fileName: string,
+): string {
+  const safeName = validateWorkspaceRelativePath(fileName)
+  if (safeName.includes("/") || !SAFE_PUBLIC_ARTIFACT_NAME.test(safeName)) {
+    throw new Error("Invalid Drive delivery file name")
+  }
+  if (!isDriveDeliverableName(safeName)) {
+    throw new Error("Drive delivery type is not allowed")
+  }
+  const slot = createHash("sha256")
+    .update(idempotencyKey)
+    .digest("hex")
+    .slice(0, 24)
+  return `${DRIVE_DELIVERY_PREFIX}/${ownerKeyHash(
+    ownerEmail,
+  )}/${slot}/${safeName}`
+}
+
+/**
+ * The file name inside an owner's Drive-delivery target key.
+ *
+ * Fails closed: a key outside THIS owner's Drive-delivery prefix, with a
+ * malformed slot, or naming a type that is not deliverable, throws. This is the
+ * check that stops a reservation created for some other purpose — or staged
+ * under another owner's hash — from being delivered into this caller's Drive.
+ */
+export function driveDeliveryFileName(
+  ownerEmail: string,
+  key: string,
+): string {
+  const prefix = `${DRIVE_DELIVERY_PREFIX}/${ownerKeyHash(ownerEmail)}/`
+  if (!key.startsWith(prefix)) {
+    throw new Error("Invalid owner Drive delivery key")
+  }
+  const [slot, ...rest] = key.slice(prefix.length).split("/")
+  const fileName = rest.join("/")
+  if (
+    !slot ||
+    !DRIVE_DELIVERY_SLOT_RE.test(slot) ||
+    !fileName ||
+    fileName.includes("/") ||
+    !SAFE_PUBLIC_ARTIFACT_NAME.test(fileName) ||
+    validateWorkspaceRelativePath(fileName) !== fileName ||
+    !isDriveDeliverableName(fileName)
+  ) {
+    throw new Error("Invalid owner Drive delivery key")
+  }
+  return fileName
 }
 
 export function validateOwnerPublicArtifactKey(
   ownerEmail: string,
   key: string
 ): string {
-  const owner = createHash("sha256").update(ownerEmail.toLowerCase()).digest("hex").slice(0, 24)
+  const owner = ownerKeyHash(ownerEmail)
   const prefix = `public-images/${owner}/`
   if (!key.startsWith(prefix)) throw new Error("Invalid owner public artifact key")
   const fileName = key.slice(prefix.length)
@@ -2663,6 +2791,115 @@ export async function createPublicArtifactUpload(
   }
 }
 
+/**
+ * Stage a file for PRIVATE delivery into the agent account's Drive (#1885).
+ *
+ * Same two-step contract as `createPublicArtifactUpload` — this returns a
+ * signed PUT for the staging object, and `deliverStagedUploadToDrive` finishes
+ * it — so the skill layer's upload loop is unchanged. The differences are all
+ * in where the bytes go afterwards:
+ *
+ *  - `publicArtifact: false`, so nothing here touches the public ledger, the
+ *    public reconciliation sweep, or the 30-day public lifecycle rule;
+ *  - the target key is a Drive-delivery slot (see DRIVE_DELIVERY_PREFIX), which
+ *    no other completion path will accept;
+ *  - the extension/MIME pairing is the Drive policy, which includes `.docx`,
+ *    `.xlsx` and `.pptx`.
+ */
+export async function createDriveDeliveryUpload(options: {
+  ownerEmail: string
+  fileName: string
+  contentType: string
+  contentLength: number
+  contextKey: string
+  idempotencyKey: string
+  checksumSha256: string
+}): Promise<UploadPreparation> {
+  const length = expectedLength(
+    options.contentLength,
+    MAX_DRIVE_DELIVERY_BYTES,
+    0,
+  )
+  const checksum = expectedChecksum(options.checksumSha256)
+  const normalizedContentType = expectedContentType(options.contentType)
+  const key = driveDeliveryTargetKey(
+    options.ownerEmail,
+    options.idempotencyKey,
+    options.fileName,
+  )
+  // Throws DriveDeliveryError (unsupported_type / content_type_mismatch), which
+  // the route surfaces with its machine-readable `code`.
+  assertDriveDeliveryContentType(options.fileName, normalizedContentType)
+  const existing = await existingUploadReservation(
+    options.ownerEmail,
+    options.idempotencyKey,
+  )
+  if (existing) {
+    if (
+      existing.publicArtifact ||
+      existing.targetKey !== key ||
+      existing.expectedBytes !== length ||
+      existing.checksumSha256 !== checksum ||
+      existing.contentType !== normalizedContentType ||
+      existing.status !== "reserved" ||
+      existing.expiresAt.getTime() <= Date.now()
+    ) {
+      throw new WorkspaceStorageCompletionError(
+        "Idempotency key is bound to a non-reusable upload",
+      )
+    }
+    return signUploadReservation({
+      reservationId: existing.id,
+      stagingKey: existing.stagingKey,
+      contentLength: length,
+      checksumSha256: checksum,
+      contentType: normalizedContentType,
+    })
+  }
+  const leaseIds = await reserveUpload({
+    publicArtifact: false,
+    ownerEmail: options.ownerEmail,
+    contextKey: options.contextKey,
+    idempotencyKey: options.idempotencyKey,
+    contentLength: length,
+  })
+  const reservation = await createUploadReservation({
+    publicArtifact: false,
+    ownerEmail: options.ownerEmail,
+    contextKey: options.contextKey,
+    idempotencyKey: options.idempotencyKey,
+    targetKey: key,
+    expectedBytes: length,
+    checksumSha256: checksum,
+    contentType: normalizedContentType,
+    leaseIds,
+  })
+  try {
+    return await signUploadReservation({
+      reservationId: reservation.id,
+      stagingKey: reservation.stagingKey,
+      contentLength: length,
+      checksumSha256: checksum,
+      contentType: normalizedContentType,
+    })
+  } catch (error) {
+    await executeQuery(
+      (db) =>
+        db
+          .update(workspaceUploadReservations)
+          .set({ status: "rejected", updatedAt: new Date() })
+          .where(eq(workspaceUploadReservations.id, reservation.id)),
+      "rejectDriveDeliverySigning",
+    )
+    await Promise.all(
+      leaseIds
+        .filter((id): id is string => id !== null)
+        .map(releaseResourceAdmission),
+    )
+    throw error
+  }
+}
+
 type CompletedWorkspaceUpload = {
   key: string
   publicUrl?: string
@@ -3277,7 +3514,10 @@ async function resetWorkspaceUploadClaim(
     (db) =>
       db
         .update(workspaceUploadReservations)
-        .set({ status: "reserved", updatedAt: new Date() })
+        // Only a Drive delivery records an id while `verifying`, and its reset
+        // follows the removal of that file — a retry must create a new one,
+        // not recover the removed one.
+        .set({ status: "reserved", objectVersionId: null, updatedAt: new Date() })
         .where(
           and(
             eq(workspaceUploadReservations.id, reservationId),
@@ -4756,6 +4996,446 @@ export async function completeWorkspaceUpload(
       ])
     }
     throw error
+  }
+}
+
+export type DriveDeliveryResult = {
+  fileId: string
+  webViewLink: string
+  fileName: string
+  /** The ONE person the file was shared with, as a writer. */
+  sharedWith: string
+  /** The agent account that owns it. Ownership is never transferred. */
+  ownedBy?: string
+  /** Set when an idempotent replay found the delivery already done. */
+  reused?: true
+}
+
+/** One owner's reservation row, read without claiming it. */
+async function ownedUploadReservation(
+  ownerKey: string,
+  reservationId: string,
+): Promise<WorkspaceUploadReservation | undefined> {
+  const [row] = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(workspaceUploadReservations)
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.ownerKey, ownerKey),
+          ),
+        )
+        .limit(1),
+    "getOwnedWorkspaceUploadReservation",
+  )
+  return row
+}
+
+async function readStagedUploadBytes(
+  reservation: WorkspaceUploadReservation,
+  bucket: string,
+  versionId: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const response = await s3Client().send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: reservation.stagingKey,
+      VersionId: versionId,
+    }),
+  )
+  if (!response.Body) {
+    throw new WorkspaceStorageCompletionError("Staged upload has no body")
+  }
+  // Copied into a plain-ArrayBuffer view: the SDK types its body as
+  // `Uint8Array<ArrayBufferLike>`, which `fetch` will not take as a body.
+  const bytes = new Uint8Array(await response.Body.transformToByteArray())
+  if (bytes.byteLength !== reservation.expectedBytes) {
+    throw new WorkspaceStorageCompletionError(
+      "Staged upload bytes did not match its reservation",
+    )
+  }
+  return bytes
+}
+
+export interface DeliverToDriveDeps {
+  mintToken?: (
+    ownerEmail: string,
+  ) => Promise<{ accessToken: string; agentEmail: string }>
+  drive?: DriveDeliveryDeps
+}
+
+async function mintAgentDriveToken(
+  ownerEmail: string,
+  deps: DeliverToDriveDeps,
+): Promise<{ accessToken: string; agentEmail: string }> {
+  const mintToken = deps.mintToken ?? mintAgentWorkspaceTokenViaBoundary
+  // The agent account is derived SERVER-SIDE from the owner inside the broker
+  // (`deriveAgentEmail`); there is deliberately no target-address parameter.
+  // A mint failure is reported with its own reason rather than as an opaque
+  // 502: "your agnt_ account is not provisioned yet" is actionable, and the
+  // generic storage message would hide it.
+  return mintToken(ownerEmail).catch((error: unknown) => {
+    throw new DriveDeliveryError(
+      "create_failed",
+      "Drive delivery could not authenticate as your agent account: " +
+        `${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  })
+}
+
+/**
+ * Record the created Drive file on its still-`verifying` reservation. Only the
+ * row this request claimed, and only once: a second id would mean two files.
+ */
+async function recordDriveDeliveryFile(
+  reservationId: string,
+  fileId: string,
+): Promise<void> {
+  const [recorded] = await defaultDatabaseExecutor.executeQuery(
+    (db) =>
+      db
+        .update(workspaceUploadReservations)
+        .set({ objectVersionId: fileId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.status, "verifying"),
+            isNull(workspaceUploadReservations.objectVersionId),
+          ),
+        )
+        .returning({ id: workspaceUploadReservations.id }),
+    "recordDriveDeliveryFile",
+  )
+  if (!recorded) {
+    throw new WorkspaceStorageCompletionError(
+      "Drive delivery file could not be recorded on its reservation",
+    )
+  }
+}
+
+/**
+ * Create the file in the agent account's Drive, then share it with the user.
+ *
+ * If the share fails the created file is REMOVED rather than left behind: an
+ * unshared file is invisible to the person who asked for it, so leaving it
+ * would mean the retry (which is what `share_failed` instructs) silently piles
+ * up duplicates in the agent's Drive. There is deliberately no public-link
+ * fallback on this path.
+ *
+ * `recordCreated` persists the file id on the reservation BEFORE the share, so
+ * a delivery interrupted after this point is recoverable by replaying the
+ * reservation instead of creating a second copy.
+ */
+async function deliverBytesToAgentDrive(params: {
+  ownerEmail: string
+  fileName: string
+  contentType: string
+  bytes: Uint8Array<ArrayBuffer>
+  deps: DeliverToDriveDeps
+  recordCreated: (fileId: string) => Promise<void>
+}): Promise<{ fileId: string; webViewLink: string; agentEmail: string }> {
+  const minted = await mintAgentDriveToken(params.ownerEmail, params.deps)
+  const created = await createAgentDriveFile({
+    accessToken: minted.accessToken,
+    name: params.fileName,
+    contentType: params.contentType,
+    bytes: params.bytes,
+    deps: params.deps.drive,
+  })
+  try {
+    await params.recordCreated(created.fileId)
+    await shareDriveFileWithUser({
+      accessToken: minted.accessToken,
+      fileId: created.fileId,
+      userEmail: params.ownerEmail,
+      deps: params.deps.drive,
+    })
+  } catch (error) {
+    const removed = await deleteAgentDriveFile({
+      accessToken: minted.accessToken,
+      fileId: created.fileId,
+      deps: params.deps.drive,
+    })
+    if (!removed && error instanceof DriveDeliveryError) {
+      throw new DriveDeliveryError(
+        error.code,
+        `${error.message} An unshared copy was left in ${minted.agentEmail}'s ` +
+          `Drive (file ${created.fileId}); nobody can open it, and it can be ` +
+          "removed by hand.",
+        { cause: error },
+      )
+    }
+    throw error
+  }
+  return { ...created, agentEmail: minted.agentEmail }
+}
+
+/**
+ * Deliver a claimed staged upload into the agent account's Drive (#1885).
+ *
+ * The private counterpart to the public-artifact promotion in
+ * `completeWorkspaceUpload`: same reservation, same checksum/length proof of
+ * the staged bytes, but the bytes end up as a Drive file OWNED by
+ * `agnt_<owner>@psd401.net` and shared with exactly one person — the owner —
+ * instead of as an unsigned public-by-link S3 object.
+ *
+ * Containment, in order:
+ *  1. the reservation is read scoped to `ownerKey`, so another person's
+ *     reservation id resolves to nothing;
+ *  2. its `target_key` must decode as THIS owner's Drive-delivery key, which
+ *     re-proves the owner hash, the file name shape and the deliverable type —
+ *     a reservation staged for a workspace path or a public artifact is refused
+ *     BEFORE it is claimed, so a refusal never wedges someone else's upload in
+ *     `verifying`;
+ *  3. the delivery target is derived from that key, never from a parameter.
+ *
+ * Idempotent: a replay after a successful delivery returns the recorded Drive
+ * file id rather than uploading a second copy.
+ */
+export async function deliverStagedUploadToDrive(
+  ownerEmail: string,
+  reservationId: string,
+  deps: DeliverToDriveDeps = {},
+): Promise<DriveDeliveryResult> {
+  if (!WORKSPACE_RESERVATION_ID_RE.test(reservationId)) {
+    throw new Error("Invalid upload reservation")
+  }
+  const ownerKey = ownerEmail.trim().toLowerCase()
+  const bucket = bucketName()
+  const existing = await ownedUploadReservation(ownerKey, reservationId)
+  if (!existing) {
+    throw new WorkspaceStorageCompletionError(
+      "Upload reservation is unavailable",
+    )
+  }
+  if (existing.publicArtifact) {
+    throw new WorkspaceStorageCompletionError(
+      "Upload reservation is not a Drive delivery",
+    )
+  }
+  // Throws on anything that is not this owner's Drive-delivery key.
+  const fileName = driveDeliveryFileName(ownerEmail, existing.targetKey)
+  const contentType = assertDriveDeliveryContentType(
+    fileName,
+    existing.contentType,
+  )
+  if (existing.expectedBytes > MAX_DRIVE_DELIVERY_BYTES) {
+    throw new Error(
+      `Invalid content length; maximum is ${MAX_DRIVE_DELIVERY_BYTES} bytes`,
+    )
+  }
+  if (existing.status === "committed" && existing.objectVersionId) {
+    return {
+      fileId: existing.objectVersionId,
+      webViewLink: driveFileWebViewLink(existing.objectVersionId),
+      fileName,
+      sharedWith: ownerKey,
+      reused: true,
+    }
+  }
+  if (existing.status === "verifying" && existing.objectVersionId) {
+    return recoverDriveDelivery({
+      reservation: existing,
+      fileId: existing.objectVersionId,
+      ownerEmail,
+      ownerKey,
+      reservationId,
+      fileName,
+      deps,
+    })
+  }
+  const claim = await claimUploadCompletion(ownerKey, reservationId)
+  if (claim.kind !== "claimed") {
+    throw new WorkspaceStorageCompletionError(
+      "Upload reservation is unavailable or already being verified",
+    )
+  }
+  return finishDriveDelivery({
+    reservation: claim.reservation,
+    ownerEmail,
+    ownerKey,
+    reservationId,
+    bucket,
+    fileName,
+    contentType,
+    deps,
+  })
+}
+
+/**
+ * Finish a delivery whose Drive file was created and recorded, but whose
+ * reservation never reached `committed` — the share or the settle was
+ * interrupted. Re-sharing is safe: Drive returns the existing permission for
+ * the same user and role. Nothing is re-uploaded, so no second copy exists.
+ */
+async function recoverDriveDelivery(params: {
+  reservation: WorkspaceUploadReservation
+  fileId: string
+  ownerEmail: string
+  ownerKey: string
+  reservationId: string
+  fileName: string
+  deps: DeliverToDriveDeps
+}): Promise<DriveDeliveryResult> {
+  const { reservation, fileId, reservationId } = params
+  const minted = await mintAgentDriveToken(params.ownerEmail, params.deps)
+  await shareDriveFileWithUser({
+    accessToken: minted.accessToken,
+    fileId,
+    userEmail: params.ownerEmail,
+    deps: params.deps.drive,
+  })
+  await settleUploadReservation(
+    reservationId,
+    fileId,
+    [],
+    defaultDatabaseExecutor,
+  )
+  await Promise.allSettled([
+    settleLease(reservation.byteLeaseId, reservation.expectedBytes),
+    settleLease(reservation.objectLeaseId, 1),
+  ])
+  log.info("Recovered interrupted Drive delivery", { reservationId, fileId })
+  return {
+    fileId,
+    webViewLink: driveFileWebViewLink(fileId),
+    fileName: params.fileName,
+    sharedWith: params.ownerKey,
+    ownedBy: minted.agentEmail,
+  }
+}
+
+// One delivery is one cleanup boundary; splitting it hides which rollback owns
+// which failure.
+async function finishDriveDelivery(params: {
+  reservation: WorkspaceUploadReservation
+  ownerEmail: string
+  ownerKey: string
+  reservationId: string
+  bucket: string
+  fileName: string
+  contentType: string
+  deps: DeliverToDriveDeps
+}): Promise<DriveDeliveryResult> {
+  const { reservation, bucket, reservationId } = params
+  let releaseCapacity = false
+  let driveAttempted = false
+  let stagingVersion: string | undefined
+  let delivered:
+    | { fileId: string; webViewLink: string; agentEmail: string }
+    | undefined
+  try {
+    const staged = await inspectStagedUpload(reservation, bucket)
+    stagingVersion = staged.versionId
+    if (!staged.matches || !staged.versionId) {
+      throw new WorkspaceStorageCompletionError(
+        "Uploaded object did not match its reservation",
+      )
+    }
+    const bytes = await readStagedUploadBytes(
+      reservation,
+      bucket,
+      staged.versionId,
+    )
+    driveAttempted = true
+    delivered = await deliverBytesToAgentDrive({
+      ownerEmail: params.ownerEmail,
+      fileName: params.fileName,
+      contentType: params.contentType,
+      bytes,
+      deps: params.deps,
+      recordCreated: (fileId) => recordDriveDeliveryFile(reservationId, fileId),
+    })
+    // The bytes now live in Drive, so the staging object is dead weight. A
+    // failure here is logged rather than thrown: the file HAS been delivered,
+    // and turning that into an error would send the agent into a retry that
+    // delivers a second copy.
+    try {
+      await s3Client().send(
+        new DeleteObjectCommand({
+          Bucket: bucket,
+          Key: reservation.stagingKey,
+          VersionId: staged.versionId,
+        }),
+      )
+    } catch (error) {
+      log.warn("Drive delivery staging object was not removed", {
+        reservationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    // `object_version_id` records the DELIVERED object's identity — here the
+    // Drive file id, which is also what an idempotent replay returns.
+    //
+    // Same reasoning as the staging delete: the file IS delivered, so a settle
+    // failure is logged, not thrown. The file id was recorded before the
+    // share, so the row is left `verifying` WITH its id, and a replay of this
+    // reservation finishes it through `recoverDriveDelivery`.
+    try {
+      await settleUploadReservation(
+        reservationId,
+        delivered.fileId,
+        [],
+        defaultDatabaseExecutor,
+      )
+    } catch (error) {
+      log.error("Drive delivery succeeded but its reservation did not settle", {
+        reservationId,
+        fileId: delivered.fileId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    await Promise.allSettled([
+      settleLease(reservation.byteLeaseId, reservation.expectedBytes),
+      settleLease(reservation.objectLeaseId, 1),
+    ])
+    log.info("Delivered agent file to Drive", {
+      reservationId,
+      fileId: delivered.fileId,
+      bytes: reservation.expectedBytes,
+    })
+    return {
+      fileId: delivered.fileId,
+      webViewLink: delivered.webViewLink,
+      fileName: params.fileName,
+      sharedWith: params.ownerKey,
+      ownedBy: delivered.agentEmail,
+    }
+  } catch (error) {
+    if (delivered) throw error
+    if (driveAttempted) {
+      // Drive refused the create or the share. The staged bytes are untouched
+      // and still match their reservation, so hand the reservation back for the
+      // retry the error message asks for instead of discarding the upload.
+      await resetWorkspaceUploadClaim(reservationId, defaultDatabaseExecutor)
+      throw error
+    }
+    try {
+      return await rejectFailedUpload({
+        claimed: reservation,
+        reservationId,
+        bucket,
+        stagingVersion,
+        // No S3 target object is ever written on this path — the delivered
+        // object is the Drive file — so there is nothing to roll back here.
+        promotedVersion: undefined,
+        error,
+        database: defaultDatabaseExecutor,
+        onCapacityRelease: () => {
+          releaseCapacity = true
+        },
+      })
+    } finally {
+      if (releaseCapacity) {
+        await Promise.allSettled([
+          dropLease(reservation.byteLeaseId),
+          dropLease(reservation.objectLeaseId),
+        ])
+      }
+    }
   }
 }
 

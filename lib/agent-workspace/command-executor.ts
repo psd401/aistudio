@@ -730,10 +730,11 @@ function refuseDriveUploadWithPublishGuidance(argv: readonly string[]): void {
   throw new WorkspaceCommandValidationError(
     "`drive +upload` cannot move a container file into Drive: the Workspace " +
       "CLI runs in an empty temporary directory on the web tier, so a local " +
-      "path does not exist there. To hand someone a link to a file you " +
-      "generated, publish it instead: " +
+      "path does not exist there. Deliver the file instead: " +
       "`node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, " +
-      "which returns a shareable HTTPS URL. For an HTML page, use " +
+      "which uploads it server-side into your agent account's Drive, shares " +
+      "it with you alone, and returns the Drive link. Add `--to public` only " +
+      "for content meant to be public-by-link. For an HTML page, use " +
       "psd-html-artifact, which publishes to Atrium.",
     "drive_upload_use_publish",
     "drive +upload"

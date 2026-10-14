@@ -317,13 +317,18 @@ node /opt/psd-skills/psd-workspace/run.js \
 # Deliver the file as a LINK instead, and say so plainly in the same turn:
 #   - audio from psd-tts, video from psd-hyperframes, images from psd-image-gen
 #     already return a public HTTPS URL — paste that URL in the draft body
-#   - anything else: publish it with
+#   - anything else: deliver it with
 #     `node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, which
-#     returns a shareable HTTPS URL — paste that in the draft body
+#     with no --to flag creates the file in your agent's Drive and shares it
+#     with the caller alone, then returns a Drive link — paste that in the body.
+#     That is the path to use for ANY file with personal data in it. Only
+#     `--to public` produces an unsigned public link, and only genuinely
+#     public content should go that way.
 #
 # `drive +upload <path>` is NOT the answer and is refused: gws runs in an empty
 # temporary directory on the web tier, so a container path does not exist there
-# at all. Use psd-publish-file. (HTML pages go to Atrium via psd-html-artifact.)
+# at all. Use psd-publish-file, which does put the file in Drive — server-side,
+# as the agent account. (HTML pages go to Atrium via psd-html-artifact.)
 #
 # Do not hand-build a multipart/mixed MIME payload to get around this. It is
 # not a transport limitation you can re-encode past, and on 2026-08-10 a user
