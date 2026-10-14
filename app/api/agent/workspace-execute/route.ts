@@ -7,6 +7,7 @@ import {
 } from "@/lib/agent-workspace/dwd-token-broker"
 import { getFreshAccessTokenForUser } from "@/lib/agent/workspace-token"
 import {
+  draftWriteAudit,
   executeWorkspaceCommand,
   outboundMessageAudit,
   requiredWorkspaceScopeGap,
@@ -228,6 +229,7 @@ export async function POST(request: NextRequest) {
       context.workspacePrefix
     )
     const outbound = outboundMessageAudit(body.argv)
+    const draft = draftWriteAudit(body.argv)
     log.info(
       "Workspace command completed",
       sanitizeForLogging({
@@ -241,6 +243,7 @@ export async function POST(request: NextRequest) {
               outboundTextLength: outbound.textLength,
             }
           : {}),
+        ...(draft ?? {}),
       })
     )
     return NextResponse.json(result)

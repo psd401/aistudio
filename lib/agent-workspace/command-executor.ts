@@ -1453,6 +1453,44 @@ export function outboundMessageAudit(
   }
 }
 
+export interface WorkspaceDraftAudit {
+  draftAction: "create" | "update"
+  draftId: string | null
+  threadId: string | null
+}
+
+/**
+ * `drafts update` REPLACES a draft's whole content, yet the completion log's
+ * operation prefix is the first four raw argv tokens — for `gmail +draft` that
+ * is `gmail +draft --to …` whether it created a draft or overwrote one, so a
+ * replace was indistinguishable from a create (#1894). This reads the command
+ * as it actually executes (the `+draft` helper expanded) and names the action
+ * and the draft/thread it touched. Ids only — never the message.
+ */
+export function draftWriteAudit(
+  argv: readonly string[]
+): WorkspaceDraftAudit | null {
+  const executed = expandGmailDraftHelper(argv)
+  const operation = operationTokens(executed).join(" ")
+  if (
+    operation !== "gmail users drafts create" &&
+    operation !== "gmail users drafts update"
+  ) {
+    return null
+  }
+  const params = parseObjectArgument(executed, "--params")
+  const message = jsonResource(executed)?.message
+  const threadId =
+    message && typeof message === "object" && !Array.isArray(message)
+      ? (message as Record<string, unknown>).threadId
+      : undefined
+  return {
+    draftAction: operation.endsWith("update") ? "update" : "create",
+    draftId: typeof params?.id === "string" ? params.id : null,
+    threadId: typeof threadId === "string" ? threadId : null,
+  }
+}
+
 export interface WorkspaceScopeGap {
   scopes: string[]
   capability: string
