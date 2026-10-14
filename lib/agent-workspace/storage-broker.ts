@@ -21,6 +21,7 @@ import {
   gt,
   inArray,
   isNotNull,
+  isNull,
   lt,
   notLike,
   sql,
@@ -3506,7 +3507,10 @@ async function resetWorkspaceUploadClaim(
     (db) =>
       db
         .update(workspaceUploadReservations)
-        .set({ status: "reserved", updatedAt: new Date() })
+        // Only a Drive delivery records an id while `verifying`, and its reset
+        // follows the removal of that file — a retry must create a new one,
+        // not recover the removed one.
+        .set({ status: "reserved", objectVersionId: null, updatedAt: new Date() })
         .where(
           and(
             eq(workspaceUploadReservations.id, reservationId),
@@ -5055,6 +5059,56 @@ export interface DeliverToDriveDeps {
   drive?: DriveDeliveryDeps
 }
 
+async function mintAgentDriveToken(
+  ownerEmail: string,
+  deps: DeliverToDriveDeps,
+): Promise<{ accessToken: string; agentEmail: string }> {
+  const mintToken = deps.mintToken ?? mintAgentWorkspaceTokenViaBoundary
+  // The agent account is derived SERVER-SIDE from the owner inside the broker
+  // (`deriveAgentEmail`); there is deliberately no target-address parameter.
+  // A mint failure is reported with its own reason rather than as an opaque
+  // 502: "your agnt_ account is not provisioned yet" is actionable, and the
+  // generic storage message would hide it.
+  return mintToken(ownerEmail).catch((error: unknown) => {
+    throw new DriveDeliveryError(
+      "create_failed",
+      "Drive delivery could not authenticate as your agent account: " +
+        `${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  })
+}
+
+/**
+ * Record the created Drive file on its still-`verifying` reservation. Only the
+ * row this request claimed, and only once: a second id would mean two files.
+ */
+async function recordDriveDeliveryFile(
+  reservationId: string,
+  fileId: string,
+): Promise<void> {
+  const [recorded] = await defaultDatabaseExecutor.executeQuery(
+    (db) =>
+      db
+        .update(workspaceUploadReservations)
+        .set({ objectVersionId: fileId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(workspaceUploadReservations.id, reservationId),
+            eq(workspaceUploadReservations.status, "verifying"),
+            isNull(workspaceUploadReservations.objectVersionId),
+          ),
+        )
+        .returning({ id: workspaceUploadReservations.id }),
+    "recordDriveDeliveryFile",
+  )
+  if (!recorded) {
+    throw new WorkspaceStorageCompletionError(
+      "Drive delivery file could not be recorded on its reservation",
+    )
+  }
+}
+
 /**
  * Create the file in the agent account's Drive, then share it with the user.
  *
@@ -5063,6 +5117,10 @@ export interface DeliverToDriveDeps {
  * would mean the retry (which is what `share_failed` instructs) silently piles
  * up duplicates in the agent's Drive. There is deliberately no public-link
  * fallback on this path.
+ *
+ * `recordCreated` persists the file id on the reservation BEFORE the share, so
+ * a delivery interrupted after this point is recoverable by replaying the
+ * reservation instead of creating a second copy.
  */
 async function deliverBytesToAgentDrive(params: {
   ownerEmail: string
@@ -5070,21 +5128,9 @@ async function deliverBytesToAgentDrive(params: {
   contentType: string
   bytes: Uint8Array<ArrayBuffer>
   deps: DeliverToDriveDeps
+  recordCreated: (fileId: string) => Promise<void>
 }): Promise<{ fileId: string; webViewLink: string; agentEmail: string }> {
-  const mintToken = params.deps.mintToken ?? mintAgentWorkspaceTokenViaBoundary
-  // The agent account is derived SERVER-SIDE from the owner inside the broker
-  // (`deriveAgentEmail`); there is deliberately no target-address parameter.
-  // A mint failure is reported with its own reason rather than as an opaque
-  // 502: "your agnt_ account is not provisioned yet" is actionable, and the
-  // generic storage message would hide it.
-  const minted = await mintToken(params.ownerEmail).catch((error: unknown) => {
-    throw new DriveDeliveryError(
-      "create_failed",
-      "Drive delivery could not authenticate as your agent account: " +
-        `${error instanceof Error ? error.message : String(error)}`,
-      { cause: error },
-    )
-  })
+  const minted = await mintAgentDriveToken(params.ownerEmail, params.deps)
   const created = await createAgentDriveFile({
     accessToken: minted.accessToken,
     name: params.fileName,
@@ -5093,6 +5139,7 @@ async function deliverBytesToAgentDrive(params: {
     deps: params.deps.drive,
   })
   try {
+    await params.recordCreated(created.fileId)
     await shareDriveFileWithUser({
       accessToken: minted.accessToken,
       fileId: created.fileId,
@@ -5182,6 +5229,17 @@ export async function deliverStagedUploadToDrive(
       reused: true,
     }
   }
+  if (existing.status === "verifying" && existing.objectVersionId) {
+    return recoverDriveDelivery({
+      reservation: existing,
+      fileId: existing.objectVersionId,
+      ownerEmail,
+      ownerKey,
+      reservationId,
+      fileName,
+      deps,
+    })
+  }
   const claim = await claimUploadCompletion(ownerKey, reservationId)
   if (claim.kind !== "claimed") {
     throw new WorkspaceStorageCompletionError(
@@ -5198,6 +5256,49 @@ export async function deliverStagedUploadToDrive(
     contentType,
     deps,
   })
+}
+
+/**
+ * Finish a delivery whose Drive file was created and recorded, but whose
+ * reservation never reached `committed` — the share or the settle was
+ * interrupted. Re-sharing is safe: Drive returns the existing permission for
+ * the same user and role. Nothing is re-uploaded, so no second copy exists.
+ */
+async function recoverDriveDelivery(params: {
+  reservation: WorkspaceUploadReservation
+  fileId: string
+  ownerEmail: string
+  ownerKey: string
+  reservationId: string
+  fileName: string
+  deps: DeliverToDriveDeps
+}): Promise<DriveDeliveryResult> {
+  const { reservation, fileId, reservationId } = params
+  const minted = await mintAgentDriveToken(params.ownerEmail, params.deps)
+  await shareDriveFileWithUser({
+    accessToken: minted.accessToken,
+    fileId,
+    userEmail: params.ownerEmail,
+    deps: params.deps.drive,
+  })
+  await settleUploadReservation(
+    reservationId,
+    fileId,
+    [],
+    defaultDatabaseExecutor,
+  )
+  await Promise.allSettled([
+    settleLease(reservation.byteLeaseId, reservation.expectedBytes),
+    settleLease(reservation.objectLeaseId, 1),
+  ])
+  log.info("Recovered interrupted Drive delivery", { reservationId, fileId })
+  return {
+    fileId,
+    webViewLink: driveFileWebViewLink(fileId),
+    fileName: params.fileName,
+    sharedWith: params.ownerKey,
+    ownedBy: minted.agentEmail,
+  }
 }
 
 // One delivery is one cleanup boundary; splitting it hides which rollback owns
@@ -5239,6 +5340,7 @@ async function finishDriveDelivery(params: {
       contentType: params.contentType,
       bytes,
       deps: params.deps,
+      recordCreated: (fileId) => recordDriveDeliveryFile(reservationId, fileId),
     })
     // The bytes now live in Drive, so the staging object is dead weight. A
     // failure here is logged rather than thrown: the file HAS been delivered,
@@ -5261,12 +5363,10 @@ async function finishDriveDelivery(params: {
     // `object_version_id` records the DELIVERED object's identity — here the
     // Drive file id, which is also what an idempotent replay returns.
     //
-    // Same reasoning as the staging delete: the file IS delivered. A settle
-    // failure leaves the row in `verifying`, where a replay of this
-    // reservation is refused — so throwing would only push the agent into a
-    // fresh reservation that shares a second copy. Unlike the private path,
-    // there is no S3 object to recover a lost settle from, so it is logged
-    // loudly with the file id instead.
+    // Same reasoning as the staging delete: the file IS delivered, so a settle
+    // failure is logged, not thrown. The file id was recorded before the
+    // share, so the row is left `verifying` WITH its id, and a replay of this
+    // reservation finishes it through `recoverDriveDelivery`.
     try {
       await settleUploadReservation(
         reservationId,

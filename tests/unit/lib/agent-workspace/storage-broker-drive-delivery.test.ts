@@ -108,6 +108,9 @@ function reservationRow(overrides: Record<string, unknown> = {}) {
 function installQueries(answers: Record<string, unknown>): void {
   executeQueryMock.mockImplementation(async (...args: unknown[]) => {
     const label = String(args[1])
+    if (!(label in answers) && label === "recordDriveDeliveryFile") {
+      return [{ id: RESERVATION }]
+    }
     if (label in answers) {
       const answer = answers[label]
       if (answer instanceof Error) throw answer
@@ -712,5 +715,108 @@ describe("deliverStagedUploadToDrive failure handling", () => {
       broker.deliverStagedUploadToDrive(OWNER, "not-a-uuid"),
     ).rejects.toThrow("Invalid upload reservation")
     expect(executeQueryMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("deliverStagedUploadToDrive recovery", () => {
+  it("records the Drive file id on the reservation before sharing it", async () => {
+    const row = reservationRow()
+    const order: string[] = []
+    installQueries({
+      getOwnedWorkspaceUploadReservation: [row],
+      claimWorkspaceUploadCompletion: [{ ...row, status: "verifying" }],
+    })
+    const answer = executeQueryMock.getMockImplementation()!
+    executeQueryMock.mockImplementation(async (...args: unknown[]) => {
+      order.push(String(args[1]))
+      return answer(...args)
+    })
+    installS3()
+    const drive = fakeDrive()
+    const share = drive.deps.fetchImpl
+    drive.deps.fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/permissions")) order.push("share")
+      return share(input, init)
+    }) as typeof fetch
+    await broker.deliverStagedUploadToDrive(OWNER, RESERVATION, {
+      drive: drive.deps,
+    })
+    expect(order.indexOf("recordDriveDeliveryFile")).toBeGreaterThan(-1)
+    expect(order.indexOf("recordDriveDeliveryFile")).toBeLessThan(
+      order.indexOf("share"),
+    )
+  })
+
+  it("removes the file and never shares it when its id cannot be recorded", async () => {
+    const row = reservationRow()
+    installQueries({
+      getOwnedWorkspaceUploadReservation: [row],
+      claimWorkspaceUploadCompletion: [{ ...row, status: "verifying" }],
+      recordDriveDeliveryFile: [],
+      resetWorkspaceUploadCompletionClaim: [{ id: RESERVATION }],
+    })
+    installS3()
+    const drive = fakeDrive()
+    await expect(
+      broker.deliverStagedUploadToDrive(OWNER, RESERVATION, {
+        drive: drive.deps,
+      }),
+    ).rejects.toThrow("could not be recorded")
+    expect(drive.state.permissions).toEqual([])
+    expect(drive.state.deleted).toHaveLength(1)
+    expect(executeQueryMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      "resetWorkspaceUploadCompletionClaim",
+    )
+  })
+
+  it("finishes an interrupted delivery on replay without uploading a second copy", async () => {
+    installQueries({
+      getOwnedWorkspaceUploadReservation: [
+        reservationRow({ status: "verifying", objectVersionId: "drive-file-1" }),
+      ],
+    })
+    const drive = fakeDrive()
+    const result = await broker.deliverStagedUploadToDrive(
+      OWNER,
+      RESERVATION,
+      { drive: drive.deps },
+    )
+    expect(result).toEqual({
+      fileId: "drive-file-1",
+      webViewLink: "https://drive.google.com/file/d/drive-file-1/view",
+      fileName: "deck.pptx",
+      sharedWith: OWNER,
+      ownedBy: AGENT,
+    })
+    // Nothing re-uploaded, staging untouched, one share to the owner alone.
+    expect(drive.state.created).toEqual([])
+    expect(s3SendMock).not.toHaveBeenCalled()
+    expect(drive.state.permissions).toEqual([
+      { type: "user", role: "writer", emailAddress: OWNER },
+    ])
+    expect(executeTransactionMock).toHaveBeenCalledWith(
+      expect.any(Function),
+      "settleWorkspaceUploadCompletion",
+    )
+    expect(executeQueryMock).not.toHaveBeenCalledWith(
+      expect.any(Function),
+      "claimWorkspaceUploadCompletion",
+    )
+  })
+
+  it("still refuses a verifying reservation with no recorded file", async () => {
+    const row = reservationRow({ status: "verifying" })
+    installQueries({
+      getOwnedWorkspaceUploadReservation: [row],
+      getWorkspaceUploadCompletion: [row],
+    })
+    const drive = fakeDrive()
+    await expect(
+      broker.deliverStagedUploadToDrive(OWNER, RESERVATION, {
+        drive: drive.deps,
+      }),
+    ).rejects.toThrow("already being verified")
+    expect(drive.state.created).toEqual([])
   })
 })
