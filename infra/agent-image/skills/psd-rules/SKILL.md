@@ -286,7 +286,7 @@ If a skill exists for a task, its interface is the **only** path. Do not write B
 - Calling the OpenAI images API via `curl`/`fetch` when `psd-image-gen` exists
 - Running `aws s3 cp`, `PutObjectCommand`, or `getSignedUrl` from Bash for any task a skill performs
 - Re-fetching/re-uploading/"post-processing" a skill's returned URL ("regenerate with a fresh presigned URL")
-- Saving a skill's output to the container filesystem as a fallback (it's ephemeral; the user can't reach it)
+- Saving a skill's output to the container filesystem as a fallback (the user can't reach a local path — not even one under `work/`, which survives between turns but is still private to you)
 
 **Why:** improvising around a working skill compounds failures (incident 2026-05-03: `psd-image-gen` returned a clean public URL, but the agent wrote custom Bash producing presigned URLs with `X-Amz-Security-Token` that fail in chat).
 

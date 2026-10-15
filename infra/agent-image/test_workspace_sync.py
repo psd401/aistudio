@@ -3576,17 +3576,175 @@ class DurableScratchDirectoryTests(unittest.TestCase):
         )
         self.assertEqual(workspace_sync.WORK_DIR_RELATIVE, "work")
 
-    def test_an_oversized_scratch_file_keeps_its_committed_copy(self):
-        # Excluded from upload must not mean deleted remotely: a stale smaller
-        # version in S3 is recoverable, a delete-marker is not.
-        self.assertEqual(
-            workspace_sync._remote_mutable_paths_to_delete(
-                ("work/render.mp4", "work/gone.pdf"),
-                {"work/render.mp4"},
-                migration_complete=True,
-            ),
-            ["work/gone.pdf"],
+    def test_an_oversized_scratch_file_drops_its_stale_committed_copy(self):
+        # Excluded from upload means absent from the checkpoint. Keeping an
+        # earlier, smaller committed copy would restore a stale version on the
+        # next cold boot with nothing to tell the model it is stale.
+        (self.root / "work").mkdir()
+        (self.root / "work" / "render.mp4").write_bytes(b"x")
+        generation = workspace_sync._generation_for_entries({
+            "work/render.mp4": (1, '"old"'),
+        })
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        before = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("work/render.mp4",),
+            sizes={"work/render.mp4": 1},
+            e_tags={"work/render.mp4": '"old"'},
+            generation=generation,
         )
+        original_open = workspace_sync._open_regular_no_follow
+
+        def open_no_follow(relative):
+            source, metadata = original_open(relative)
+
+            class _Inflated:
+                st_size = workspace_sync.MAX_WORK_FILE_SYNC_BYTES + 1
+                st_mode = metadata.st_mode
+                st_mtime_ns = metadata.st_mtime_ns
+                st_ctime_ns = metadata.st_ctime_ns
+                st_uid = metadata.st_uid
+                st_gid = metadata.st_gid
+
+            return source, _Inflated()
+
+        class _Stop(Exception):
+            pass
+
+        seen = []
+        real = workspace_sync._remote_mutable_paths_to_delete
+        spy_mock = mock.Mock(side_effect=lambda *a: (
+            seen.append(real(*a)) or (_ for _ in ()).throw(_Stop())
+        ))
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync,
+            "_open_regular_no_follow",
+            side_effect=open_no_follow,
+        ), mock.patch.object(
+            workspace_sync, "_ensure_workspace_checkpoint"
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=before,
+        ), mock.patch.object(
+            workspace_sync, "_remote_mutable_paths_to_delete", spy_mock
+        ):
+            with self.assertRaises(_Stop):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+        self.assertEqual(seen, [["work/render.mp4"]])
+
+    def test_prune_keeps_the_newest_scratch_files_within_the_ceilings(self):
+        work = self.root / "work"
+        work.mkdir()
+        for index in range(5):
+            path = work / f"f{index}.pdf"
+            path.write_bytes(b"x" * 10)
+            # f0 is the oldest, f4 the newest.
+            os.utime(path, ns=(index * 10**9, index * 10**9))
+        (self.root / "memory").mkdir()
+        (self.root / "memory" / "note.md").write_bytes(b"x" * 100)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_BYTES", 30
+        ), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 500
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 2)
+        self.assertEqual(
+            sorted(p.name for p in work.iterdir()),
+            ["f2.pdf", "f3.pdf", "f4.pdf"],
+        )
+        # Outside work/ is never touched, whatever its size.
+        self.assertTrue((self.root / "memory" / "note.md").exists())
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 1
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 2)
+        self.assertEqual([p.name for p in work.iterdir()], ["f4.pdf"])
+
+    def test_prune_is_a_no_op_under_the_ceilings(self):
+        (self.root / "work").mkdir()
+        (self.root / "work" / "a.pdf").write_bytes(b"x")
+        with self._patch_workspace():
+            self.assertEqual(workspace_sync._prune_work_directory(), 0)
+        self.assertTrue((self.root / "work" / "a.pdf").exists())
+
+    def test_a_pruned_file_is_deleted_from_the_checkpoint_too(self):
+        # push_workspace prunes BEFORE it walks the tree, so the deletion pass
+        # sees the evicted file as locally absent and removes it remotely.
+        work = self.root / "work"
+        work.mkdir()
+        for index, name in enumerate(("old.pdf", "new.pdf")):
+            (work / name).write_bytes(b"x" * 10)
+            os.utime(work / name, ns=(index * 10**9, index * 10**9))
+        generation = workspace_sync._generation_for_entries({
+            "work/old.pdf": (10, '"old"'),
+        })
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        before = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("work/old.pdf",),
+            sizes={"work/old.pdf": 10},
+            e_tags={"work/old.pdf": '"old"'},
+            generation=generation,
+        )
+
+        class _Stop(Exception):
+            pass
+
+        seen = []
+        real = workspace_sync._remote_mutable_paths_to_delete
+        spy_mock = mock.Mock(side_effect=lambda *a: (
+            seen.append(real(*a)) or (_ for _ in ()).throw(_Stop())
+        ))
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 1
+        ), mock.patch.object(
+            workspace_sync, "_ensure_workspace_checkpoint"
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=before,
+        ), mock.patch.object(
+            workspace_sync, "_remote_mutable_paths_to_delete", spy_mock
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            with self.assertRaises(_Stop):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+        self.assertFalse((work / "old.pdf").exists())
+        self.assertEqual(seen, [["work/old.pdf"]])
+
+    def test_ensure_repairs_the_mode_of_an_existing_directory(self):
+        # A wrong-owner or wrong-mode work/ must not persist for every later
+        # turn just because the directory already existed.
+        (self.root / "work").mkdir(mode=0o755)
+        os.chmod(self.root / "work", 0o755)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync.os, "fchown"
+        ) as fchown:
+            workspace_sync.ensure_work_directory()
+        fchown.assert_called_once()
+        self.assertEqual(
+            (self.root / "work").stat().st_mode & 0o777, 0o700
+        )
+
+    def test_ensure_tolerates_the_directory_appearing_mid_call(self):
+        real_mkdir = os.mkdir
+
+        def racing_mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            raise FileExistsError(path)
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync.os, "mkdir", side_effect=racing_mkdir
+        ):
+            workspace_sync.ensure_work_directory()
+        self.assertTrue((self.root / "work").is_dir())
 
 
 class StagedReservationReleaseTests(unittest.TestCase):
