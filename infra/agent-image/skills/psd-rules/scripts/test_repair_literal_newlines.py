@@ -978,6 +978,72 @@ class EveryLegitimateConstruct(unittest.TestCase):
              f'{{"a": {{"b": ["a{esc}b{pad}"]}}}}\n'),
         ]
 
+    # A realistic collapse to sit next to a construct, per language.
+    COLLAPSED_NEIGHBOUR = {
+        ".py": 'def helper():\\n    print("hello from the collapsed body")'
+               "\\n    return 0\\n\\nhelper()\n",
+        ".js": 'const fs = require("fs");\\nconst os = require("os");'
+               "\\nconsole.log(os.hostname());\\n",
+    }
+
+    def test_a_construct_survives_a_collapse_in_the_same_file(self):
+        """The interaction, which is where rounds 3-5 of review found bugs.
+
+        Every finding after the first round was one of these constructs
+        standing next to a real collapse: the tokeniser stopped at the
+        collapsed line and left a later string unprotected, and a group
+        judgement let one real candidate drag a comment in with it. The
+        collapsed line may be repaired; the construct's own lines may not
+        change.
+        """
+        for label, suffix, source in self.cases():
+            neighbour = self.COLLAPSED_NEIGHBOUR.get(suffix)
+            if neighbour is None:  # JSON does not compose with a stray line
+                continue
+            escaped_lines = [
+                line for line in source.splitlines(keepends=True)
+                if "\\n" in line
+            ]
+            for where, combined in (
+                ("collapse before", neighbour + source),
+                ("collapse after", source + neighbour),
+            ):
+                with self.subTest(construct=label, order=where):
+                    with tempfile.NamedTemporaryFile(
+                            "w", suffix=suffix, delete=False) as fh:
+                        fh.write(combined)
+                        path = fh.name
+                    try:
+                        subprocess.run([sys.executable, SCRIPT, path],
+                                       capture_output=True, text=True)
+                        with open(path) as handle:
+                            after = handle.read()
+                        for line in escaped_lines:
+                            self.assertIn(line, after)
+                    finally:
+                        os.unlink(path)
+
+    def test_no_working_file_is_ever_modified_with_crlf_endings(self):
+        """The same table again with CRLF endings, read as bytes.
+
+        A CRLF file's backslash continuation is the same construct as an LF
+        one's, and missing that rewrote a valid JS string.
+        """
+        for label, suffix, source in self.cases():
+            with self.subTest(construct=label):
+                raw = source.replace("\n", "\r\n").encode("utf-8")
+                with tempfile.NamedTemporaryFile(
+                        "wb", suffix=suffix, delete=False) as fh:
+                    fh.write(raw)
+                    path = fh.name
+                try:
+                    subprocess.run([sys.executable, SCRIPT, path],
+                                   capture_output=True, text=True)
+                    with open(path, "rb") as handle:
+                        self.assertEqual(handle.read(), raw)
+                finally:
+                    os.unlink(path)
+
     def test_no_working_file_is_ever_modified(self):
         for label, suffix, source in self.cases():
             with self.subTest(construct=label):
