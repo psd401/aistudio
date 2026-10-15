@@ -146,14 +146,43 @@ def split_lines(text):
     return lines
 
 
+def _uses_escaped_delimiters(line, quotes):
+    """True when this line's strings are delimited by `\\"` rather than `"`.
+
+    Double-escaping escapes the delimiters as well as the line breaks, so the
+    line arrives as `SEP = \\"alpha\\nbravo\\"`. Those escaped quotes are the
+    string's real delimiters and the `\\n` between them is its data — reading
+    them as ordinary escapes turned the whole run into "evidence" and produced
+    an unterminated string. The tell is that the line has no bare quote at
+    all, which separates it from a newline-only collapse whose strings keep
+    their real delimiters and may legitimately contain `\\"` inside.
+    """
+    bare = 0
+    escaped = 0
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "\\" and index + 1 < len(line):
+            if line[index + 1] in quotes:
+                escaped += 1
+            index += 2
+            continue
+        if char in quotes:
+            bare += 1
+        index += 1
+    return bare == 0 and escaped >= 2
+
+
 def _line_records(line, language):
-    """Escapes on one line: ``[[index, char_after, is_evidence]]``.
+    """Escapes on one line: ``[[index, char_after, is_evidence, in_comment]]``.
 
     Evidence means the escape sits outside every string literal, which is
     where a backslash cannot appear in working code. A `\\\\` pair is skipped
     entirely: that is a deliberate literal backslash, not a mangled break.
+    ``in_comment`` is only tracked for JavaScript (see _javascript_records).
     """
     quotes = _QUOTE_CHARS[language]
+    escaped_delimiters = _uses_escaped_delimiters(line, quotes)
     records = []
     quote = None
     quote_opened_at = -1
@@ -167,7 +196,19 @@ def _line_records(line, language):
             if nxt == "\\":
                 index += 2
                 continue
-            records.append([index, nxt, quote is None])
+            if escaped_delimiters and nxt in quotes:
+                # This escaped quote IS a delimiter. Mark it evidence so the
+                # repair un-escapes it — both ends, or the string it opens
+                # would be left unterminated — and move the quote state with
+                # it so the escapes inside count as string data.
+                records.append([index, nxt, True, False])
+                if quote is None:
+                    quote, quote_opened_at = nxt, index
+                elif quote == nxt:
+                    quote, quote_opened_at = None, -1
+                index += 2
+                continue
+            records.append([index, nxt, quote is None, False])
             index += 2
             continue
         if quote is None:
@@ -228,6 +269,16 @@ def _javascript_records(text):
     while index < length:
         char = text[index]
 
+        if char == "\\" and index + 1 < length and text[index + 1] == "\n":
+            # A backslash immediately before a real newline is a line
+            # continuation, and a JS string may legally span lines that way.
+            # Ending the string here marked the continuation line's escapes as
+            # code and rewrote a valid file.
+            row += 1
+            column = 0
+            index += 2
+            continue
+
         if char == "\n":
             if state in ("string", "line-comment"):
                 # Neither may span a real line break, so a newline ends them
@@ -238,9 +289,10 @@ def _javascript_records(text):
             index += 1
             continue
 
-        if char == "\\" and index + 1 < length and text[index + 1] != "\n":
+        if char == "\\" and index + 1 < length:
             records.setdefault(row, []).append(
-                [column, text[index + 1], state == "code"])
+                [column, text[index + 1], state == "code",
+                 state == "line-comment"])
             index += 2
             column += 2
             continue
@@ -305,7 +357,23 @@ def escape_records(text, language):
     }
 
 
-def repair(text, language=PYTHON):
+def records_for(text, language):
+    """Escape records for a whole file, with every known correction applied.
+
+    The one place records are built, so the diagnosis and the repair cannot
+    disagree about which escapes are evidence.
+    """
+    records = escape_records(text, language or PYTHON)
+    if records is None:
+        return None
+    if language == PYTHON:
+        # The tokeniser outranks the per-line quote pairing: it is the only
+        # thing that sees a line sitting inside a triple-quoted string.
+        apply_string_spans(records, python_string_spans(text))
+    return records
+
+
+def repair(text, language):
     r"""Un-escape the mangled sequences that are evidence of a collapse.
 
     `\n` and `\t` become real whitespace; `\"` and `\'` lose their backslash.
@@ -331,7 +399,7 @@ def apply_repair(text, lines_to_change, language, records=None):
             out.append(line)
             continue
         position = 0
-        for index, char, evidence in records.get(number, []):
+        for index, char, evidence, _comment in records.get(number, []):
             if not evidence or char not in _UNESCAPE:
                 continue
             out.append(line[position:index])
@@ -364,17 +432,27 @@ def parses_cleanly(text, language):
 def python_string_spans(text):
     """String-literal regions of a parsing Python file, per the tokeniser.
 
-    ``{line_number: [(start_col, end_col)]}``, or None when the text cannot be
-    tokenised. Only the tokeniser can see that a line sits inside a
-    triple-quoted string, because the opening quote is on an earlier line.
-    Comments are excluded on purpose (see _vetoed).
+    ``{line_number: [(start_col, end_col)]}``. Only the tokeniser can see that
+    a line sits inside a triple-quoted string, because the opening quote is on
+    an earlier line.
+
+    Tokens found BEFORE a tokenising error are kept rather than discarded. One
+    collapsed line makes the rest of the file untokenisable, and throwing the
+    whole result away took the protection off every string literal that came
+    before it — a raw string's data was rewritten alongside the real
+    collapsed line. What was tokenised was tokenised.
+
+    Comments are excluded on purpose: a collapsed file beginning with a
+    shebang is one big comment, so trusting comments would call it healthy.
     """
     lines = split_lines(text)
     spans = {}
+    tokens = []
     try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except Exception:  # SyntaxError, TokenError, ...
-        return None
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            tokens.append(token)
+    except Exception:  # SyntaxError, TokenError, IndentationError, ...
+        pass
     for token in tokens:
         name = tokenize.tok_name.get(token.type, "")
         if name != "STRING" and not name.startswith("FSTRING"):
@@ -389,12 +467,44 @@ def python_string_spans(text):
     return spans
 
 
-def _all_within_spans(escapes_by_line, spans):
-    """True when every given escape sits inside a string-literal span."""
-    for number, escapes in escapes_by_line.items():
+def apply_string_spans(records, spans):
+    """Demote every escape the tokeniser places inside a string literal.
+
+    Applied to the records themselves rather than used as a whole-file veto,
+    so one genuinely collapsed line cannot drag a protected docstring line
+    into the repair with it.
+    """
+    for number, line_records in records.items():
         line_spans = spans.get(number, [])
-        for index, _char, _evidence in escapes:
-            if not any(start <= index < end for start, end in line_spans):
+        if not line_spans:
+            continue
+        for record in line_records:
+            if any(start <= record[0] < end for start, end in line_spans):
+                record[2] = False
+
+
+def _stays_all_comments(text, broken_lines, language, records):
+    """True when repairing a line only ever produces more comment lines.
+
+    `# first \\n# second \\n# third` is prose about escapes: every piece the
+    repair would create is still a comment, so nothing was a collapsed line
+    break. A collapsed file that opens with a shebang looks the same to the
+    tokeniser — one comment — but its pieces include real code (`import
+    sys`), which is what tells the two apart.
+    """
+    lines = split_lines(text)
+    for number in broken_lines:
+        if number > len(lines):
+            continue
+        repaired = apply_repair(
+            lines[number - 1], [1], language,
+            {1: records.get(number, [])})
+        pieces = split_lines(repaired)[1:]
+        if not pieces:
+            return False
+        for piece in pieces:
+            stripped = piece.strip()
+            if stripped and not stripped.startswith("#"):
                 return False
     return True
 
@@ -402,33 +512,25 @@ def _all_within_spans(escapes_by_line, spans):
 def _vetoed(text, language, broken_lines, records):
     """True when repairing these lines would damage a file that works today.
 
-    A file that does not parse cannot be damaged by this repair, so the veto
-    only applies to one that does, and only on a proof that the escapes are
+    A file that does not parse cannot be damaged further by this repair, so
+    the veto applies to one that does, on either proof that the escapes are
     legitimate:
 
     1. JSON that parses has no escape outside a string at all;
-    2. every escape sits inside a real string literal, per the tokeniser,
-       which is the only thing that sees triple-quoted strings; or
-    3. the file would STOP parsing once repaired — the escapes are prose in a
-       comment and the repair is what would break it.
+    2. the repair would only deepen a comment — it would stop the file
+       parsing, or every piece it creates is still a comment — so the escapes
+       are prose and the repair is what would break it.
 
-    Comments cannot themselves be a proof, because a collapsed file beginning
-    with a shebang is one big comment; proof 3 is what separates it (parses
-    before AND after) from `x = 1  # see \\n\\n\\n` (parses only before).
+    String literals are not handled here: the tokeniser's spans are applied
+    to the records themselves in `diagnose`, which protects them line by line
+    instead of all-or-nothing.
     """
     if not parses_cleanly(text, language):
         return False
     if language == JSON:
         return True
-    if language == PYTHON:
-        spans = python_string_spans(text)
-        if spans is not None:
-            escapes = {
-                number: [r for r in records.get(number, []) if r[1] == "n"]
-                for number in broken_lines
-            }
-            if _all_within_spans(escapes, spans):
-                return True
+    if _stays_all_comments(text, broken_lines, language, records):
+        return True
     return not parses_cleanly(
         apply_repair(text, broken_lines, language, records), language
     )
@@ -445,7 +547,10 @@ def diagnose(text, path):
     lines = split_lines(text)
     real_lines = len(lines)
 
-    records = escape_records(text, language or PYTHON)
+    # An unsupported extension is still scanned — it gets reported, never
+    # rewritten — and Python's mode is the broadest of the line-at-a-time
+    # ones, treating both quote characters as opening a string.
+    records = records_for(text, language)
     if records is None:
         # JS/TS whose stream scan ended mid-template or mid-comment.
         return "ambiguous", real_lines, 0, []
@@ -453,7 +558,7 @@ def diagnose(text, path):
     literal = sum(
         1
         for line_records in records.values()
-        for _index, char, _evidence in line_records
+        for _index, char, _evidence, _comment in line_records
         if char == "n"
     )
     if literal == 0:
@@ -479,6 +584,17 @@ def diagnose(text, path):
         return "clean", real_lines, literal, []
 
     if broken_lines:
+        if any(
+            record[3]
+            for number in broken_lines
+            for record in records.get(number, [])
+        ):
+            # A JS line that mixes collapsed breaks with escapes inside a `//`
+            # comment cannot be repaired a piece at a time: a line comment can
+            # only be read as running to the end of the physical line, so the
+            # breaks after it would be left escaped and every statement past
+            # that point would stay commented out — reported as a success.
+            return "comment-mixed", real_lines, literal, broken_lines
         if _vetoed(text, language, broken_lines, records):
             return "clean", real_lines, literal, []
         return "broken", real_lines, literal, broken_lines
@@ -588,6 +704,18 @@ def main() -> int:
         )
         return 2
 
+    if verdict == "comment-mixed":
+        print(
+            f"ambiguous: {args.path} line(s) {_describe(lines)} are collapsed "
+            "but also carry a `//` comment, and a line comment can only be "
+            "read as running to the end of the line — repairing the breaks "
+            "before it would leave every statement after it commented out. "
+            "The file was NOT modified; split that comment onto its own line "
+            "by hand and run it again.",
+            file=sys.stderr,
+        )
+        return 2
+
     if verdict == "ambiguous":
         if lines:
             print(
@@ -609,11 +737,11 @@ def main() -> int:
         return 2
 
     language = language_for(args.path)
-    records = escape_records(text, language)
+    records = records_for(text, language)
     changing = sum(
         1
         for number in lines
-        for _index, char, evidence in records.get(number, [])
+        for _index, char, evidence, _comment in records.get(number, [])
         if char == "n" and evidence
     )
 

@@ -76,6 +76,20 @@ HEALTHY_DOCSTRING = (
     "print(DOC)\nsys.exit(0)\n"
 )
 
+# A file that does NOT compile, for a reason unrelated to the escapes, whose
+# escape-rich line is inside a triple-quoted string. `tokenize` still works on
+# plenty of files `compile` rejects, so the string spans must be consulted
+# before any question about parsing — otherwise this file's data is rewritten
+# and the agent is told to run the result.
+UNPARSEABLE_WITH_DOCSTRING = (
+    'DOC = """\n'
+    "    Lines are split on \\n\\n\\n and \\n\\n\\n here, for the legacy "
+    "export.\n"
+    '"""\n\n'
+    "def broken():\n"
+    "    return 1 +\n"
+)
+
 # A working line whose escapes really are prose in a comment. It parses now
 # and would NOT parse after a repair, so the repair must be vetoed.
 COMMENT_PROSE = (
@@ -147,6 +161,40 @@ COLLAPSED_JS_IN_INTERPOLATION = (
     "console.log(a + b);\\nreturn a; })() }`;\n"
 )
 
+# A collapsed JS line that ALSO carries a `//` comment. Repairing only the
+# breaks before the comment leaves every statement after it commented out, and
+# reports success — so this must be refused outright.
+COLLAPSED_JS_WITH_COMMENT = (
+    "const a = 1;\\nconst b = 2;\\nconst c = 3;\\n// note about it\\n"
+    "console.log(a + b + c);\\nprocess.exit(0);\\n"
+)
+
+# Healthy JS whose string spans physical lines with a backslash continuation.
+# Ending the string at that newline marked the next line's escapes as code.
+HEALTHY_JS_CONTINUATION = (
+    'const s = "start \\\n'
+    'alpha\\n\\n\\n and more text here to pass the sixty character '
+    'threshold";\n'
+    "console.log(s);\n"
+)
+
+# Double-escaped: the delimiters arrived escaped too, so `\"` IS the quote and
+# the `\n` between them is the string's data. Reading them as ordinary
+# escapes produced an unterminated string literal.
+DOUBLE_ESCAPED = (
+    'import sys\\nSEP = \\"alpha\\nbravo\\ncharlie\\ndelta\\necho\\"'
+    "\\nprint(SEP)\\n"
+)
+
+# Healthy Python prose where EVERY piece a repair would create is still a
+# comment — so none of those escapes was a collapsed line break. The collapsed
+# shebang file looks identical to the tokeniser; its pieces include real code.
+COMMENT_ONLY_PROSE = (
+    "x = 1\n"
+    "# first \\n# second \\n# third \\n# fourth part of the prose here\n"
+    "print(x)\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -210,6 +258,26 @@ class Diagnose(unittest.TestCase):
     def test_a_line_inside_a_triple_quoted_string_is_left_alone(self):
         self.assertEqual(rln.diagnose(HEALTHY_DOCSTRING, "ok.py")[0], "clean")
 
+    def test_a_string_is_protected_even_when_the_file_does_not_compile(self):
+        # The escapes are the string's data; the syntax error is elsewhere.
+        # Not repaired is the whole point — the file does have a real fault,
+        # so "ambiguous" (untouched, look elsewhere) is the honest verdict.
+        verdict, _real, _literal, lines = rln.diagnose(
+            UNPARSEABLE_WITH_DOCSTRING, "u.py")
+        self.assertEqual(verdict, "ambiguous")
+        self.assertEqual(lines, [2])
+
+    def test_the_tokeniser_never_blocks_a_real_repair(self):
+        # The string spans are consulted before any question about parsing, so
+        # they must never cover a collapsed line's escapes. Whether a
+        # collapsed file tokenises at all is version-dependent — it raises
+        # TokenError on 3.12+ and succeeds on 3.9/3.11 — so this pins the
+        # invariant that holds either way.
+        self.assertEqual(rln.diagnose(COLLAPSED, "b.py")[0], "broken")
+        self.assertEqual(
+            rln.diagnose(HEADER_PLUS_COLLAPSED, "b.py")[0], "broken")
+        self.assertEqual(rln.diagnose(MIXED, "b.py")[0], "broken")
+
     def test_escapes_that_are_prose_in_a_comment_are_left_alone(self):
         # Repairing line 2 would turn working code into an IndentationError.
         self.assertEqual(rln.diagnose(COMMENT_PROSE, "ok.py")[0], "clean")
@@ -239,6 +307,25 @@ class Diagnose(unittest.TestCase):
             COLLAPSED_JS_IN_INTERPOLATION, "i.js")
         self.assertEqual(verdict, "broken")
         self.assertEqual(lines, [1])
+
+    def test_a_collapsed_js_line_carrying_a_comment_is_refused(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSED_JS_WITH_COMMENT, "c.js")
+        self.assertEqual(verdict, "comment-mixed")
+        self.assertEqual(lines, [1])
+
+    def test_a_js_string_continued_with_a_backslash_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_CONTINUATION, "s.js")[0], "clean")
+
+    def test_double_escaped_delimiters_are_treated_as_the_quotes(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            DOUBLE_ESCAPED, "d.py")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_prose_whose_every_piece_stays_a_comment_is_left_alone(self):
+        self.assertEqual(rln.diagnose(COMMENT_ONLY_PROSE, "p.py")[0], "clean")
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -273,29 +360,29 @@ class Diagnose(unittest.TestCase):
 
 class Repair(unittest.TestCase):
     def test_literal_escapes_become_real_newlines(self):
-        self.assertEqual(rln.repair('a\\nb'), "a\nb")
+        self.assertEqual(rln.repair('a\\nb', "python"), "a\nb")
 
     def test_tabs_too(self):
-        self.assertEqual(rln.repair('a\\tb'), "a\tb")
+        self.assertEqual(rln.repair('a\\tb', "python"), "a\tb")
 
     def test_an_escaped_backslash_is_preserved(self):
         # `\\n` in the source is a deliberate literal, not a mangled break.
-        self.assertEqual(rln.repair('a\\\\nb'), 'a\\\\nb')
+        self.assertEqual(rln.repair('a\\\\nb', "python"), 'a\\\\nb')
 
     def test_escaped_double_quotes_are_unescaped(self):
         # Double-escaping also mangles the quotes; leaving them would still
         # not parse.
-        self.assertEqual(rln.repair('print(\\"hi\\")'), 'print("hi")')
+        self.assertEqual(rln.repair('print(\\"hi\\")', "python"), 'print("hi")')
 
     def test_escaped_single_quotes_are_unescaped(self):
-        self.assertEqual(rln.repair("x = \\'a\\'"), "x = 'a'")
+        self.assertEqual(rln.repair("x = \\'a\\'", "python"), "x = 'a'")
 
     def test_an_escape_inside_a_string_literal_is_left_alone(self):
         # The quotes pair up, so `\n` between them is a real string literal.
         self.assertEqual(rln.repair('x = "a\\nb"', "python"), 'x = "a\\nb"')
 
     def test_an_unknown_escape_is_left_alone(self):
-        self.assertEqual(rln.repair(r"re.compile(r\d)"), r"re.compile(r\d)")
+        self.assertEqual(rln.repair(r"re.compile(r\d)", "python"), r"re.compile(r\d)")
 
 
 class EndToEnd(unittest.TestCase):
@@ -355,6 +442,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(content, HEALTHY_DOCSTRING)
         self.assertIn("clean", proc.stdout)
+
+    def test_an_unparseable_file_keeps_its_string_data(self):
+        proc, content = self.run_on(UNPARSEABLE_WITH_DOCSTRING)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, UNPARSEABLE_WITH_DOCSTRING)
 
     def test_a_comment_whose_prose_contains_escapes_is_left_identical(self):
         proc, content = self.run_on(COMMENT_PROSE)
@@ -483,6 +575,8 @@ class FileHandling(unittest.TestCase):
         self.assertIn("unreadable", proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores directory permissions")
     def test_an_unwritable_directory_exits_2_and_keeps_the_original(self):
         directory = tempfile.mkdtemp()
         path = os.path.join(directory, "x.py")
@@ -555,6 +649,29 @@ class Languages(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("repaired", proc.stdout)
         self.assertIn("const b = 2;\n", content)
+
+    def test_a_double_escaped_file_becomes_valid_python(self):
+        proc, content = self.run_on(DOUBLE_ESCAPED, ".py")
+        self.assertEqual(proc.returncode, 0)
+        compile(content, "<repaired>", "exec")
+        # The string's own data survived; only the delimiters were unescaped.
+        self.assertIn('SEP = "alpha\\nbravo', content)
+
+    def test_a_collapsed_js_line_with_a_comment_is_left_identical(self):
+        proc, content = self.run_on(COLLAPSED_JS_WITH_COMMENT, ".js")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, COLLAPSED_JS_WITH_COMMENT)
+        self.assertIn("commented out", proc.stderr)
+
+    def test_a_healthy_js_continuation_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_CONTINUATION, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_CONTINUATION)
+
+    def test_a_comment_only_prose_file_is_left_identical(self):
+        proc, content = self.run_on(COMMENT_ONLY_PROSE, ".py")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, COMMENT_ONLY_PROSE)
 
     def test_a_collapsed_js_file_is_repaired(self):
         proc, content = self.run_on(COLLAPSED_JS, ".js")
