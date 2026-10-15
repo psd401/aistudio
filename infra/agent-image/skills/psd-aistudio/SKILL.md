@@ -277,7 +277,9 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   `searchable` and a `note` — surface the note rather than implying the content
   is live. `searchable` is `"no"` while ingestion is `processing`; on the legacy
   write path it is `"keyword"` with `ingestion: "completed"` (keyword search
-  finds it now; semantic search does not cover it on that deployment). No tool
+  finds it now, but only via `repositories-search` WITHOUT a repository filter —
+  a filtered search returns `REPOSITORY_NOT_READY` until the repository has a
+  canonical index; semantic search does not cover it on that deployment). No tool
   reports a single item's status (`repositories-describe` is repository-level),
   so confirm the item is live by finding it with `repositories-search` before
   relying on it.

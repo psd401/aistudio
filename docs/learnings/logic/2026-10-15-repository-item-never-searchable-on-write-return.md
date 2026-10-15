@@ -29,7 +29,10 @@ The two write paths differ, and `processingStatus` describes neither correctly:
   item is keyword-searchable at once. It is NOT semantically searchable later either:
   embedding-recovery (`content-platform/embedding-recovery.ts`) only claims chunks of a
   canonical generation and dense retrieval only reads active canonical generations, so
-  a legacy chunk stays keyword-only until canonical ingestion. (Codex caught both this
+  a legacy chunk stays keyword-only until canonical ingestion. And only an UNTARGETED
+  search reaches it: with `repositoryIds`, `assertRepositoriesSearchable`
+  (`lib/repositories/readiness-service.ts`) classifies a repository with active items
+  but no active generation as `failed` → `REPOSITORY_NOT_READY`. (Codex caught both this
   and the original "never searchable" claim on PR #1931.)
 
 A first fix reported `searchable: false` on both paths; Codex caught the legacy case
