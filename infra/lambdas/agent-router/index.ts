@@ -559,11 +559,13 @@ const MESSAGE_DEDUP_TTL_SECONDS = 60 * 60;
 const BACKGROUND_JOB_ACK_TTL_SECONDS = WORKSPACE_DEFER_MAX_AGE_SECONDS;
 /**
  * Deliberately short and non-committal: the deferred turn may still fail, so
- * this promises only that the message is queued behind the running job.
+ * this promises only that the message is queued behind the running job. It
+ * does not say "your" task: a scheduled run (Morning Brief and the like)
+ * holds the same job lock, and the user never asked for that.
  */
 const BACKGROUND_JOB_DEFERRAL_NOTICE =
-  "I'm still working on your earlier task. I'll get to this message as " +
-  'soon as it finishes.';
+  "I'm finishing another task first. I'll get to this message as soon " +
+  "as it's done.";
 // The queue's own redrive limit, supplied by the stack that sets it. Used to
 // decide whether THIS attempt is the one that dead-letters the record.
 //
@@ -730,8 +732,8 @@ async function tryAcquireSessionLock(
       TableName: tableName,
       // `kind: 'job'` marks a lock held by the async job-runner (#1138).
       // A turn that arrives while it is held is requeued for a later retry
-      // rather than run, and the thread gets one "still working on your
-      // earlier task" reply per job (#1892) — see
+      // rather than run, and the thread gets one "finishing another task
+      // first" reply per job (#1892) — see
       // `acknowledgeBackgroundJobDeferral`. The runner renews expiresAt every
       // ~5 min, leaving enough lease margin for a full missed renewal.
       Item: {
@@ -5610,7 +5612,7 @@ function backgroundJobAckClaimName(
 }
 
 /**
- * Post the promised "still working on your earlier task" reply for a turn
+ * Post the promised "finishing another task first" reply for a turn
  * being deferred behind a background job (#1892). Before this, a message
  * sent during a long job was silently requeued for up to three hours, and
  * staff restated the request into the void.

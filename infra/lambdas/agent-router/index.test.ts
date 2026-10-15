@@ -1624,7 +1624,7 @@ describe("owner-DM aside routing and locks", () => {
     ).rejects.toThrow("background job")
     expect(lockAttempted).toBe(false)
     expect(responses).toEqual([backgroundJobDeferralNotice])
-    expect(responses[0]).toContain("still working")
+    expect(responses[0]).toContain("finishing another task")
   })
 
   test("plain messages acquire the stable workspace lock without waiting", async () => {
