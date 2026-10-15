@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -867,7 +867,7 @@ The `toInvokeResult()` function maps `metadata.silent` to `InvokeResult.silent` 
 
 `deliverScheduledResult()` checks `result.silent`:
 - **Silent result**: Logs "Scheduled run ended silently — nothing posted", records success telemetry, skips the Chat post entirely (no bare "📋 name" header)
-- **Non-silent result**: Posts `📋 **{scheduleName}**\n\n{response}` to the owner's DM
+- **Non-silent result**: Posts `📋 *{scheduleName}*\n\n{response}` to the owner's DM. The header uses single-asterisk bold because Google Chat renders `**` as literal asterisks
 
 Both paths record identical telemetry via `recordScheduledCompletion()` — only the Chat post differs.
 
@@ -1432,7 +1432,7 @@ This allows scheduled runs to audit their own schedules without mutating them. A
 
 The `SCHEDULED_READ_OPERATIONS` allowlist ensures new write operations default to owner-only rather than silently inheriting scheduled access.
 
-Expression validation (the EventBridge cron dialect rules), the `description` and `nextRuns` read-back that every schedule response carries, and the read-only audit of stored schedules are documented in **[agent-schedules.md](agent-schedules.md)**.
+Expression validation (the EventBridge cron dialect rules), the `description` and `nextRuns` read-back that every schedule response carries, the duplicate and name refusals on create and update, and the read-only audit of stored schedules are documented in **[agent-schedules.md](agent-schedules.md)**. What happens when a schedule keeps failing (the run statuses, the `failing` marker on `list`, and the owner DM) is documented in **[schedule-failure-notices.md](schedule-failure-notices.md)**.
 
 ### Scheduled Run Authoring Rules
 
@@ -1557,4 +1557,6 @@ Skills are published and managed through:
 
 - **[app-features/overview.md](../app-features/overview.md)** — Features agents interact with
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+**[api-integration/overview.md](../api-integration/overview.md)** — External API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment

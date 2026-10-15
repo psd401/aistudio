@@ -238,6 +238,11 @@ Repository readiness is derived from item counts, connector state, and generatio
 | `agent_workspace_tokens` | Token manifest |
 | `agent_workspace_consent_nonces` | One-time consent URLs, including `credential_entry` links whose `token_kind` was added by migration 187 (see [Credential Entry](../agent-platform/credential-entry.md)) |
 
+**Agent Schedules**
+| Table | Purpose |
+|-------|---------|
+| `agent_scheduled_runs` | One row per scheduled fire, keyed by `fire_key`, with `status` (`success`, `error`, `skipped`, `promoted`, `deferred`) and `owner_notified_at`, the stamp that records the one run of a failure streak that carried the owner's DM (migration 188). A partial index `idx_agent_scheduled_runs_streak` covers the streak-deciding statuses. See [Schedule Failure Streaks and Owner Notices](../agent-platform/schedule-failure-notices.md). Schedule definitions themselves are not in this table; see [Agent Schedules](../agent-platform/agent-schedules.md). |
+
 **Credential Management**
 | Table | Purpose |
 |-------|---------|
