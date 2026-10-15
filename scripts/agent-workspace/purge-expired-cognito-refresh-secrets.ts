@@ -1,0 +1,187 @@
+/**
+ * One-off cleanup: delete EXPIRED per-user Cognito refresh-token secrets (#1902).
+ *
+ * AI Studio used to write `psd-agent-creds/{env}/user/{email}/cognito-refresh`
+ * for every user on every sign-in, and nothing ever deleted them. At $0.40
+ * per secret per month, prod held 438 of them on 2026-10-12, 313 never read.
+ * The sign-in path is now update-only (`lib/auth/agent-token-sync.ts`), so no
+ * new orphans appear — this script clears the ones already there.
+ *
+ * It only deletes secrets whose stored refresh token is ALREADY EXPIRED, i.e.
+ * whose last write is older than the user pool's `RefreshTokenValidity`
+ * (30 days in aistudio-prod) plus a 1-day margin. Never-read but still-valid
+ * secrets are kept deliberately (Kris, 2026-10-12): deleting one would force
+ * a working user back through the consent link.
+ *
+ * Deletion uses `ForceDeleteWithoutRecovery: true` on purpose:
+ *   - A secret sitting in a recovery window makes `CreateSecret` fail with
+ *     `InvalidRequestException` ("The secret is scheduled for deletion"), which
+ *     would break the consent flow for that user for up to 30 days.
+ *   - The ECS task role has no `secretsmanager:RestoreSecret`
+ *     (`infra/lib/constructs/ecs-service.ts`), so the window is unusable anyway.
+ *   - Restoring would only bring back an already-expired token.
+ *
+ * SAFETY: dry-run by default — prints the plan and touches nothing. Pass
+ * `--apply` to actually delete. Secret names are printed only in dry run.
+ *
+ * Run (Kris runs this himself — do NOT run it automatically; dev first):
+ *   ENVIRONMENT=dev  AWS_REGION=us-east-1 bunx tsx scripts/agent-workspace/purge-expired-cognito-refresh-secrets.ts
+ *   ENVIRONMENT=prod AWS_REGION=us-east-1 bunx tsx scripts/agent-workspace/purge-expired-cognito-refresh-secrets.ts --apply
+ *
+ * Flags:
+ *   --apply               actually delete (default: dry run)
+ *   --max-age-days <n>    expiry threshold in days (default 31 = 30-day pool
+ *                         validity + 1 day margin)
+ */
+
+import {
+  SecretsManagerClient,
+  ListSecretsCommand,
+  DeleteSecretCommand,
+  ResourceNotFoundException,
+  type SecretListEntry,
+} from "@aws-sdk/client-secrets-manager"
+
+const APPLY = process.argv.includes("--apply")
+const ENV = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+const REGION = process.env.AWS_REGION ?? "us-east-1"
+
+const DEFAULT_MAX_AGE_DAYS = 31
+const DAY_MS = 24 * 60 * 60 * 1000
+
+function parseMaxAgeDays(argv: string[]): number {
+  const index = argv.indexOf("--max-age-days")
+  if (index === -1) return DEFAULT_MAX_AGE_DAYS
+  const raw = argv[index + 1]
+  const parsed = Number(raw)
+  if (!raw || !Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(
+      `--max-age-days needs a positive number, got ${raw === undefined ? "nothing" : `"${raw}"`}`,
+    )
+  }
+  return parsed
+}
+
+const PREFIX = `psd-agent-creds/${ENV}/user/`
+const SUFFIX = "/cognito-refresh"
+
+/**
+ * True for `psd-agent-creds/{ENV}/user/{email}/cognito-refresh` and nothing
+ * else. The `name` ListSecrets filter is a prefix match, so the suffix and the
+ * "exactly one path segment between" check are enforced here — otherwise a
+ * future `.../user/{email}/sub/path/cognito-refresh` slot would be swept too.
+ */
+function isUserCognitoRefreshSecret(name: string | undefined): name is string {
+  if (!name) return false
+  if (!name.startsWith(PREFIX) || !name.endsWith(SUFFIX)) return false
+  const middle = name.slice(PREFIX.length, name.length - SUFFIX.length)
+  return middle.length > 0 && !middle.includes("/")
+}
+
+/** Last time the secret VALUE changed, which is when the token was minted. */
+function lastWrite(secret: SecretListEntry): Date | null {
+  return secret.LastChangedDate ?? secret.CreatedDate ?? null
+}
+
+async function listCandidates(
+  sm: SecretsManagerClient,
+): Promise<SecretListEntry[]> {
+  const out: SecretListEntry[] = []
+  let nextToken: string | undefined
+  do {
+    const page = await sm.send(
+      new ListSecretsCommand({
+        MaxResults: 100,
+        NextToken: nextToken,
+        Filters: [{ Key: "name", Values: [PREFIX] }],
+      }),
+    )
+    for (const secret of page.SecretList ?? []) {
+      if (isUserCognitoRefreshSecret(secret.Name)) out.push(secret)
+    }
+    nextToken = page.NextToken
+  } while (nextToken)
+  return out
+}
+
+async function main() {
+  const maxAgeDays = parseMaxAgeDays(process.argv)
+  const cutoff = new Date(Date.now() - maxAgeDays * DAY_MS)
+  const sm = new SecretsManagerClient({ region: REGION })
+
+  console.log(
+    `[purge-cognito-refresh] env=${ENV} region=${REGION} apply=${APPLY} maxAgeDays=${maxAgeDays} cutoff=${cutoff.toISOString()}`,
+  )
+
+  const candidates = await listCandidates(sm)
+  const expired: SecretListEntry[] = []
+  let kept = 0
+  let undated = 0
+
+  for (const secret of candidates) {
+    const written = lastWrite(secret)
+    if (!written) {
+      // No timestamp at all — we cannot prove the token is expired, so keep it.
+      undated++
+      continue
+    }
+    if (written < cutoff) expired.push(secret)
+    else kept++
+  }
+
+  console.log(
+    `[purge-cognito-refresh] ${candidates.length} cognito-refresh secret(s): ${expired.length} expired, ${kept} still within validity, ${undated} with no timestamp (kept)`,
+  )
+
+  if (!APPLY) {
+    for (const secret of expired) {
+      console.log(
+        `  DRY-RUN would delete ${secret.Name} (last written ${lastWrite(secret)?.toISOString()})`,
+      )
+    }
+    console.log(
+      `[purge-cognito-refresh] dry run complete — re-run with --apply to execute`,
+    )
+    return
+  }
+
+  let deleted = 0
+  let notFound = 0
+  let failed = 0
+
+  for (const secret of expired) {
+    try {
+      await sm.send(
+        new DeleteSecretCommand({
+          SecretId: secret.ARN ?? secret.Name,
+          ForceDeleteWithoutRecovery: true,
+        }),
+      )
+      deleted++
+    } catch (err) {
+      if (err instanceof ResourceNotFoundException) {
+        notFound++
+      } else {
+        failed++
+        // Name is intentionally omitted in --apply mode; the ARN suffix is
+        // enough to find the row in CloudTrail without printing the email.
+        console.error(
+          `  FAILED to delete secret ${deleted + notFound + failed} of ${expired.length}: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+  }
+
+  console.log(
+    `[purge-cognito-refresh] done — deleted=${deleted} alreadyGone=${notFound} failed=${failed}`,
+  )
+  if (failed > 0) process.exitCode = 1
+}
+
+main().catch((err) => {
+  console.error(
+    "[purge-cognito-refresh] fatal:",
+    err instanceof Error ? err.message : String(err),
+  )
+  process.exit(1)
+})

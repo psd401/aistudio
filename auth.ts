@@ -10,6 +10,14 @@ import { createLogger } from "@/lib/auth/edge-logger"
  * Manager so the AgentCore agent (running in a different environment) can
  * authenticate to the data MCP server on their behalf.
  *
+ * **Update-only (#1902).** This path never creates the secret: it rotates one
+ * that already exists and no-ops when there is none. Creating a secret per
+ * signed-in user cost ~$125/month in secrets that were never read. The secret
+ * is created by `/agent-connect-data`, the consent page the `psd-data` skill
+ * links to whenever the token is missing or expired — so a user who never
+ * uses the agent never gets a secret, and a user who does gets one the first
+ * time the agent needs it.
+ *
  * Skipped outright on the Edge Runtime, and any failure (missing env vars,
  * IAM, AWS unavailable) is logged but does NOT break the auth flow.
  *

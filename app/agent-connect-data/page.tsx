@@ -11,7 +11,9 @@
  *   2. Require an active AI Studio session whose email matches the JWT's `sub`.
  *      If not signed in, surface a sign-in link with this page as `callbackUrl`.
  *   3. Capture the session's Cognito refresh token and write it to Secrets
- *      Manager at `psd-agent-creds/{env}/user/{email}/cognito-refresh`.
+ *      Manager at `psd-agent-creds/{env}/user/{email}/cognito-refresh`,
+ *      creating that secret if it does not exist yet. This is the only path
+ *      that creates it (#1902) — sign-in only rotates an existing secret.
  *   4. Burn the nonce (one-time use).
  *   5. Render confirmation. The user goes back to Chat and re-asks.
  *
@@ -85,7 +87,13 @@ async function processConsent(token: string | undefined, selfPath: string): Prom
   // Write the refresh token to Secrets Manager first (idempotent: put-or-
   // create). This way, if the write fails the nonce is still unconsumed and
   // the user can click the same link again to retry.
-  const arn = await syncCognitoRefreshForAgent(payload.sub, refreshToken)
+  //
+  // #1902: this consent page is the ONLY caller allowed to create the secret.
+  // The sign-in path is update-only, so a user who never connects the agent
+  // never gets a (billed, never-read) secret.
+  const arn = await syncCognitoRefreshForAgent(payload.sub, refreshToken, {
+    createIfMissing: true,
+  })
   if (!arn) {
     log.error(
       "Cognito-data consent: refresh-token sync returned null — IAM or env missing",
