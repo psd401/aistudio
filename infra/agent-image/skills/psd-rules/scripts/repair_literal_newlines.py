@@ -199,20 +199,29 @@ def _javascript_records(text):
     one of those carries no quote of its own, so a line-at-a-time scan would
     read it as a collapsed body.
 
+    Templates nest, so the scan carries a stack: a `${...}` interpolation is
+    code again (a collapsed body can hide in there), it ends at the `}` that
+    matches its own brace depth, and a backtick inside it opens a further
+    template rather than closing the outer one. A flat toggle read that inner
+    backtick as the end of the outer template and rewrote the working text
+    that followed.
+
     Returns None — meaning "do not repair this file" — when the stream cannot
-    be trusted: it ends inside a template or a block comment, or it meets a
-    `/` in code position that is neither `//` nor `/*`. That slash may open a
-    regex literal, where a backslash is ordinary, and telling a regex from a
-    division needs a real JS lexer: `/[/\\n]/` closes its character class with
-    the very character that would end the literal, and `return /\\n/.test(s)`
-    is a regex straight after an identifier character. Guessing got a valid
-    file rewritten, so an unclassifiable slash ends the scan instead.
+    be trusted: it ends unbalanced, or it meets a `/` in code position that is
+    neither `//` nor `/*`. That slash may open a regex literal, where a
+    backslash is ordinary, and telling a regex from a division needs a real JS
+    lexer: `/[/\\n]/` closes its character class with the very character that
+    would end the literal, and `return /\\n/.test(s)` is a regex straight
+    after an identifier character. Guessing got a valid file rewritten, so an
+    unclassifiable slash ends the scan instead.
     """
     records = {}
     row = 1
     column = 0
     state = "code"
     quote = ""
+    depth = 0       # brace depth of the code frame we are in
+    stack = []      # what to return to: ("code", depth) or ("template", 0)
     index = 0
     length = len(text)
 
@@ -240,7 +249,16 @@ def _javascript_records(text):
             if char in "\"'":
                 state, quote = "string", char
             elif char == "`":
-                state, quote = "template", char
+                stack.append(("code", depth))
+                state, depth = "template", 0
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                if depth == 0 and stack and stack[-1][0] == "template":
+                    stack.pop()
+                    state = "template"
+                else:
+                    depth = max(depth - 1, 0)
             elif char == "/":
                 nxt = text[index + 1] if index + 1 < length else ""
                 if nxt == "/":
@@ -249,7 +267,17 @@ def _javascript_records(text):
                     state = "block-comment"
                 else:
                     return None
-        elif state in ("string", "template"):
+        elif state == "template":
+            if char == "`":
+                frame = stack.pop() if stack else ("code", 0)
+                state, depth = frame
+            elif char == "$" and index + 1 < length and text[index + 1] == "{":
+                stack.append(("template", 0))
+                state, depth = "code", 0
+                index += 2
+                column += 2
+                continue
+        elif state == "string":
             if char == quote:
                 state = "code"
         elif state == "block-comment":
@@ -262,7 +290,7 @@ def _javascript_records(text):
         index += 1
         column += 1
 
-    if state in ("template", "block-comment"):
+    if state in ("template", "block-comment") or stack:
         return None
     return records
 
@@ -597,7 +625,18 @@ def main() -> int:
         return 0
 
     fixed = apply_repair(text, lines, language, records)
-    write_source(args.path, fixed, had_bom)
+    try:
+        write_source(args.path, fixed, had_bom)
+    except OSError as error:
+        # The original is still intact — write_source replaces atomically and
+        # cleans up its temp file — so report it on the documented channel
+        # instead of raising off-contract.
+        print(
+            f"unwritable: {args.path}: {error.strerror}. The file was NOT "
+            "modified.",
+            file=sys.stderr,
+        )
+        return 2
     print(
         f"repaired: {args.path} — line(s) {_describe(lines)} were collapsed; "
         f"{changing} literal escapes there became real newlines "

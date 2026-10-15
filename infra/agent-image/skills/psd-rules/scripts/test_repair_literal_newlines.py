@@ -125,6 +125,28 @@ HEALTHY_JS_REGEX = (
     "/[/\\n]/.test(c) || false;\n"
 )
 
+# Healthy JS with a template literal NESTED inside a `${...}` interpolation.
+# A flat backtick toggle reads the inner backtick as closing the outer
+# template, which put the text after it in code position and rewrote it.
+HEALTHY_JS_NESTED_TEMPLATE = (
+    "const x = `start ${`alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot`} "
+    "end of it`;\n"
+)
+
+# Healthy JS whose interpolation is ordinary and whose template text mentions
+# `\n` three times. The interpolation must not make this look collapsed.
+HEALTHY_JS_INTERPOLATION = (
+    "const msg = `Report for ${name} covering ${count} rows and "
+    "\\n\\n\\n separators`;\n"
+)
+
+# A collapsed body hiding INSIDE an interpolation. `${...}` is code again, so
+# this has to be found rather than written off as template text.
+COLLAPSED_JS_IN_INTERPOLATION = (
+    "const out = `${ (() => { const a = 1;\\nconst b = 2;\\n"
+    "console.log(a + b);\\nreturn a; })() }`;\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -203,6 +225,20 @@ class Diagnose(unittest.TestCase):
     def test_a_js_file_using_a_regex_literal_is_refused_not_guessed(self):
         self.assertEqual(
             rln.diagnose(HEALTHY_JS_REGEX, "r.js")[0], "ambiguous")
+
+    def test_a_nested_template_literal_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_NESTED_TEMPLATE, "n.js")[0], "clean")
+
+    def test_template_text_around_an_interpolation_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_INTERPOLATION, "i.js")[0], "clean")
+
+    def test_a_collapsed_body_inside_an_interpolation_is_found(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSED_JS_IN_INTERPOLATION, "i.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -447,6 +483,26 @@ class FileHandling(unittest.TestCase):
         self.assertIn("unreadable", proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
 
+    def test_an_unwritable_directory_exits_2_and_keeps_the_original(self):
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "x.py")
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(COLLAPSED)
+            os.chmod(directory, 0o555)
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("unwritable", proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
+            with open(path, encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), COLLAPSED)
+            # No temp file was left behind next to it.
+            os.chmod(directory, 0o755)
+            self.assertEqual(os.listdir(directory), ["x.py"])
+        finally:
+            os.chmod(directory, 0o755)
+            shutil.rmtree(directory)
+
     def test_an_empty_file_is_clean(self):
         path = self.write_temp(b"")
         try:
@@ -488,6 +544,17 @@ class Languages(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertEqual(content, HEALTHY_JS_REGEX)
         self.assertIn("regex", proc.stderr)
+
+    def test_a_healthy_js_nested_template_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_NESTED_TEMPLATE, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_NESTED_TEMPLATE)
+
+    def test_a_collapsed_interpolation_body_is_repaired(self):
+        proc, content = self.run_on(COLLAPSED_JS_IN_INTERPOLATION, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("repaired", proc.stdout)
+        self.assertIn("const b = 2;\n", content)
 
     def test_a_collapsed_js_file_is_repaired(self):
         proc, content = self.run_on(COLLAPSED_JS, ".js")
