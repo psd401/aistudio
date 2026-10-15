@@ -341,8 +341,8 @@ async function handleRepositoriesAddItem(
 
   // The row is re-read AFTER the canonical shadow-write, so `failed` here means
   // registration already failed and NOTHING is in flight — an agent told to
-  // "check back later" would poll forever. Report the three outcomes
-  // distinctly.
+  // "check back later" would poll forever, so it is reported distinctly from
+  // an add that is genuinely still in the pipeline.
   //
   // `searchable` is never true at this point, on either path, and saying
   // otherwise is the misreport this field exists to prevent:
