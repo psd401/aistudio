@@ -356,13 +356,14 @@ a differently-broken file, so the loop can repeat for many turns.
    - `clean` — no collapsed line. The escapes are legitimate, so stop
      looking at them and debug the actual error.
    - `ambiguous` (exit 2) — not sure, so the file is untouched. It says which
-     case it hit; two of them you can clear by hand: a collapsed line that
-     also carries a `//` comment, or one whose escapes are all inside a
-     comment — split that comment onto its own line and run it again.
-     Otherwise (escapes inside string literals, or a `.js`/`.ts` slash or
-     escaped quote it cannot classify without a real JS parser) do not re-run
-     it hoping for a different answer and do not rewrite the file — debug the
-     error, or ask the user if you are stuck.
+     case it hit, and three of them you can clear by hand: a collapsed line
+     that also carries a `//` comment, or one whose escapes are all inside a
+     comment (split that comment onto its own line), or a file that stops
+     lexing for an unrelated reason such as a bad indent (fix that first).
+     Then run it again. Otherwise (escapes inside string literals, or a
+     `.js`/`.ts` slash or escaped quote it cannot classify without a real JS
+     parser) do not re-run it hoping for a different answer and do not
+     rewrite the file — debug the error, or ask the user if you are stuck.
    - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
      The file is untouched; in those languages a literal `\n` cannot be told
      apart from prose. Fix it by hand, or move the logic into a `.py` file.
