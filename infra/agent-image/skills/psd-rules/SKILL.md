@@ -334,19 +334,42 @@ a differently-broken file, so the loop can repeat for many turns.
    beats one `python3 -c` that parses the first call's output.
 2. If you genuinely need a script, `write` it to a real `.py`/`.js` file, then
    run that file. Never pass a multi-line program as a `-c` argument.
-3. After writing a script file and **before running it**, `head -5` the file.
-   If you see a literal `\n`, the write did not land as intended. **Repair it —
-   do not rewrite it:**
+3. After writing a script file and **before running it**, check the whole file
+   for literal escapes (`grep -n '\\n' <file>`), not just its head — the
+   header lines are often fine and the body is what collapsed. If any turn up,
+   the write did not land as intended. **Repair it — do not rewrite it:**
 
    ```bash
    /opt/agentcore-venv/bin/python3 \
      /opt/psd-skills/psd-rules/scripts/repair_literal_newlines.py <file>
    ```
 
-   It prints `repaired` and the file is then runnable; `clean` means the
-   escapes are not your problem; `ambiguous` (exit 2) means the file has real
-   line structure and its `\n` are string literals in working code, so it was
-   left untouched.
+   It judges the file **line by line**, so a file whose header lines are fine
+   and whose body collapsed onto one line is repaired — only the collapsed
+   lines are touched, and an escape inside a string literal or a comment is
+   left as it is. It also drops the stray backslashes from `\"` and `\'` on
+   the lines it repairs. It repairs `.py`, `.js`/`.ts` and `.json` only.
+
+   - `repaired` — it names the lines it changed. **Run it. Do not rewrite
+     it.** If it still fails, the escapes were not the only problem; debug
+     the error you now get.
+   - `clean` — no collapsed line. The escapes are legitimate, so stop
+     looking at them and debug the actual error.
+   - `ambiguous` (exit 2) — not sure, so the file is untouched. It says which
+     case it hit, and three of them you can clear by hand: a collapsed line
+     that also carries a `//` comment, or one whose escapes are all inside a
+     comment (split that comment onto its own line), or a file that stops
+     lexing for an unrelated reason such as a bad indent (fix that first).
+     Then run it again. Otherwise (escapes inside string literals, or a
+     `.js`/`.ts` slash or escaped quote it cannot classify without a real JS
+     parser) do not re-run it hoping for a different answer and do not
+     rewrite the file — debug the error, or ask the user if you are stuck.
+   - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
+     The file is untouched; in those languages a literal `\n` cannot be told
+     apart from prose. Fix it by hand, or move the logic into a `.py` file.
+   - `unreadable` / `unwritable` (exit 2) — the path is missing, is not UTF-8
+     text, or could not be written. The file is untouched either way; check
+     the path before anything else.
 
    **Rewriting is the trap.** This step used to say "rewrite it as a file" —
    but it WAS a file, and `write` is what produced the literal `\n`. Rewriting
