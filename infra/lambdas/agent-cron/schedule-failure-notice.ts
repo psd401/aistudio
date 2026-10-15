@@ -10,9 +10,12 @@
  * ONE message per failure streak, and the suppression is a RECORDED FACT: the
  * run that carried the message is stamped `owner_notified_at` (migration 188),
  * and the rule stays quiet while ANY run in the current streak carries that
- * stamp — evaluated over the whole streak in SQL, never over a page of recent
- * runs, because a stamp that scrolls off the page reads as "nobody was told"
- * and the owner gets a second message, then a third. A success ends the
+ * stamp — aggregated in SQL over the streak's newest 500 runs, never over a
+ * small page of recent rows, because a stamp that scrolls off the page reads as
+ * "nobody was told" and the owner gets a second message, then a third. The
+ * 500-run bound is the one deliberate exception: a streak longer than that
+ * loses sight of its own stamp and the owner is reminded once more (see
+ * `FAILURE_STREAK_RUN_LIMIT` in `run-telemetry.ts`). A success ends the
  * streak, so the next three failures speak again.
  *
  * It is deliberately not inferred from the streak's length. Length says "this

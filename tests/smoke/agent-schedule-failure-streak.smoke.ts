@@ -20,6 +20,7 @@
 import assert from "node:assert/strict";
 import postgres from "postgres";
 import {
+  FAILURE_STREAK_RUN_LIMIT,
   FAILURE_STREAK_SQL,
   ownerNotifiedSql,
 } from "../../infra/lambdas/agent-cron/run-telemetry";
@@ -118,6 +119,42 @@ async function pageSizeCannotLoseTheStamp({ given, streak }: Harness) {
     "a month-long streak nobody was told about is not silently suppressed",
   );
   log.info("30-failure streak with no stamp: counted 30, speaks");
+}
+
+/**
+ * The one deliberate exception, pinned: the streak is read over its newest
+ * FAILURE_STREAK_RUN_LIMIT runs, so a stamp older than that is out of sight
+ * and the owner is reminded once more. A stamp inside the window still
+ * suppresses, and the count tops out at the limit rather than overstating.
+ */
+async function streakPastTheRunLimit({ given, streak }: Harness) {
+  const limit = FAILURE_STREAK_RUN_LIMIT;
+  await given([...failures(2), { ...FAIL, notified: true }, ...failures(limit)]);
+  let result = await streak();
+  assert.equal(
+    Number(result.failures),
+    limit,
+    "the count is bounded by the run limit",
+  );
+  assert.equal(
+    result.already_notified,
+    false,
+    "a stamp older than the run limit is out of sight — the documented reminder",
+  );
+
+  await given([
+    ...failures(2),
+    { ...FAIL, notified: true },
+    ...failures(limit - 1),
+  ]);
+  result = await streak();
+  assert.equal(Number(result.failures), limit);
+  assert.equal(
+    result.already_notified,
+    true,
+    "a stamp that is still the oldest run inside the limit still suppresses",
+  );
+  log.info(`past ${limit} runs: an older stamp re-notifies, one inside suppresses`);
 }
 
 /** A success bounds the streak, and takes its stamp out of scope with it. */
@@ -365,6 +402,13 @@ try {
         created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    // The production index from migration 188, so the statement runs against
+    // the access path it was written for.
+    await sql`
+      CREATE INDEX ON agent_scheduled_runs
+        (user_id, schedule_id, created_at DESC, id DESC)
+        WHERE status IN ('success', 'error', 'deferred')
+    `;
 
     const harness: Harness = {
       /** Insert runs oldest-first, as they would actually have arrived. */
@@ -414,6 +458,7 @@ try {
     };
 
     await pageSizeCannotLoseTheStamp(harness);
+    await streakPastTheRunLimit(harness);
     await successBoundsTheStreak(harness);
     await neutralRunsDecideNothing(harness);
     await newestErrorIsWhatClassifies(harness);

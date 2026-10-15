@@ -5,7 +5,10 @@ import {
   decideScheduleFailureNotice,
   isWorkspaceAuthFailure,
 } from './schedule-failure-notice';
-import type { ScheduleFailureStreak } from './run-telemetry';
+import {
+  FAILURE_STREAK_RUN_LIMIT,
+  type ScheduleFailureStreak,
+} from './run-telemetry';
 
 const ORDINARY = 'Agent temporarily unavailable';
 const REVOKED = 'Workspace authorization was revoked (invalid_grant)';
@@ -79,12 +82,14 @@ describe('decideScheduleFailureNotice — the issue #1890 acceptance tests', () 
     ).toEqual({ notify: false });
   });
 
-  test('the stamp suppresses at ANY streak length, not just the next one', () => {
+  test('the stamp suppresses at every streak length the SQL can report', () => {
     // Codex caught this on the first draft: the suppression used to be read
     // from a fixed page of recent runs, so a schedule notified on failure 3
     // looked unnotified again by failure 15 and sent another message — roughly
-    // hourly on a five-minute schedule. The streak is now aggregated whole.
-    for (const consecutiveFailures of [4, 15, 300, 10_000]) {
+    // hourly on a five-minute schedule. The streak is now aggregated over the
+    // newest FAILURE_STREAK_RUN_LIMIT runs, so that is the largest count the
+    // query returns; what happens past it is pinned in the PostgreSQL smoke.
+    for (const consecutiveFailures of [4, 15, 300, FAILURE_STREAK_RUN_LIMIT]) {
       expect(
         decide({
           consecutiveFailures,
