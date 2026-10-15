@@ -1861,6 +1861,70 @@ Upload → S3 → Lambda (Textract) → Chunk → Embed → pgvector
 - **Nexus attachments**: 500MB per file
 - **Document processing**: 25MB per file (configurable)
 
+### Repository MCP Tools (#1266, #1907)
+
+Repositories are reachable from MCP through two groups of tools. Both are handled in `lib/mcp/repository-tool-handlers.ts` (`REPOSITORY_TOOL_HANDLERS`), which `lib/mcp/tool-handlers.ts` spreads into `TOOL_HANDLERS`. Descriptors live in `lib/mcp/tool-registry.ts`, and catalog bindings (`requiredScope`, `destructive`) live in `lib/tools/catalog/manifest.ts`.
+
+- **Reads (#1266)**: `repositories_list`, `repositories_describe`, `repositories_search`, `repositories_get_source`, `repositories_list_changes`. They delegate to `lib/repositories/repository-catalog-service`.
+- **Writes (#1907)**: `repositories_create` (scope `repositories:create`) and `repositories_add_item` (scope `repositories:write`). Both are marked `destructive`, so agent loops confirm before writing. There is no REST create route. Binary and office files still use the presigned upload endpoints.
+
+**Authorization has two layers, and the scope is only the first.** The catalog `dispatch()` checks the scope. The write handler then re-checks the caller's live `knowledge-repositories` capability through `hasCapabilityAccess`. The reason is that an OAuth access token's scopes come from the grant, not from the holder's roles. `lib/api/auth-middleware.ts` reads `payload.scope` verbatim, so a student who authorized the first-party agent client could otherwise create repositories the UI never offers them. The re-check can only narrow access. `repositories_add_item` also requires owner-or-administrator rights through `canModifyUserManagedDurableRepository`. An absent, deleted, ephemeral, or system-managed repository returns `Repository not found`, so the tool never confirms that an id the caller cannot touch exists. That function now lives in `lib/repositories/repository-permissions.ts`. `actions/repositories/repository-permissions.ts` re-exports it so existing importers keep working. The general exception is documented in `docs/architecture/capabilities-and-scopes.md`, and the rationale is recorded in `docs/learnings/security/2026-10-15-oauth-scopes-not-role-filtered.md`.
+
+**Create.** `repositories_create` creates a durable repository owned by the caller with `isPublic: false`. Visibility widening and sharing stay human actions in Repository Manager. A blank description is treated as absent rather than rejected, so the MCP surface matches the UI.
+
+**Add item.** `repositories_add_item` accepts UTF-8 text only, up to 1 MiB (`REPOSITORY_INLINE_TEXT_MAX_BYTES`). Name is limited to 500 bytes and description to 2000 bytes (`REPOSITORY_NAME_MAX_BYTES`, `REPOSITORY_DESCRIPTION_MAX_BYTES`). All bounds count bytes, not characters. Content is stored verbatim. Only the blank check looks past whitespace.
+
+The write core is `createRepositoryTextItem` in `lib/repositories/repository-write-service.ts`. It has no session dependency, so the `addTextItem` Server Action in `actions/repositories/repository-items.actions.ts` and the MCP tool share one transaction and one canonical shadow-write. The `callerAction` input keeps each surface's log action and DB operation label distinct (`addTextItem` versus `repositories_add_item`). The service does not authorize. Every caller must authorize first.
+
+```mermaid
+sequenceDiagram
+    participant Caller as MCP caller
+    participant Dispatch as Catalog dispatch
+    participant Handler as handleRepositoriesAddItem
+    participant Cap as hasCapabilityAccess
+    participant ACL as canModifyUserManagedDurableRepository
+    participant Write as createRepositoryTextItem
+    participant Canon as shadowWriteCanonical
+    Caller->>Dispatch: tools/call repositories_add_item
+    Dispatch->>Dispatch: check requiredScope repositories:write
+    Dispatch->>Handler: args and context
+    Handler->>Handler: addItemSchema byte bounds
+    Handler->>Cap: knowledge-repositories capability for the live user
+    Handler->>ACL: owner or administrator, durable, user-managed
+    Handler->>Write: name, content, callerAction
+    Write->>Write: insert repository_items row, legacy chunk only when dual-write is off
+    Write->>Canon: canonical registration and processing dispatch
+    Canon-->>Write: writePath canonical or legacy
+    Write-->>Handler: re-read item with writePath
+    Handler-->>Caller: item, ingestion, searchable, note
+```
+
+*Caption: the add-item write path. The scope check runs before the handler, and both authorization checks run before any write.*
+
+**Ingestion and searchability.** The result reports `processingStatus`, `ingestion`, `searchable`, and `note`. The `searchable` value comes from the write path that was taken, not from `processingStatus`. The canonical worker can publish an item before the post-write re-read, so the status alone cannot tell the two paths apart.
+
+| Outcome | `ingestion` | `searchable` | Meaning for the agent |
+|---|---|---|---|
+| Canonical path (`writePath: "canonical"`) | `processing` | `no` | Accepted. Embedding and generation are still in the pipeline. Confirm with `repositories_search` before relying on it. |
+| Legacy path (`writePath: "legacy"`, dual-write off) | `completed` | `keyword` | Keyword-matchable through the chunk's generated `search_vector`, only by an untargeted `repositories_search`. A targeted search returns `REPOSITORY_NOT_READY`. The chunk's embedding stays NULL, so semantic search does not cover it until canonical ingestion. |
+| Registration failed (`processingStatus: "failed"`) | `failed` | `no` | Nothing is in flight. Retry the item. Do not poll. |
+
+When canonical registration throws, `shadowWriteCanonical` marks the item `failed` with a retry message and does not rethrow, because the legacy row is already committed. A legacy row is kept for rollback while `canonicalCutover` is off. No MCP tool reports one item's status afterwards. Rationale: `docs/learnings/logic/2026-10-15-repository-item-never-searchable-on-write-return.md`.
+
+**Client scope gate.** The first-party OpenClaw client must be allowed to request the write scopes, or its authorization request is rejected. See [OpenClaw Client Scopes (migration 189)](../api-integration/overview.md#openclaw-client-scopes-migration-189). The agent-side commands are in the `psd-aistudio` skill, described in the [Agent Platform overview](../agent-platform/overview.md).
+
+**Focused tests**:
+- `tests/unit/lib/mcp/repository-write-tools.test.ts` — `MCP repositories_create (#1907)` and `MCP repositories_add_item (#1907)` cover private default, capability refusal before ACL lookup, ACL masking, the ingestion and searchable states, byte bounds, and retry-on-failed wording. The `repository write catalog + scope wiring (#1907)` block covers the scope, catalog bindings, and client scopes.
+- `tests/unit/lib/repositories/repository-write-service-shadow-write.test.ts` — `shadowWriteCanonical` uses the rollout-gated registrar before cutover and the unconditional one after. A dispatch failure only logs a warning. A registration failure marks the item `failed` without rethrowing.
+- `infra/agent-image/skills/psd-aistudio/run.test.js` — skill command mapping for `repositories-create` and `repositories-add-item`, plus `--file` handling.
+- Agent behavior evals: `repository-create`, `repository-add-item`, and `repository-add-item-existing` are registered in `infra/agent-image/eval/suites/regression.yaml`. `infra/agent-image/test_eval_runner.py` requires the existing-repository case to be a negative check, so the agent must not call `repositories_create` when it should file into an existing repository. Rationale: `docs/learnings/testing/2026-10-15-negative-eval-must-assert-tool-call-not-prose.md`. The eval harness itself is in the [backlog](../quickstart.md#backlog).
+
+**Validation** (quiet by default, failures keep full diagnostics):
+- `bunx jest --silent tests/unit/lib/mcp/repository-write-tools.test.ts tests/unit/lib/repositories/repository-write-service-shadow-write.test.ts`
+- `cd infra/agent-image/skills/psd-aistudio && bun test run.test.js`
+
+**Change recipe: adding another repository write tool.** Add the Zod schema and handler in `lib/mcp/repository-tool-handlers.ts`, and register it in `REPOSITORY_TOOL_HANDLERS`. Re-check the capability and the ACL inside the handler. Add a descriptor in `lib/mcp/tool-registry.ts` and a binding in `lib/tools/catalog/manifest.ts`. If the scope is new, add it to `lib/api-keys/scopes.ts`. If the first-party agent must request it, update `AISTUDIO_OPENCLAW_SCOPES` and add a numbered migration. Then update the `psd-aistudio` skill. Regenerate the public catalog with `bun run capabilities:generate`, and confirm it with `bun run capabilities:check` instead of editing `docs/API/v1/generated/capability-catalog.json` by hand. Escalate to the Lambda and skill suites only when the agent image or skill runtime changes. Do not treat a passing handler unit test as proof that the tool is shipped. Also confirm that the tool resolves through `tools/list` from the catalog and that the skill command maps to it.
+
 ### Key Source Files
 
 | File | Purpose |

@@ -101,7 +101,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-directory` — Identity lookup for staff and colleagues by email or Google Chat sender ID
 
 **Content & Media**
-- `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio
+- `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio, including repository list/describe/search/source/changes and, since #1907, `repositories-create` and `repositories-add-item` (text items only, staff and administrator, gated by the live `knowledge-repositories` capability). The write contract and ingestion states are in **[app-features/overview.md](../app-features/overview.md#repository-mcp-tools-1266-1907)**
 - `psd-learning-page` — Multimodal UDL learning page generation
 - `psd-hyperframes` — HTML/CSS/JS to MP4 video rendering
 - `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3); enforces strict CSP — inline scripts/styles only, external CDN limited to allowlist (default: cdnjs.cloudflare.com), connect-src blocked
