@@ -866,7 +866,15 @@ async function activeJobLockIdentity(
   if (!tableName) return null;
   try {
     const result = await dynamoClient.send(
-      new GetCommand({ TableName: tableName, Key: { sessionId } })
+      // Strongly consistent: an eventually consistent read can miss a lock
+      // written moments ago (the turn then defers as workspace-contended with
+      // no notice) or return one just deleted (a misleading notice and a
+      // needless deferral).
+      new GetCommand({
+        TableName: tableName,
+        Key: { sessionId },
+        ConsistentRead: true,
+      })
     );
     const item = result.Item as
       | { kind?: string; expiresAt?: number; lockToken?: string }
