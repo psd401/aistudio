@@ -334,19 +334,27 @@ a differently-broken file, so the loop can repeat for many turns.
    beats one `python3 -c` that parses the first call's output.
 2. If you genuinely need a script, `write` it to a real `.py`/`.js` file, then
    run that file. Never pass a multi-line program as a `-c` argument.
-3. After writing a script file and **before running it**, `head -5` the file.
-   If you see a literal `\n`, the write did not land as intended. **Repair it —
-   do not rewrite it:**
+3. After writing a script file and **before running it**, check the whole file
+   for literal escapes (`grep -n '\\n' <file>`), not just its head — the
+   header lines are often fine and the body is what collapsed. If any turn up,
+   the write did not land as intended. **Repair it — do not rewrite it:**
 
    ```bash
    /opt/agentcore-venv/bin/python3 \
      /opt/psd-skills/psd-rules/scripts/repair_literal_newlines.py <file>
    ```
 
-   It prints `repaired` and the file is then runnable; `clean` means the
-   escapes are not your problem; `ambiguous` (exit 2) means the file has real
-   line structure and its `\n` are string literals in working code, so it was
-   left untouched.
+   It judges the file **line by line**, so a file whose header lines are fine
+   and whose body collapsed onto one line is repaired — only the collapsed
+   lines are touched, and a `\n` inside a string literal is left as it is. It
+   also drops the stray backslashes from `\"` and `\'` on those lines.
+
+   - `repaired` — it names the lines it changed; the file is now runnable.
+     **Run it. Do not rewrite it.**
+   - `clean` — no collapsed line, so the escapes are not your problem.
+   - `ambiguous` (exit 2) — it names the lines it would not touch: they look
+     collapsed but every escape there is inside a string literal, so the file
+     was left alone. The escapes are not the reason it is failing.
 
    **Rewriting is the trap.** This step used to say "rewrite it as a file" —
    but it WAS a file, and `write` is what produced the literal `\n`. Rewriting
