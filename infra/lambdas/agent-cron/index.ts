@@ -1967,8 +1967,11 @@ async function deliverScheduledResultWithDependencies(
         deliveryRequestId,
         log,
         // Carries THIS fire's identity so the router can resolve the deferred
-        // run row once the queued post lands (or dead-letters).
-        context.fireIdentity?.key,
+        // run row once the queued post lands (or dead-letters). Only for a run
+        // that succeeded: a failed run is not waiting on its delivery to know
+        // its outcome, and a key here would let the router settle it as
+        // `success` the moment its error message reached the owner.
+        result.ok ? context.fireIdentity?.key : undefined,
       );
     } catch (enqueueError) {
       const enqueueDetail = errorDetail(enqueueError);
@@ -2007,6 +2010,12 @@ async function deliverScheduledResultWithDependencies(
       );
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
+    // A failed run is `error` however its delivery goes (Codex P2 on PR
+    // #1925): recorded as `deferred`, the router would settle it as `success`
+    // once the queued error message landed, and a schedule failing on every
+    // run would reset its own streak whenever Chat hiccuped. The message
+    // itself is still queued above, so the owner still receives it.
+    if (!result.ok) return recordScheduledCompletion(context, dependencies);
     // The post did NOT happen; it is on the retry queue. Recording this as
     // success is the bug in #1890 — a run row said the brief was delivered
     // while the owner had nothing, and nothing ever came back to correct it.

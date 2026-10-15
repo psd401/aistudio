@@ -163,6 +163,29 @@ describe('a queued Chat retry is recorded as deferred, not success', () => {
     expect(recorded.enqueued[0][4]).toBeUndefined();
   });
 
+  test('a FAILED run whose post is queued stays error and carries no settle key', async () => {
+    // Codex P2 on PR #1925: recorded as `deferred` with the fire key, the
+    // router would settle a failed run as `success` once its error message
+    // landed, resetting the streak of a schedule that fails every run.
+    const { recorded, deps } = dependencies({ sendFails: true });
+
+    const outcome = await deliverScheduledResultWithDependencies(
+      context({ ok: false }),
+      deps,
+    );
+
+    // The owner still gets the error message, via the queue...
+    expect(recorded.enqueued).toHaveLength(1);
+    // ...but with nothing for the router to settle.
+    expect(recorded.enqueued[0][4]).toBeUndefined();
+    expect(recorded.runs).toHaveLength(1);
+    expect(recorded.runs[0]).toMatchObject({
+      status: 'error',
+      fireKey: FIRE_KEY,
+    });
+    expect(outcome).toEqual({ status: 'error', scheduleId: 'sched-morning' });
+  });
+
   test('a delivery that also fails to enqueue stays an outright error', async () => {
     const { recorded, deps } = dependencies({
       sendFails: true,
