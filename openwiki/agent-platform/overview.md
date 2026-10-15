@@ -1260,6 +1260,53 @@ The test suite validates:
 cd infra/lambdas/agent-cron && bun test owner-contention-wait.test.ts
 ```
 
+### Background-Job Deferral Acknowledgement (#1892)
+
+**Sources**: `/infra/lambdas/agent-router/index.ts` — `activeJobLockIdentity()`, `acknowledgeBackgroundJobDeferral()`, `backgroundJobAckClaimName()`, `BACKGROUND_JOB_DEFERRAL_NOTICE`, `invokeOwnerAgentWithDependencies()`
+
+Before this change, an owner message that arrived while a background job held the workspace lock got no reply. The router threw `WorkspaceTurnDeferredError` and requeued the turn for up to 180 attempts over three hours (`WORKSPACE_DEFER_MAX_ATTEMPTS`, `WORKSPACE_DEFER_MAX_AGE_SECONDS`). Staff typed follow-ups into the silence and restated their requests, which created duplicate work. The turn now says it is queued before it is deferred.
+
+#### Behavior
+
+- **Identify the job.** `activeJobLockIdentity()` does a `ConsistentRead` `GetItem` on the owner's session-locks row. It returns the lock's `lockToken` when the row has `kind: 'job'`, the session id for legacy job rows without a token, or `null`. A DynamoDB error or a missing table yields `null`, so message processing continues.
+- **Acknowledge once per job per thread.** When an identity is returned, `acknowledgeBackgroundJobDeferral()` posts `BACKGROUND_JOB_DEFERRAL_NOTICE` into the originating space and thread, then the turn throws `WorkspaceTurnDeferredError` with reason `background-job-active`. The notice is "I'm finishing another task first. I'll get to this message as soon as it's done." It avoids "your" because a scheduled run holds the same lock and the user never asked for it.
+- **Claim.** Suppression reuses the message-dedup table through `isDuplicateMessage`, under the synthetic name `job-ack#<jobToken>#<space>#<thread>` built by `backgroundJobAckClaimName()`. The claim TTL is the three-hour deferral window. A Chat message name never contains `#`, so the synthetic name cannot collide with a real one. A new job token gives the same thread a fresh claim. The claim fails open on DynamoDB errors, because a second reply is preferred over a silent thread.
+- **Release on failure.** The function never throws. If Chat refuses the notice (`failed` outcome) or the send throws, and this call took the claim, `releaseMessageClaimForRetry()` deletes it. The next SQS redelivery then claims and retries. A thread that was already acknowledged releases nothing, so one invocation cannot delete another's claim.
+- **Silent for contention.** A `workspace-contended` deferral, where a short turn briefly holds the lock and the retry comes within seconds, posts nothing and never touches the claim.
+
+```mermaid
+flowchart TD
+    turn["Owner turn arrives"] --> ident["activeJobLockIdentity: strongly consistent read of the lock row"]
+    ident -->|"null: no job"| acquire["tryAcquireSessionLock"]
+    ident -->|"jobToken"| claim["isDuplicateMessage on job-ack claim, TTL 3h"]
+    claim -->|"already claimed"| defer["throw WorkspaceTurnDeferredError background-job-active"]
+    claim -->|"new claim"| send["sendGoogleChatResponse with the notice"]
+    send -->|"delivered"| defer
+    send -->|"failed or throws"| release["releaseMessageClaimForRetry, then defer"]
+    acquire -->|"no lock"| contended["throw WorkspaceTurnDeferredError workspace-contended, no notice"]
+```
+
+*The notice is sent before the defer, and only for `background-job-active`. A refused or thrown send releases the claim so the next redelivery retries it.*
+
+#### Relationships
+
+- The lock row is written by the job runner. `agent-cron/job-lock.ts` writes `kind: 'job'` with a fresh random `lockToken` per run, and it locks the same `ownerWorkspaceLockId` as the router. A promoted run keeps its token, so promotion does not produce a second notice. The cron side of the same lock is covered in [Owner Workspace Contention Wait](#owner-workspace-contention-wait).
+- The lock lifecycle, including retention and release on front-door rejections, is covered in [Front-Door Rejection and Mutex Release](#front-door-rejection-and-mutex-release).
+
+#### Accepted Gaps
+
+- If the Lambda times out or crashes between the claim and the send, nothing releases the claim. That thread gets no notice for the rest of the job, which is accepted because claiming after the send would produce duplicate notices from concurrent redeliveries.
+- The legacy fallback (`lockToken ?? sessionId`) applies only to rows written before tokens existed. Back-to-back jobs on such rows can share one acknowledgement key, so the second job may go unacknowledged. These rows expire within the 30-minute lease.
+
+#### Change Guidance
+
+- **Start here**: `acknowledgeBackgroundJobDeferral()` and `activeJobLockIdentity()` in `infra/lambdas/agent-router/index.ts`, then the branch in `invokeOwnerAgentWithDependencies()` that checks `jobIdentity !== null`.
+- **Invariants**: the notice precedes the `background-job-active` throw; the claim key is per job token; the function never throws; a failed send releases only a claim this call took; the lock read stays strongly consistent.
+- **Dependency injection**: `activeJobLockIdentity`, `isDuplicateMessage`, `releaseMessageClaimForRetry`, and `sendGoogleChatResponse` are injected through `OwnerInvocationDependencies`, which the tests override.
+- **Focused tests**: `infra/lambdas/agent-router/index.test.ts`, suites `owner-DM aside routing and locks` (the notice replaces silence), `background-job deferral acknowledgement` (one reply per thread, per job, and a failed send still defers), and `background-job acknowledgement claim release` (refused or thrown sends release the claim, and the next redelivery delivers exactly one notice).
+- **Minimal validation**: `cd infra/lambdas/agent-router && bun test --test-name-pattern="background-job"`. Drop the pattern to run the full router suite (`bun run test:lambda:router`), which is needed when the change touches shared lock or dedup helpers.
+- **Non-goals**: do not add a notice for `workspace-contended`; that deferral is short and retries within seconds.
+
 ---
 
 ## Google Workspace Integration
