@@ -110,6 +110,11 @@ PYTHON = "python"
 JAVASCRIPT = "javascript"
 JSON = "json"
 
+# The line terminators JavaScript recognises besides `\n`. They end a string
+# or a line comment without being a line break for `split_lines`, which
+# breaks on `\n` alone.
+_JS_LINE_TERMINATORS = "\r  "
+
 _EXTENSIONS = {
     ".py": PYTHON,
     ".pyw": PYTHON,
@@ -329,6 +334,18 @@ def _javascript_records(text):
             index += 1
             continue
 
+        if char in _JS_LINE_TERMINATORS:
+            # A bare CR, U+2028 or U+2029 also ends a line in JavaScript, so
+            # it ends a string or a line comment — a CR-terminated `//`
+            # comment used to swallow the collapsed line after it. The row is
+            # NOT advanced: `split_lines` breaks on `\n` alone, and the record
+            # offsets have to stay aligned with it.
+            if state in ("string", "line-comment"):
+                state = "code"
+            index += 1
+            column += 1
+            continue
+
         if char == "\\" and index + 1 < length:
             nxt = text[index + 1]
             if state == "code" and nxt in "\"'`":
@@ -428,7 +445,7 @@ def records_for(text, language):
     if language == PYTHON:
         # The tokeniser outranks the per-line quote pairing: it is the only
         # thing that sees a line sitting inside a triple-quoted string.
-        apply_string_spans(records, python_string_spans(text))
+        apply_string_spans(records, python_string_spans(neutralised(text)))
     return records
 
 
@@ -488,6 +505,41 @@ def parses_cleanly(text, language):
     return False
 
 
+def neutralised(text):
+    r"""`text` with every literal `\n` and `\t` escape turned into two spaces.
+
+    What the tokeniser is given instead of the file itself. A backslash in
+    code position is a token error that stops the tokeniser dead, so the
+    lexical structure after the FIRST collapsed line was unknown — and a scan
+    resumed past that line can restart INSIDE an open string, where it marks
+    the string's own data as evidence. That rewrote a docstring's content
+    while leaving the real collapse alone.
+
+    Two spaces for two characters keeps every column offset identical, so the
+    spans this produces line up with the escape positions in the real text.
+    Quote escapes are left exactly as they are: they shape the lexical
+    structure the same way in both copies.
+    """
+    out = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\\" and index + 1 < length:
+            nxt = text[index + 1]
+            if nxt == "\\":
+                out.append("\\\\")
+                index += 2
+                continue
+            if nxt in "nt":
+                out.append("  ")
+                index += 2
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _tokenize_prefix(lines, start):
     """(tokens, failed_row) — tokens from ``lines[start:]`` up to the first
     error, with ``failed_row`` its 1-based row within that slice, or None when
@@ -540,9 +592,11 @@ def _python_spans(text, wanted):
     last allowed restart unprotected, which is the gap resuming exists to
     close.
 
-    Resuming can also mis-pair quotes in the fragment it restarts on, which
-    can only ever mark more escapes as legitimate — fewer repairs, never a
-    wrong one.
+    Resuming is a FALLBACK, for text that will not lex even after
+    `neutralised()`. It is not safe on its own: a resume that restarts inside
+    an open string reads the string's own data as code, which is the opposite
+    of generous — it rewrote a docstring's content. Callers pass the
+    neutralised copy so that the usual case needs no resuming at all.
     """
     lines = split_lines(text)
     spans = {}
@@ -747,7 +801,7 @@ def diagnose(text, path):
     comment_held = []
     collapsed_shebang = real_lines == 1 and text.startswith("#!")
     if broken_lines and language == PYTHON and not collapsed_shebang:
-        comments = python_comment_spans(text)
+        comments = python_comment_spans(neutralised(text))
         remaining = []
         for number in broken_lines:
             escapes = [r for r in records.get(number, []) if r[1] == "n"]

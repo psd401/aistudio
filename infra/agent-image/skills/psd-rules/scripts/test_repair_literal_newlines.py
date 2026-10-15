@@ -322,6 +322,27 @@ CODE_THEN_COMMENT_TAILS = (
     "\\n# third note here\\n"
 )
 
+# A collapsed line that OPENS a triple-quoted string, so the string's body is
+# on the next line. The tokeniser dies on the collapsed line, and a scan
+# resumed after it restarts INSIDE the open string, where it read the string's
+# own data as code: the docstring body was rewritten while the real collapse
+# was left alone. The tokeniser is handed a lexable copy now.
+COLLAPSED_OPENING_A_DOCSTRING = (
+    'import sys\\nDOC = """Lines\n'
+    "    Lines split on \\n\\n\\n and \\n\\n\\n here, for the legacy "
+    "export format.\n"
+    '"""\nprint(DOC)\nsys.exit(0)\n'
+)
+
+# A `//` comment terminated by a bare CR, then a collapsed line. A CR is a
+# JavaScript line terminator, so the comment ends there — treating only LF as
+# a terminator let the comment swallow the collapsed line and the file was
+# reported clean and left broken.
+CR_COMMENT_THEN_COLLAPSE = (
+    "// header\rconst a = 1;\\nconst b = 2;\\nconst c = a + b;"
+    "\\nconsole.log(c);\\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -527,6 +548,35 @@ class Diagnose(unittest.TestCase):
     def test_a_leading_code_piece_defeats_the_comment_only_proof(self):
         verdict, _real, _literal, lines = rln.diagnose(
             CODE_THEN_COMMENT_TAILS, "t.py")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_a_docstring_body_after_its_collapsed_opener_is_protected(self):
+        # The body line must not be treated as code just because the line
+        # that opened its string is the one that broke the tokeniser.
+        verdict, _real, _literal, _lines = rln.diagnose(
+            COLLAPSED_OPENING_A_DOCSTRING, "d.py")
+        # Line 2 is the string's body, so nothing on it may be rewritten.
+        # Only the "broken" verdict rewrites anything; the others name the
+        # lines they declined to touch.
+        self.assertNotEqual(verdict, "broken")
+
+    def test_neutralised_keeps_every_column_offset(self):
+        # The spans are compared against positions in the REAL text, so the
+        # lexable copy has to be the same length, character for character.
+        for original in (
+            'x = "a\\nb"\n',
+            "y = 1  # a\\tb\n",
+            'z = "a\\\\nb"\n',
+            'w = \\"a\\nb\\"\n',
+        ):
+            with self.subTest(text=original):
+                self.assertEqual(len(rln.neutralised(original)),
+                                 len(original))
+
+    def test_a_cr_ends_a_js_line_comment(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            CR_COMMENT_THEN_COLLAPSE, "m.js")
         self.assertEqual(verdict, "broken")
         self.assertEqual(lines, [1])
 
@@ -997,6 +1047,11 @@ class Languages(unittest.TestCase):
         self.assertIn("repaired", proc.stdout)
         compile(content, "<repaired>", "exec")
         self.assertTrue(content.startswith("x = 1\n# first note"))
+
+    def test_a_docstring_body_keeps_its_data_when_its_opener_collapsed(self):
+        proc, content = self.run_on(COLLAPSED_OPENING_A_DOCSTRING, ".py")
+        self.assertIn(proc.returncode, (0, 2))
+        self.assertIn("Lines split on \\n\\n\\n and", content)
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
