@@ -283,8 +283,8 @@ Migrations run via Lambda function:
 | `textract/` | OCR document processing |
 | `group-sync/` | Google Directory synchronization |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
-| `agent-router/` | Agent request routing with promoted turn recovery |
-| `agent-cron/` | Scheduled run invocation, telemetry, and silent reply delivery (#1853) |
+| `agent-router/` | Agent request routing with promoted turn recovery, and settlement of deferred scheduled runs (#1890) |
+| `agent-cron/` | Scheduled run invocation, telemetry, silent reply delivery (#1853), and owner notices for failing schedules (#1890) |
 | `document-processor-v2/` | SQS-driven document text extraction (PDF, Office, text) with a standard and a high-memory processor |
 
 ### Document Processor v2
@@ -328,9 +328,13 @@ flowchart TD
 
 The `agent-cron` Lambda handles scheduled agent runs (watchers, monitors, periodic briefs):
 
-**Scheduled Run Delivery**: On success, posts `📋 **{scheduleName}**\n\n{response}` to the owner's DM. On failure, records the error and notifies the owner. For scheduled runs that deliberately end in silence (e.g., watchers with no changes), the Lambda skips the Chat post entirely — no bare header, no fallback text.
+**Scheduled Run Delivery**: On success, posts `📋 *{scheduleName}*\n\n{response}` to the owner's DM (single-asterisk bold, because Google Chat shows `**` literally). On failure, records the error. For scheduled runs that deliberately end in silence (e.g., watchers with no changes), the Lambda skips the Chat post entirely — no bare header, no fallback text.
 
 **Silent Reply** (#1853): When the harness surfaces `metadata.silent`, `toInvokeResult()` maps it to `InvokeResult.silent` and `deliverScheduledResult()` records success without posting. This prevents noise from filling DMs with empty "📋 name" headers on every run.
+
+**Failure Notices and Deferred Settlement** (#1890): A scheduled run whose Chat post is queued for retry is recorded `deferred`, not `success`, and the router settles that row once the queued post lands or dead-letters. A failure that makes a schedule visibly broken (three consecutive failed runs, or one Google Workspace authorization failure such as a revoked grant) sends its owner one DM. The cron Lambda reads `APP_BASE_URL` and `AGENT_INTERNAL_API_KEY_SECRET_ID` only to mint the re-authorization link for that DM, and falls back to link-free wording when either is unset. Behavior, invariants, and tests are in **[agent-platform/schedule-failure-notices.md](../agent-platform/schedule-failure-notices.md)**.
+
+**Deploy order**: `infra/lib/agent-platform-stack.ts` makes the cron Lambda depend on the router (`cronLambda.node.addDependency(routerLambda)`). The router parses the Chat-delivery envelope with a strict key allowlist, so it must accept the new `scheduledRun` reference before the cron sends it. The dependency runs one way only, because the router does not reference the cron.
 
 For harness implementation details including the NO_REPLY token and `allow_silent` contract, see **[agent-platform/overview.md → Scheduled Run Silent Reply](../agent-platform/overview.md#scheduled-run-silent-reply-1853)**.
 
