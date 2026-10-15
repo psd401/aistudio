@@ -165,6 +165,15 @@ AI Studio includes a full OAuth2/OIDC provider implementation (Issue #686) for t
 - **Client Credentials** — Machine-to-machine authentication
 - **Delegated Token** — Agent-initiated short-lived tokens (Atrium §26.1)
 
+### OpenClaw Client Scopes (migration 189)
+
+The first-party OpenClaw client that agents connect through requests its scopes from `AISTUDIO_OPENCLAW_SCOPES` in `/lib/oauth/openclaw-client.ts`. The OIDC provider rejects an authorization request that asks for a scope not listed in the registered client's `allowed_scopes`, so the two must stay in step. Migration 189 (`/infra/database/schema/189-openclaw-repository-write-scopes.sql`) widened that column with `repositories:write` and `repositories:create` (#1907). The migration is only permission to request a scope. Each write is still checked on the server.
+
+- The migration updates only the first-party client, and only when its current scope set matches the pre-change set exactly, so an administrator-modified client is not overwritten.
+- Access tokens keep the scope snapshot they were issued with. An already-connected user must reconnect to obtain the new scopes. The `psd-aistudio` skill's insufficient-scope hint prints that remediation.
+- Changing the constant without a migration, or the migration without the constant, produces either a rejected consent request or a scope the client is not asked for. Keep both together. Tests: `/tests/unit/openclaw-repository-write-scopes-migration.test.ts`.
+- Historical rationale: `docs/learnings/workflow/2026-10-15-oauth-scope-add-requires-code-and-migration-in-order.md` (ordering of the code and migration change) and `docs/learnings/database/2026-10-15-jsonb-array-equality-order-sensitive-migration-guard.md` (why the migration's guard uses set containment instead of array equality).
+
 ---
 
 ## MCP Tools
@@ -184,6 +193,11 @@ Tools are cataloged in `/lib/tools/catalog/` and exposed on the `mcp` surface:
 | `mcp:execute_assistant` | `execute_assistant` | Execute an assistant via MCP |
 | `mcp:list_assistants` | `list_assistants` | List available assistants |
 | `mcp:get_decision_graph` | `get_decision_graph` | Get decision node details |
+| `repositories:list` (`repositories_list`, `repositories_describe`), `repositories:search`, `repositories:read` (`repositories_get_source`), `repositories:changes` | `repositories_list`, `repositories_describe`, `repositories_search`, `repositories_get_source`, `repositories_list_changes` | Read authorized repositories (#1266) |
+| `repositories:create` | `repositories_create` | Create a private repository owned by the caller (#1907, MCP only) |
+| `repositories:write` | `repositories_add_item` | Add a UTF-8 text item to a repository the caller owns or administers (#1907, MCP only) |
+
+The two write tools are destructive in the catalog (`lib/tools/catalog/manifest.ts`), and they re-check the live `knowledge-repositories` capability on every call. Their handlers, ingestion states, and authorization contract are documented in **[app-features/overview.md](../app-features/overview.md#repository-mcp-tools-1266-1907)**.
 
 **Atrium content tools** (`create_document`, `create_artifact`, `get_content`, `get_visibility`, `list_content`, `update_content`, `create_version`, `set_visibility`, `publish_content`, `unpublish_content`, `export_okf`, `import_okf`) are registered alongside these, scoped via `content:*`. See **[app-features/overview.md](../app-features/overview.md#mcp-tools)** for the full tool list and **[app-features/overview.md](../app-features/overview.md#visibility--grant-management-1763)** for visibility/grant management details including the grant target existence validation added in #1777.
 
@@ -229,6 +243,13 @@ API keys are scoped to specific permissions. Key scope categories:
 - `content:publish_internal`, `content:publish_public` — Content publishing
 - `content:delegate` — Agent authority to mint delegated tokens (never included in delegated tokens)
 
+### Repository Scopes
+- `repositories:list`, `repositories:read`, `repositories:search`, `repositories:changes` — Read authorized repositories (catalog reads, #1266)
+- `repositories:write` — Add uploaded items, or MCP text items, to repositories the principal can modify
+- `repositories:create` — Create repositories owned by the principal (MCP only, no REST route; #1907)
+
+Granting a scope is necessary but not sufficient for the write scopes. The write handlers also check the live `knowledge-repositories` capability. See **[app-features/overview.md](../app-features/overview.md#repository-mcp-tools-1266-1907)**.
+
 ### Platform & Tools
 - `models:read` — List AI models
 - `tools:read` — View tool catalog
@@ -244,7 +265,7 @@ API keys are scoped to specific permissions. Key scope categories:
 | Role | Key Capabilities |
 |------|------------------|
 | **Student** | `chat:read`, `chat:write`, `platform:read` |
-| **Staff** | Chat, assistants (read/list/execute), documents, graph read, MCP tools (execute but not capture) |
+| **Staff** | Chat, assistants (read/list/execute), documents, graph read, MCP tools (execute but not capture), repository read and write scopes (`repositories:*`, including `repositories:create`) |
 | **Administrator** | All scopes including `graph:write`, `mcp:capture_decision`, `content:delegate` |
 
 ---
@@ -258,6 +279,6 @@ API keys are scoped to specific permissions. Key scope categories:
 | OpenAPI Spec | `/docs/API/v1/openapi.yaml` |
 | API Key Scopes | `/lib/api-keys/scopes.ts` |
 | OAuth/OIDC Provider | `/lib/oauth/oidc-provider-config.ts` |
-| MCP Tool Handlers | `/lib/mcp/tool-handlers.ts` |
+| MCP Tool Handlers | `/lib/mcp/tool-handlers.ts` (repository tools in `/lib/mcp/repository-tool-handlers.ts`) |
 | Tool Catalog | `/lib/tools/catalog/catalog.ts` |
 | Capability Catalog | `/lib/capabilities/capability-catalog.ts` |
