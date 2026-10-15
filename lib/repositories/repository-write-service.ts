@@ -88,6 +88,18 @@ export interface CreateRepositoryTextItemInput {
 }
 
 /**
+ * Which pipeline an inline-text item was written through. Callers that report
+ * readiness MUST use this, not `processingStatus`: the canonical worker can
+ * publish the item (`completed`) before the post-write re-read, which would
+ * make a canonical item indistinguishable from a legacy one by status alone.
+ */
+export type RepositoryTextWritePath = "canonical" | "legacy";
+
+export type CreatedRepositoryTextItem = SelectRepositoryItem & {
+  writePath: RepositoryTextWritePath;
+};
+
+/**
  * Shadow-write inline text through the canonical S3 / version / generation /
  * embedding pipeline.
  *
@@ -95,6 +107,10 @@ export interface CreateRepositoryTextItemInput {
  * owner can retry it) rather than failing the whole add, because the legacy row
  * is already committed. `canonicalRequired` is true after the Repository Manager
  * cutover, when the canonical version is the ONLY searchable copy.
+ *
+ * Returns the path the item took: `legacy` only when no canonical version was
+ * attempted (dual-write off, pre-cutover); every attempt — registered or
+ * failed — is `canonical`.
  */
 async function shadowWriteCanonicalText(
   input: {
@@ -107,12 +123,12 @@ async function shadowWriteCanonicalText(
   },
   log: ReturnType<typeof createLogger>,
   canonicalRequired = false
-): Promise<void> {
+): Promise<RepositoryTextWritePath> {
   try {
     const canonical = canonicalRequired
       ? await registerCanonicalText(input)
       : await registerCanonicalTextIfEnabled(input);
-    if (!canonical) return;
+    if (!canonical) return "legacy";
 
     log.info("Canonical inline text version registered", {
       itemId: input.itemId,
@@ -138,6 +154,7 @@ async function shadowWriteCanonicalText(
         }
       );
     }
+    return "canonical";
   } catch (error) {
     await updateRepositoryItemStatus(
       input.itemId,
@@ -154,6 +171,7 @@ async function shadowWriteCanonicalText(
       itemId: input.itemId,
       error: error instanceof Error ? error.message : "Unknown error",
     });
+    return "canonical";
   }
 }
 
@@ -167,7 +185,7 @@ async function shadowWriteCanonicalText(
  */
 export async function createRepositoryTextItem(
   input: CreateRepositoryTextItemInput
-): Promise<SelectRepositoryItem> {
+): Promise<CreatedRepositoryTextItem> {
   const log = createLogger({
     requestId: input.traceId,
     action: input.callerAction,
@@ -223,7 +241,7 @@ export async function createRepositoryTextItem(
   // legacy row for rollback, but shadow-write a repository-scoped text object so
   // Retrieval v2 receives an immutable version, generation, embeddings, and
   // exact citation through the same worker as file uploads.
-  await shadowWriteCanonicalText(
+  const writePath = await shadowWriteCanonicalText(
     {
       itemId,
       repositoryId: input.repositoryId,
@@ -240,5 +258,5 @@ export async function createRepositoryTextItem(
   if (!item) {
     throw ErrorFactories.dbRecordNotFound("repository_items", itemId);
   }
-  return item;
+  return { ...item, writePath };
 }

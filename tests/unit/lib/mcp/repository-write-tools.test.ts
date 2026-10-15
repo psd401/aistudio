@@ -244,6 +244,7 @@ describe("MCP repositories_add_item (#1907)", () => {
     processingStatus: "pending",
     processingError: null,
     createdAt: new Date("2026-10-14T00:00:00.000Z"),
+    writePath: "canonical",
   }
 
   it("adds the item once the capability and repository ACL both pass", async () => {
@@ -344,6 +345,7 @@ describe("MCP repositories_add_item (#1907)", () => {
     mockCreateRepositoryTextItem.mockResolvedValue({
       ...item,
       processingStatus: "completed",
+      writePath: "legacy",
     })
 
     const result = await TOOL_HANDLERS.repositories_add_item(
@@ -355,6 +357,26 @@ describe("MCP repositories_add_item (#1907)", () => {
     expect(payload(result).searchable).toBe("keyword")
     expect(payload(result).note).toContain("by keyword match only")
     expect(payload(result).note).not.toMatch(/backfill|start once/i)
+  })
+
+  it("does not mistake a canonical item the worker already published for legacy", async () => {
+    // Race: the canonical worker can publish the item (`completed`) before the
+    // handler's re-read. Readiness comes from the write path, not the status,
+    // so this must NOT be reported as keyword-only legacy content.
+    mockCreateRepositoryTextItem.mockResolvedValue({
+      ...item,
+      processingStatus: "completed",
+      writePath: "canonical",
+    })
+
+    const result = await TOOL_HANDLERS.repositories_add_item(
+      { repositoryId: 42, name: "Bell times", content: "7:45 AM" },
+      CONTEXT
+    )
+
+    expect(payload(result).searchable).toBe("no")
+    expect(payload(result).ingestion).toBe("processing")
+    expect(payload(result).note).not.toContain("keyword match only")
   })
 
   it("tells the agent to RETRY, not poll, when ingestion already failed", async () => {

@@ -345,20 +345,24 @@ async function handleRepositoriesAddItem(
   // an add that is genuinely still in the pipeline.
   //
   // `searchable` reports what `repositories_search` can do with the item right
-  // now, per path:
-  //   - canonical path: status is `pending` and the generation/embedding the
-  //     retrieval queries select on does not exist yet → "no";
-  //   - legacy path (content dual-write off): status is `completed`
-  //     immediately and the chunk's `search_vector` is a GENERATED column, so
-  //     retrieval v2's legacy-compatibility candidates (on by default for
-  //     `repositories_search`, every mode) match it by keyword at once. Its
-  //     embedding stays NULL: with no canonical version/generation, neither
-  //     embedding-recovery (claims generation chunks only) nor dense
-  //     retrieval (active canonical generations only) ever reaches it, so it
-  //     is keyword-only until the repository moves to canonical ingestion
+  // now, per WRITE PATH — taken from the write service, never inferred from
+  // `processingStatus`: the canonical worker can publish the item (`completed`)
+  // before the re-read above, which would make a canonical item look legacy.
+  //   - canonical path: no active generation/embedding is guaranteed yet → "no",
+  //     `processing`. If the worker already won the race this understates
+  //     readiness for a moment; it never overclaims, and the note tells the
+  //     agent to confirm with repositories_search.
+  //   - legacy path (content dual-write off, pre-cutover): status is
+  //     `completed` immediately and the chunk's `search_vector` is a GENERATED
+  //     column, so retrieval v2's legacy-compatibility candidates (on by
+  //     default for `repositories_search`, every mode) match it by keyword at
+  //     once. Its embedding stays NULL: with no canonical version/generation,
+  //     neither embedding-recovery (claims generation chunks only) nor dense
+  //     retrieval (active canonical generations only) ever reaches it, so it is
+  //     keyword-only until the repository moves to canonical ingestion
   //     → "keyword".
   const failed = item.processingStatus === "failed"
-  const legacyCompleted = item.processingStatus === "completed"
+  const legacyCompleted = !failed && item.writePath === "legacy"
   return ok({
     item: {
       id: item.id,
