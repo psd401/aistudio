@@ -75,7 +75,8 @@ and not reachable by a link.
 ## Working with psd-html-artifact
 
 The natural pairing: `psd-html-artifact` for the design, this for the print
-copy. Build the page first, write it to `/tmp`, then print it.
+copy. Build the page first, write it under `/home/node/.openclaw/work/`, then
+print it.
 
 Note that `psd-html-artifact` publishes to Atrium and returns a reader URL,
 which is a different deliverable — a page to read online, not a file to print.

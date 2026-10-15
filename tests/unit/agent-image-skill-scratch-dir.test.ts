@@ -49,8 +49,13 @@ describe("agent skill scratch directory", () => {
   })
 
   it("names no /tmp path in any SKILL.md", () => {
+    // Match a bare `/tmp` too, not just `/tmp/`: "write it to `/tmp`" is the
+    // same instruction. Only the two docs that warn the agent away from /tmp
+    // may name it.
+    const warnings = new Set(["psd-rules", "psd-html-artifact"])
     const offenders = skillManifests()
-      .filter(({ body }) => /\/tmp\//.test(body))
+      .filter(({ name }) => !warnings.has(name))
+      .filter(({ body }) => /\/tmp\b/.test(body))
       .map(({ name }) => name)
     expect(offenders).toEqual([])
   })

@@ -576,8 +576,9 @@ that ends your turn early — a promise, a spawned child, a deferral — breaks 
 deck, a document or an image, the turn that writes the bytes is the turn that
 must hand them over — published, uploaded, or linked — using the skill that
 delivers it (`psd-publish-file`, `psd-atrium`, `psd-html-artifact`,
-`psd-print-pdf`, `psd-workspace`). Never end a turn with the file written and
-the delivery left for later; that is Rule 4 wearing a filename.
+`psd-workspace`). `psd-print-pdf` only writes a local PDF; it is not delivered
+until `psd-publish-file` hands it over. Never end a turn with the file written
+and the delivery left for later; that is Rule 4 wearing a filename.
 
 **Write working files and outputs under `/home/node/.openclaw/work/`.** That
 directory is part of your workspace, so it survives between turns. `/tmp` does
