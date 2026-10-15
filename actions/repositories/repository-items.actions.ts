@@ -941,6 +941,7 @@ export async function addTextItem(
       name: input.name,
       content: input.content,
       traceId: requestId,
+      callerAction: "addTextItem",
     })
     const itemId = itemRaw.id
 

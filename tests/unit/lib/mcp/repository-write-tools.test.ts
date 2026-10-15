@@ -31,14 +31,18 @@ jest.mock("@/lib/db/drizzle", () => ({
   createRepository: (...args: unknown[]) => mockCreateRepository(...args),
   hasCapabilityAccess: (...args: unknown[]) => mockHasCapabilityAccess(...args),
 }))
-jest.mock("@/actions/repositories/repository-permissions", () => ({
+jest.mock("@/lib/repositories/repository-permissions", () => ({
   __esModule: true,
   canModifyUserManagedDurableRepository: (...args: unknown[]) =>
     mockCanModify(...args),
 }))
+// Only the write call is stubbed; the BOUNDS come from the real module so a
+// change to a cap is reflected here instead of being shadowed by a mock value.
 jest.mock("@/lib/repositories/repository-write-service", () => ({
   __esModule: true,
-  REPOSITORY_INLINE_TEXT_MAX_BYTES: 1024 * 1024,
+  ...jest.requireActual<
+    typeof import("@/lib/repositories/repository-write-service")
+  >("@/lib/repositories/repository-write-service"),
   createRepositoryTextItem: (...args: unknown[]) =>
     mockCreateRepositoryTextItem(...args),
 }))
@@ -96,11 +100,15 @@ jest.mock("@/lib/capabilities/capability-catalog", () => ({
   buildCapabilityCatalog: jest.fn(() => ({})),
 }))
 
+import fs from "node:fs"
+import path from "node:path"
+
 import { TOOL_HANDLERS } from "@/lib/mcp/tool-handlers"
 import { MCP_TOOLS } from "@/lib/mcp/tool-registry"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 import { API_SCOPES, ROLE_SCOPES } from "@/lib/api-keys/scopes"
 import { AISTUDIO_OPENCLAW_SCOPES } from "@/lib/oauth/openclaw-client"
+import { REPOSITORY_INLINE_TEXT_MAX_BYTES } from "@/lib/repositories/repository-write-service"
 
 const CONTEXT = {
   userId: 7,
@@ -230,6 +238,9 @@ describe("MCP repositories_add_item (#1907)", () => {
       name: "Bell times",
       content: "7:45 AM",
       traceId: "request-1",
+      // Distinct from the Server Action's "addTextItem" so the shared write
+      // service's logs and DB operation label still say which surface wrote.
+      callerAction: "repositories_add_item",
     })
     expect(payload(result).item).toEqual({
       id: 900,
@@ -284,6 +295,50 @@ describe("MCP repositories_add_item (#1907)", () => {
     expect(mockCreateRepositoryTextItem).not.toHaveBeenCalled()
   })
 
+  it("reports that an item still processing is NOT searchable yet", async () => {
+    mockCreateRepositoryTextItem.mockResolvedValue(item)
+
+    const result = await TOOL_HANDLERS.repositories_add_item(
+      { repositoryId: 42, name: "Bell times", content: "7:45 AM" },
+      CONTEXT
+    )
+
+    // After the Repository Manager cutover the canonical generation is the only
+    // searchable copy and ingestion is asynchronous, so a bare success would
+    // let an agent conclude its own write is immediately findable.
+    expect(payload(result).searchable).toBe(false)
+    expect(payload(result).note).toContain("NOT searchable yet")
+  })
+
+  it("reports a completed item as searchable", async () => {
+    mockCreateRepositoryTextItem.mockResolvedValue({
+      ...item,
+      processingStatus: "completed",
+    })
+
+    const result = await TOOL_HANDLERS.repositories_add_item(
+      { repositoryId: 42, name: "Bell times", content: "7:45 AM" },
+      CONTEXT
+    )
+
+    expect(payload(result).searchable).toBe(true)
+  })
+
+  it("preserves content verbatim while rejecting whitespace-only content", async () => {
+    mockCreateRepositoryTextItem.mockResolvedValue(item)
+
+    await TOOL_HANDLERS.repositories_add_item(
+      { repositoryId: 42, name: "n", content: "  indented\n  lines  " },
+      CONTEXT
+    )
+
+    // The name is trimmed; the body is stored exactly as sent, so Markdown
+    // indentation and trailing newlines survive.
+    expect(mockCreateRepositoryTextItem).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "  indented\n  lines  " })
+    )
+  })
+
   it("bounds content by UTF-8 BYTES, not characters", async () => {
     // 600k 2-byte characters is 1.2 MB — under a 1 MiB *character* count but
     // over the byte budget the stored column and S3 object actually pay for.
@@ -329,6 +384,36 @@ describe("repository write catalog + scope wiring (#1907)", () => {
   it("defines the new repositories:create scope", () => {
     expect(API_SCOPES["repositories:create"]).toBe(
       "Create repositories owned by the API principal"
+    )
+  })
+
+  it("bounds the item name by UTF-8 bytes, like the content", async () => {
+    // 200 four-byte emoji is 800 bytes — under a 500-CHARACTER cap but over the
+    // 500-BYTE one the unbounded text column actually pays for.
+    const result = await TOOL_HANDLERS.repositories_create(
+      { name: "\u{1F600}".repeat(200) },
+      CONTEXT
+    )
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0].text).toContain("bytes")
+  })
+
+  it("keeps the agent skill's local byte cap equal to the server's", () => {
+    // run.js is a standalone CJS script in the agent image: it cannot import
+    // from the Next.js tree, so its cap is a copy. Without this check the copy
+    // drifts silently and the skill accepts payloads the server then rejects.
+    const runJs = fs.readFileSync(
+      path.join(
+        process.cwd(),
+        "infra/agent-image/skills/psd-aistudio/run.js"
+      ),
+      "utf8"
+    )
+    const declared = /REPOSITORY_ITEM_MAX_BYTES = (\d+) \* (\d+);/.exec(runJs)
+    expect(declared).not.toBeNull()
+    expect(Number(declared?.[1]) * Number(declared?.[2])).toBe(
+      REPOSITORY_INLINE_TEXT_MAX_BYTES
     )
   })
 

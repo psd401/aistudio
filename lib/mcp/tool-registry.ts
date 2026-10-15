@@ -696,7 +696,7 @@ Example:
   {
     name: "repositories_add_item",
     description:
-      "Add a text item to an existing repository the authenticated caller owns or administers. The content is ingested through the same immutable version, generation, and embedding pipeline as an uploaded file, so it becomes searchable once processing completes.",
+      "Add a text item to an existing repository the authenticated caller owns or administers. Ingestion is ASYNCHRONOUS: the result carries `processingStatus` and a `searchable` flag, and until processing completes the item will NOT be found by repositories_search. A repository the caller cannot modify — and one that is absent, deleted, or system-managed — is reported as 'Repository not found', which means 'not yours', not necessarily 'does not exist'.",
     inputSchema: {
       type: "object",
       properties: {

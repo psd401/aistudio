@@ -272,6 +272,12 @@ function parseImportEnvelope(args) {
   return envelope;
 }
 
+/** Scopes a shared, read-only credential can never hold (#1907). */
+const REPOSITORY_WRITE_SCOPES = new Set([
+  "repositories:create",
+  "repositories:write",
+]);
+
 function requiredScopeForTool(toolName) {
   const repositoryScopes = {
     repositories_list: "repositories:list",
@@ -307,6 +313,15 @@ function scopeHint(keySource, scope) {
       `${scope} in AI Studio (Settings → API Keys). ${ENTRY_LINK_HINT}`
     );
   }
+  if (REPOSITORY_WRITE_SCOPES.has(scope)) {
+    // No public-repository branch here: write authority never comes from the
+    // shared read-only credential, whatever the target repository's visibility.
+    return (
+      `Writing to repositories needs ${scope}, which the shared read-only ` +
+      `credential never holds. Connect owner-bound AI Studio OAuth with ` +
+      "`connect --user <your-email>`."
+    );
+  }
   if (scope.startsWith("repositories:")) {
     return (
       `The shared read-only credential supports public repositories. If this ` +
@@ -331,9 +346,10 @@ function surfaceToolError(res, toolName) {
   if (res.jsonrpcError) {
     const msg = (res.jsonrpcError && res.jsonrpcError.message) || "";
     const insufficient = /insufficient scope/i.test(msg);
-    // Every MCP tool's required scope is `mcp:<toolName>` (see
-    // lib/tools/catalog/manifest.ts) — the server is the real enforcement point;
-    // this only makes the hint specific.
+    // requiredScopeForTool() mirrors lib/tools/catalog/manifest.ts: the
+    // repository tools carry their own `repositories:*` scopes and everything
+    // else falls back to `mcp:<toolName>`. The server is the real enforcement
+    // point; this only makes the hint specific.
     emit({
       status: "mcp-error",
       tool: toolName,
@@ -602,8 +618,16 @@ async function repositoriesAddItemCommand(args, email) {
   if ((inline === undefined) === (file === undefined)) {
     fail("Provide exactly one of --content or --file");
   }
-  const content =
-    inline !== undefined ? inline : readRepositoryItemFile(file);
+  let content = inline;
+  if (content === undefined) {
+    // Mirror parseImportEnvelope: a bad path, a non-regular file, or an
+    // oversized one is a USAGE error (exit 1), not an internal one (exit 2).
+    try {
+      content = readRepositoryItemFile(file);
+    } catch (error) {
+      fail(`Unable to read --file: ${error.message}`);
+    }
+  }
   await runToolAndEmit(
     "repositories_add_item",
     { repositoryId, name: requireStr(args, "name", "name"), content },

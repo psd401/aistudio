@@ -57,6 +57,16 @@ import type { SelectRepositoryItem } from "@/lib/db/types";
  */
 export const REPOSITORY_INLINE_TEXT_MAX_BYTES = 1024 * 1024;
 
+/**
+ * Longest accepted repository/item name and repository description, in UTF-8
+ * bytes. The underlying columns are unbounded `text`, so these are the API
+ * boundary's bounds, not the database's. Bytes rather than characters for the
+ * same reason the content cap is: a CJK or emoji name costs up to 4x what its
+ * `.length` suggests.
+ */
+export const REPOSITORY_NAME_MAX_BYTES = 500;
+export const REPOSITORY_DESCRIPTION_MAX_BYTES = 2000;
+
 export interface CreateRepositoryTextItemInput {
   repositoryId: number;
   /** Already-authorized acting user. NOT verified here. */
@@ -64,6 +74,17 @@ export interface CreateRepositoryTextItemInput {
   name: string;
   content: string;
   traceId: string;
+  /**
+   * The calling surface, used as the log `action` tag and the DB operation
+   * label (for example `addTextItem` for the Server Action,
+   * `repositories_add_item` for the MCP tool).
+   *
+   * Passed in rather than hard-coded: the extraction would otherwise collapse
+   * both surfaces onto one label, and every existing dashboard or alert keyed
+   * on `action: "addTextItem"` would stop matching while the two callers became
+   * indistinguishable in the logs.
+   */
+  callerAction: string;
 }
 
 /**
@@ -149,6 +170,7 @@ export async function createRepositoryTextItem(
 ): Promise<SelectRepositoryItem> {
   const log = createLogger({
     requestId: input.traceId,
+    action: input.callerAction,
     module: "repository-write-service",
   });
 
@@ -195,7 +217,7 @@ export async function createRepositoryTextItem(
     }
 
     return newItem.id;
-  }, "createRepositoryTextItem");
+  }, input.callerAction);
 
   // Inline text previously bypassed the canonical pipeline entirely. Keep the
   // legacy row for rollback, but shadow-write a repository-scoped text object so

@@ -696,13 +696,13 @@ test('repositories-add-item reads --file from disk', async () => {
   }
 });
 
-test('repositories-add-item rejects a file over the 1 MiB bound (exit 2)', async () => {
+test('repositories-add-item rejects a file over the 1 MiB bound (exit 1)', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-aistudio-item-'));
   const file = path.join(dir, 'big.txt');
   // Test-owned path created immediately above.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   fs.writeFileSync(file, 'x'.repeat(1024 * 1024 + 1));
-  let error;
+  let code;
   try {
     await run(
       'repositories-add-item',
@@ -714,12 +714,55 @@ test('repositories-add-item rejects a file over the 1 MiB bound (exit 2)', async
       file
     );
   } catch (err) {
-    error = err;
+    code = err.code;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-  expect(error).toBeDefined();
+  // A bad --file is a USAGE error, same as create-assistant's identical flow —
+  // not exit 2 ("internal/unexpected"), which would tell the agent to treat a
+  // typo'd path as a platform fault.
+  expect(code).toBe(1);
   expect(toolCalls).toHaveLength(0);
+});
+
+test('repositories-add-item reports a missing --file path as a usage error', async () => {
+  let code;
+  try {
+    await run(
+      'repositories-add-item',
+      '--repository-id',
+      '42',
+      '--name',
+      'Missing',
+      '--file',
+      path.join(os.tmpdir(), 'psd-aistudio-does-not-exist-1907.md')
+    );
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('the shared read-only key gets an OAuth-only hint for repository write scopes', async () => {
+  toolResponder = () => ({
+    isError: false,
+    jsonrpcError: { message: 'Insufficient scope for tool: repositories_create' },
+    keySource: 'shared',
+  });
+  let code;
+  try {
+    await run('repositories-create', '--name', 'Notes');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(emitted[0].status).toBe('mcp-error');
+  // The pre-#1907 repositories:* hint offered a "public repository" path, which
+  // cannot apply to a write — write authority never comes from the shared key.
+  expect(emitted[0].hint).toContain('repositories:create');
+  expect(emitted[0].hint).toContain('connect');
+  expect(emitted[0].hint).not.toContain('public repository');
 });
 
 test('repositories-add-item requires exactly one of --content/--file (exit 1)', async () => {

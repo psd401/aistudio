@@ -1,0 +1,14 @@
+id: aistudio-repository-create
+skill: psd-aistudio
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-aistudio to create an AI Studio repository named exactly EVAL-1907 Transportation SOPs. Report its id and who can see it."
+trials: 3
+fixtures:
+  - fixtures/repository-create.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_create"},"params.arguments.name":{"exact":"EVAL-1907 Transportation SOPs"}}}
+  # A repository created over MCP is private to its owner. An answer that
+  # implies it is shared or district-visible is the failure to catch.
+  - {"type":"output_match","pattern":"(?i)private"}

@@ -20,9 +20,14 @@
 -- pick the new scopes up. That is the documented remediation the skill's
 -- insufficient-scope hint already prints.
 --
--- The guard pins the exact current scope array, so an administrator-modified
--- client is never overwritten and a re-run after a successful update is an
--- intentional no-op.
+-- The guard pins the current scope SET (containment in both directions), so an
+-- administrator-modified client is never overwritten and a re-run after a
+-- successful update is an intentional no-op. Set containment rather than
+-- `allowed_scopes = '[...]'::jsonb`: jsonb equality on ARRAYS is order-
+-- sensitive (unlike object keys, which are normalized), so any process that
+-- ever rewrote the column with the same nine scopes in a different order would
+-- make an equality guard match zero rows — silently, with no error, leaving the
+-- app requesting scopes the client does not allow.
 --
 -- Rollback:
 -- UPDATE oauth_clients
@@ -48,7 +53,7 @@ SET
   updated_at = NOW()
 WHERE client_id = '7e8646f4-4091-4a34-a6b9-0d3721e8a126'
   AND is_first_party = true
-  AND allowed_scopes = '[
+  AND allowed_scopes @> '[
     "openid",
     "profile",
     "email",
@@ -58,4 +63,15 @@ WHERE client_id = '7e8646f4-4091-4a34-a6b9-0d3721e8a126'
     "repositories:read",
     "repositories:search",
     "repositories:changes"
-  ]'::jsonb;
+  ]'::jsonb
+  AND '[
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+    "platform:read",
+    "repositories:list",
+    "repositories:read",
+    "repositories:search",
+    "repositories:changes"
+  ]'::jsonb @> allowed_scopes;

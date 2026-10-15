@@ -272,9 +272,13 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   office documents go through the REST upload endpoints
   (`/api/v1/repositories/{id}/items/uploads`), not this skill.
 - The item is ingested through the same version/generation/embedding pipeline as
-  an uploaded file, so it is **not searchable the instant the call returns** —
-  the response carries `processingStatus`. Re-run `repositories-describe` or
-  `repositories-search` after processing completes.
+  an uploaded file, so it is **not searchable the instant the call returns**.
+  The response carries `processingStatus`, a `searchable` boolean, and a `note`
+  — surface that to the caller rather than implying the content is live, and
+  re-check with `repositories-describe` before relying on
+  `repositories-search` to find it.
+- `--file` problems (missing path, not a regular file, over 1 MiB) exit **1**
+  (usage), the same as `create-assistant --file`.
 - **An OAuth connection made before #1907 does not carry the write scopes.** The
   insufficient-scope hint says to `disconnect` and `connect` again; that is the
   fix, not a platform fault.

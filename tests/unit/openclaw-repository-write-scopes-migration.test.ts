@@ -97,12 +97,22 @@ describe("OpenClaw repository write scopes migration (#1907)", () => {
     }
   })
 
-  it("guards on the exact pre-change array, so an edited client is untouched", () => {
+  it("guards on the pre-change scope SET, so an edited client is untouched", () => {
     // Re-running after a successful update, or running against an
     // administrator-modified client, must be a no-op rather than an overwrite.
     const guard = migration.slice(migration.indexOf("WHERE client_id"))
-    expect(guard).toContain("allowed_scopes =")
     expect(guard).not.toContain("repositories:write")
     expect(guard).not.toContain("repositories:create")
+  })
+
+  it("compares the guard by set containment, not array equality", () => {
+    // jsonb equality on ARRAYS is order-sensitive. An `allowed_scopes = '[...]'`
+    // guard would match zero rows — silently, with no error — against a column
+    // any process had rewritten with the same scopes in a different order,
+    // leaving the app requesting scopes the client does not allow.
+    const guard = migration.slice(migration.indexOf("WHERE client_id"))
+    expect(guard).toContain("allowed_scopes @>")
+    expect(guard).toContain("]'::jsonb @> allowed_scopes")
+    expect(guard).not.toMatch(/allowed_scopes\s*=/)
   })
 })

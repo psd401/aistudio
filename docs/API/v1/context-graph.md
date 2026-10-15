@@ -624,7 +624,13 @@ Both enforce authorization in two layers, and the scope is only the first:
 A created repository is never public: widening visibility stays a human action
 in Repository Manager. An added item is ingested asynchronously through the same
 version/generation/embedding pipeline as an upload, so the response carries
-`processingStatus` and the content is not searchable until processing finishes.
+`processingStatus` plus an explicit `searchable` boolean and `note` — after the
+Repository Manager cutover the canonical generation is the only searchable copy,
+so a search issued immediately after a successful add will not find the content.
+
+Name and description are bounded in UTF-8 **bytes** (500 / 2000), as inline
+content is (1 MiB), so a multi-byte name cannot carry several times the intended
+footprint into the unbounded `text` columns.
 
 **Binary and office documents** still use the two-step presigned upload under
 `POST /api/v1/repositories/{id}/items/uploads` (also `repositories:write`);
