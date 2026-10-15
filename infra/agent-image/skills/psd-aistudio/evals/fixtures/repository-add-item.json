@@ -25,7 +25,7 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"item\":{\"id\":9071,\"repositoryId\":1907,\"name\":\"EVAL-1907 Bell Times\",\"type\":\"text\",\"processingStatus\":\"pending\"},\"ingestion\":\"processing\",\"searchable\":false,\"note\":\"Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously. Re-check the item's processingStatus with repositories_describe before relying on repositories_search to find it.\"}"
+                "text": "{\"item\":{\"id\":9071,\"repositoryId\":1907,\"name\":\"EVAL-1907 Bell Times\",\"type\":\"text\",\"processingStatus\":\"pending\"},\"ingestion\":\"processing\",\"searchable\":false,\"note\":\"Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.\"}"
               }
             ]
           }

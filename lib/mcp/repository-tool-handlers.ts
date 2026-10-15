@@ -368,7 +368,7 @@ async function handleRepositoriesAddItem(
     searchable: false,
     note: failed
       ? "Ingestion FAILED — the item row exists but nothing is processing it. Do NOT wait or poll: retry the item from Repository Manager, or add it again."
-      : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously. Re-check the item's processingStatus with repositories_describe before relying on repositories_search to find it.",
+      : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.",
   })
 }
 

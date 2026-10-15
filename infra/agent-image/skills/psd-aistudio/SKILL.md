@@ -275,8 +275,10 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   an uploaded file, so it is **not searchable the instant the call returns**.
   The response carries `processingStatus`, an `ingestion` state, `searchable`
   (always `false` at that moment, on both the canonical and the legacy path) and
-  a `note` — surface that rather than implying the content is live, and re-check
-  with `repositories-describe` before relying on `repositories-search`.
+  a `note` — surface that rather than implying the content is live. No tool
+  reports a single item's status (`repositories-describe` is repository-level),
+  so confirm the item is live by finding it with `repositories-search` before
+  relying on it.
   `ingestion: "failed"` means registration already failed and nothing is in
   flight: **retry, do not poll.**
 - `--file` problems (missing path, not a regular file, over 1 MiB) exit **1**
