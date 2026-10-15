@@ -5569,6 +5569,7 @@ interface OwnerInvocationDependencies {
   fetchChatUploads: typeof fetchChatUploads;
   activeJobLockIdentity: typeof activeJobLockIdentity;
   isDuplicateMessage: typeof isDuplicateMessage;
+  releaseMessageClaimForRetry: typeof releaseMessageClaimForRetry;
   tryAcquireSessionLock: typeof tryAcquireSessionLock;
   renewSessionLock: typeof renewSessionLock;
   releaseSessionLock: typeof releaseSessionLock;
@@ -5581,6 +5582,7 @@ const ownerInvocationDependencies: OwnerInvocationDependencies = {
   fetchChatUploads,
   activeJobLockIdentity,
   isDuplicateMessage,
+  releaseMessageClaimForRetry,
   tryAcquireSessionLock,
   renewSessionLock,
   releaseSessionLock,
@@ -5617,6 +5619,9 @@ function backgroundJobAckClaimName(
  * token, so the next job acknowledges the thread again. A DDB failure makes
  * the claim fail OPEN (a possible second reply) rather than mute the thread.
  *
+ * A reply that does not reach Chat releases the claim, so the next
+ * redelivery tries again instead of the thread staying mute for the job.
+ *
  * Never throws. The deferral is what keeps the message alive; a failed
  * courtesy reply must not turn into a failed turn.
  */
@@ -5626,16 +5631,20 @@ async function acknowledgeBackgroundJobDeferral(
   log: ReturnType<typeof createLogger>,
   dependencies: Pick<
     OwnerInvocationDependencies,
-    'isDuplicateMessage' | 'sendGoogleChatResponse'
+    | 'isDuplicateMessage'
+    | 'releaseMessageClaimForRetry'
+    | 'sendGoogleChatResponse'
   >
 ): Promise<void> {
+  const claimName = backgroundJobAckClaimName(
+    jobIdentity,
+    human.spaceName,
+    human.threadName
+  );
+  let claimed = false;
   try {
     const alreadyAcknowledged = await dependencies.isDuplicateMessage(
-      backgroundJobAckClaimName(
-        jobIdentity,
-        human.spaceName,
-        human.threadName
-      ),
+      claimName,
       log,
       undefined,
       BACKGROUND_JOB_ACK_TTL_SECONDS
@@ -5647,13 +5656,17 @@ async function acknowledgeBackgroundJobDeferral(
       });
       return;
     }
-    await dependencies.sendGoogleChatResponse(
+    claimed = true;
+    const outcome = await dependencies.sendGoogleChatResponse(
       human.spaceName,
       human.threadName,
       BACKGROUND_JOB_DEFERRAL_NOTICE,
       log,
       humanChatDeliveryContext(human)
     );
+    if (outcome === 'failed') {
+      throw new Error('Chat did not accept the acknowledgement');
+    }
     log.info('Acknowledged a turn deferred behind a background job', {
       spaceName: human.spaceName,
       threadName: human.threadName,
@@ -5663,6 +5676,9 @@ async function acknowledgeBackgroundJobDeferral(
       spaceName: human.spaceName,
       error: error instanceof Error ? error.message : String(error),
     });
+    if (claimed) {
+      await dependencies.releaseMessageClaimForRetry(claimName, log);
+    }
   }
 }
 
@@ -5720,7 +5736,7 @@ async function invokeOwnerAgentWithDependencies(
     workspaceLockId,
     log
   );
-  if (jobIdentity) {
+  if (jobIdentity !== null) {
     // Tell the thread before deferring: the requeued turn can wait up to
     // three hours, and silence is what made staff restate the request.
     await acknowledgeBackgroundJobDeferral(

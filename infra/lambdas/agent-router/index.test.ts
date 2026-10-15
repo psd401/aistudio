@@ -194,6 +194,7 @@ function ownerDependencies(
     fetchChatUploads: async () => {},
     activeJobLockIdentity: async () => null,
     isDuplicateMessage: async () => false,
+    releaseMessageClaimForRetry: async () => true,
     tryAcquireSessionLock: async () => "aside-lock",
     renewSessionLock: async () => true,
     releaseSessionLock: async () => {},
@@ -1765,6 +1766,97 @@ describe("background-job deferral acknowledgement", () => {
     expect(lockAttempted).toBe(false)
   })
 
+})
+
+describe("background-job acknowledgement claim release", () => {
+  test.each([
+    ["is refused by Chat", async () => "failed" as const],
+    [
+      "throws",
+      async (): Promise<never> => {
+        throw new Error("Chat is down")
+      },
+    ],
+  ])(
+    "releases the claim when the acknowledgement %s, so the next redelivery retries it",
+    async (_label, failingSend) => {
+      const claimed = new Set<string>()
+      const released: string[] = []
+      const responses: string[] = []
+      let send: () => Promise<"delivered" | "failed"> = failingSend
+      const dependencies = ownerDependencies({
+        activeJobLockIdentity: async () => "job-lock-token",
+        isDuplicateMessage: async claimName => {
+          if (claimed.has(claimName)) return true
+          claimed.add(claimName)
+          return false
+        },
+        releaseMessageClaimForRetry: async claimName => {
+          if (claimName) {
+            released.push(claimName)
+            claimed.delete(claimName)
+          }
+          return true
+        },
+        sendGoogleChatResponse: async (_space, _thread, text) => {
+          const outcome = await send()
+          if (outcome === "delivered") responses.push(text)
+          return outcome
+        },
+      })
+
+      const defer = () =>
+        expect(
+          invokeOwnerAgentWithDependencies(
+            ownerHuman({ messageText: "status?" }),
+            OWNER_USER,
+            "status?",
+            TEST_LOG,
+            dependencies
+          )
+        ).rejects.toThrow("background job")
+
+      await defer()
+      expect(released).toEqual([
+        backgroundJobAckClaimName(
+          "job-lock-token",
+          "spaces/owner-dm",
+          "spaces/owner-dm/threads/one"
+        ),
+      ])
+      expect(responses).toEqual([])
+
+      send = async () => "delivered"
+      await defer()
+      await defer()
+      expect(responses).toEqual([backgroundJobDeferralNotice])
+      expect(released).toHaveLength(1)
+    }
+  )
+
+  test("an already-acknowledged thread releases nothing", async () => {
+    let released = false
+    await expect(
+      invokeOwnerAgentWithDependencies(
+        ownerHuman({ messageText: "again?" }),
+        OWNER_USER,
+        "again?",
+        TEST_LOG,
+        ownerDependencies({
+          activeJobLockIdentity: async () => "job-lock-token",
+          isDuplicateMessage: async () => true,
+          releaseMessageClaimForRetry: async () => {
+            released = true
+            return true
+          },
+        })
+      )
+    ).rejects.toThrow("background job")
+    expect(released).toBe(false)
+  })
+})
+
+describe("background-job acknowledgement scope", () => {
   test("a workspace-contended deferral posts no acknowledgement", async () => {
     const responses: string[] = []
     let claimChecked = false
