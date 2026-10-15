@@ -1019,6 +1019,81 @@ class ManyCollapsedLines(unittest.TestCase):
             os.unlink(path)
 
 
+class EveryCollapsedShape(unittest.TestCase):
+    """The other half of the contract: what it must actually repair.
+
+    The safety table says what may never be touched; this says what must be.
+    Round 6 of review found two shapes the tool had quietly stopped repairing
+    — a Node script's hashbang reached the bare-slash refusal, and a `//`
+    comment ending in a backslash swallowed the collapsed line after it — so
+    the repair direction gets a table of its own.
+    """
+
+    CASES = [
+        ("python whole file", ".py",
+         'import sys\\nimport json\\nprint(json.dumps({"ok": True}))'
+         "\\nsys.exit(0)\\n"),
+        ("python shebang", ".py",
+         '#!/usr/bin/env python3\\nimport sys\\nprint("ok")\\n'
+         "sys.exit(0)\\n"),
+        ("python header plus body", ".py",
+         "#!/usr/bin/env python3\nimport sys\n"
+         'def main():\\n    print("hello there from the body")\\n'
+         "    return 0\\n\\nsys.exit(main())\n"),
+        ("python def block", ".py",
+         "import json\\n\\ndef build(rows):\\n"
+         '    return json.dumps({"n": len(rows)})\\n\\nprint(build([1, 2]))\\n'),
+        ("python double-escaped", ".py",
+         'import sys\\nSEP = \\"alpha\\nbravo\\ncharlie\\"\\nprint(SEP)'
+         "\\nsys.exit(0)\\n"),
+        ("python tabs too", ".py",
+         'def f():\\n\\treturn "a value that is long enough to matter"'
+         "\\n\\nprint(f())\\n"),
+        ("js whole file", ".js",
+         'const fs = require("fs");\\nconst os = require("os");\\n'
+         "console.log(os.hostname());\\n"),
+        ("js hashbang", ".js",
+         '#!/usr/bin/env node\\nconst fs = require("fs");\\n'
+         'console.log(fs.existsSync("."));\\nprocess.exit(0);\\n'),
+        ("js header plus body", ".js",
+         'const fs = require("fs");\n'
+         'function main() {\\n  console.log(fs.existsSync("."));\\n'
+         "  return 0;\\n}\\nprocess.exit(main());\n"),
+        ("json whole file", ".json",
+         '{\\n  "name": "report",\\n  "rows": 12,\\n'
+         '  "owner": "someone"\\n}\\n'),
+        ("json nested", ".json",
+         '{\\n  "a": {\\n    "b": [1, 2, 3],\\n'
+         '    "c": "text here"\\n  }\\n}\\n'),
+    ]
+
+    def test_every_collapsed_shape_becomes_parseable(self):
+        for label, suffix, source in self.CASES:
+            with self.subTest(shape=label):
+                with tempfile.NamedTemporaryFile(
+                        "w", suffix=suffix, delete=False) as fh:
+                    fh.write(source)
+                    path = fh.name
+                try:
+                    proc = subprocess.run([sys.executable, SCRIPT, path],
+                                          capture_output=True, text=True)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn("repaired", proc.stdout)
+                    with open(path) as handle:
+                        content = handle.read()
+                    # The collapse was undone. Not "no `\n` remains": the
+                    # double-escaped shape keeps the escapes that are its
+                    # string's own data.
+                    self.assertGreater(len(content.splitlines()),
+                                       len(source.splitlines()))
+                    if suffix == ".py":
+                        compile(content, "<repaired>", "exec")
+                    elif suffix == ".json":
+                        json.loads(content)
+                finally:
+                    os.unlink(path)
+
+
 class EveryLegitimateConstruct(unittest.TestCase):
     """The safety contract, construct by construct.
 
