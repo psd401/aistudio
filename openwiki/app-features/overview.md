@@ -7,6 +7,7 @@ openwiki:
   roles: [architecture, domain]
   source_paths:
     - lib/repositories/readiness-service.ts
+    - lib/repositories/repository-catalog-service.ts
     - lib/nexus/conversation-repository-service.ts
     - app/api/nexus/chat/route.ts
     - app/api/nexus/chat/image-generation-handler.ts
@@ -364,8 +365,11 @@ Every model turn reloads conversation ownership, repository ACLs, lifecycle, and
 
 A zero-item repository with a **degraded connector** is `failed`, not `empty` — the source exists but never arrived, so it stays behind the gate.
 
+**Legacy keyword-searchable exemption (#1936)**: A repository written only through the legacy path (dual-write off) has active items, nothing pending, and no active index generation, so readiness calls it `failed`. Nexus and Assistant Architect run retrieval with legacy compatibility off and keep blocking it. `searchRepositoryCatalog` (the `repositories_search` path) runs with legacy compatibility on, so it passes the set from `selectLegacyKeywordSearchableRepositoryIds(gatedIds)` to `assertRepositoriesSearchable(ids, { legacyKeywordSearchableIds })`. Only a `failed` snapshot in that set is ignored. `processing`, `unavailable`, `disconnected`, and missing states still block. The selector is deliberately narrow: it requires an active, unexpired repository with no active generation, at least one completed item with a legacy chunk, and no pending, processing, or failed item, version, inspection, or building generation.
+
 **Key Sources**:
-- `/lib/repositories/readiness-service.ts` — `blocksRepositorySearch()`, `selectSearchableRepositoryIds()`
+- `/lib/repositories/readiness-service.ts` — `blocksRepositorySearch()`, `selectSearchableRepositoryIds()`, `assertRepositoriesSearchable()`, `selectLegacyKeywordSearchableRepositoryIds()`
+- `/lib/repositories/repository-catalog-service.ts` — `searchRepositoryCatalog()`, the `repositories_search` path that calls the gate with legacy compatibility on
 - `/lib/nexus/conversation-repository-service.ts` — `ValidatedConversationRepositoryContext.searchableRepositoryIds`
 - `/app/api/nexus/chat/route.ts` — `buildProjectSearchTools()`
 
@@ -1906,7 +1910,7 @@ sequenceDiagram
 | Outcome | `ingestion` | `searchable` | Meaning for the agent |
 |---|---|---|---|
 | Canonical path (`writePath: "canonical"`) | `processing` | `no` | Accepted. Embedding and generation are still in the pipeline. Confirm with `repositories_search` before relying on it. |
-| Legacy path (`writePath: "legacy"`, dual-write off) | `completed` | `keyword` | Keyword-matchable through the chunk's generated `search_vector`, only by an untargeted `repositories_search`. A targeted search returns `REPOSITORY_NOT_READY`. The chunk's embedding stays NULL, so semantic search does not cover it until canonical ingestion. |
+| Legacy path (`writePath: "legacy"`, dual-write off) | `completed` | `keyword` | Keyword-matchable through the chunk's generated `search_vector`. Confirm with `repositories_search` filtered to the item's `repositoryId`; the legacy exemption above lets that targeted search through. An untargeted search covers only the first 50 catalog repositories, so it can miss the item. The chunk's embedding stays NULL, so semantic search does not cover it until canonical ingestion. |
 | Registration failed (`processingStatus: "failed"`) | `failed` | `no` | Nothing is in flight. Retry the item. Do not poll. |
 
 When canonical registration throws, `shadowWriteCanonical` marks the item `failed` with a retry message and does not rethrow, because the legacy row is already committed. A legacy row is kept for rollback while `canonicalCutover` is off. No MCP tool reports one item's status afterwards. Rationale: `docs/learnings/logic/2026-10-15-repository-item-never-searchable-on-write-return.md`.
@@ -1916,11 +1920,13 @@ When canonical registration throws, `shadowWriteCanonical` marks the item `faile
 **Focused tests**:
 - `tests/unit/lib/mcp/repository-write-tools.test.ts` — `MCP repositories_create (#1907)` and `MCP repositories_add_item (#1907)` cover private default, capability refusal before ACL lookup, ACL masking, the ingestion and searchable states, byte bounds, and retry-on-failed wording. The `repository write catalog + scope wiring (#1907)` block covers the scope, catalog bindings, and client scopes.
 - `tests/unit/lib/repositories/repository-write-service-shadow-write.test.ts` — `shadowWriteCanonical` uses the rollout-gated registrar before cutover and the unconditional one after. A dispatch failure only logs a warning. A registration failure marks the item `failed` without rethrowing.
+- `tests/unit/lib/repositories/readiness-legacy-exemption.test.ts` — `legacy keyword-searchable readiness exemption`: the gate blocks a legacy-only repository without the exemption and passes it with one; a processing repository is never exempted even if listed; a non-exempted failed repository still blocks; the selector SQL carries the narrowing predicates; empty or invalid id lists issue no query.
+- `tests/unit/lib/repositories/repository-catalog-service.test.ts` — a targeted search computes the exemption from accessible ids only and passes it to the gate.
 - `infra/agent-image/skills/psd-aistudio/run.test.js` — skill command mapping for `repositories-create` and `repositories-add-item`, plus `--file` handling.
 - Agent behavior evals: `repository-create`, `repository-add-item`, and `repository-add-item-existing` are registered in `infra/agent-image/eval/suites/regression.yaml`. `infra/agent-image/test_eval_runner.py` requires the existing-repository case to be a negative check, so the agent must not call `repositories_create` when it should file into an existing repository. Rationale: `docs/learnings/testing/2026-10-15-negative-eval-must-assert-tool-call-not-prose.md`. The eval harness itself is in the [backlog](../quickstart.md#backlog).
 
 **Validation** (quiet by default, failures keep full diagnostics):
-- `bunx jest --silent tests/unit/lib/mcp/repository-write-tools.test.ts tests/unit/lib/repositories/repository-write-service-shadow-write.test.ts`
+- `bunx jest --silent tests/unit/lib/mcp/repository-write-tools.test.ts tests/unit/lib/repositories/repository-write-service-shadow-write.test.ts tests/unit/lib/repositories/readiness-legacy-exemption.test.ts tests/unit/lib/repositories/repository-catalog-service.test.ts`
 - `cd infra/agent-image/skills/psd-aistudio && bun test run.test.js`
 
 **Change recipe: adding another repository write tool.** Add the Zod schema and handler in `lib/mcp/repository-tool-handlers.ts`, and register it in `REPOSITORY_TOOL_HANDLERS`. Re-check the capability and the ACL inside the handler. Add a descriptor in `lib/mcp/tool-registry.ts` and a binding in `lib/tools/catalog/manifest.ts`. If the scope is new, add it to `lib/api-keys/scopes.ts`. If the first-party agent must request it, update `AISTUDIO_OPENCLAW_SCOPES` and add a numbered migration. Then update the `psd-aistudio` skill. Regenerate the public catalog with `bun run capabilities:generate`, and confirm it with `bun run capabilities:check` instead of editing `docs/API/v1/generated/capability-catalog.json` by hand. Escalate to the Lambda and skill suites only when the agent image or skill runtime changes. Do not treat a passing handler unit test as proof that the tool is shipped. Also confirm that the tool resolves through `tools/list` from the catalog and that the skill command maps to it.
