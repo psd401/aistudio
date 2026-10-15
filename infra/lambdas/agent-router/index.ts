@@ -881,6 +881,9 @@ async function activeJobLockIdentity(
     }
     // A lock written before tokens existed still identifies a live job; fall
     // back to the session id so the caller never mistakes it for "no job".
+    // Every current writer sets lockToken, so this only covers rows written
+    // before the deploy (30-min lease); for those, back-to-back jobs share
+    // one acknowledgement key and the second job may go unacknowledged.
     return item.lockToken ?? sessionId;
   } catch (error) {
     log.warn('Job-lock check failed; treating as no job', {
@@ -5623,6 +5626,9 @@ function backgroundJobAckClaimName(
  *
  * A reply that does not reach Chat releases the claim, so the next
  * redelivery tries again instead of the thread staying mute for the job.
+ * Accepted gap: if the Lambda dies between the claim and the send (timeout,
+ * crash), nothing releases the claim and that thread gets no notice for this
+ * job. Claiming after the send would trade that for duplicate notices.
  *
  * Never throws. The deferral is what keeps the message alive; a failed
  * courtesy reply must not turn into a failed turn.
