@@ -41,24 +41,37 @@ import {
 export const NOTICE_THRESHOLD = 3;
 
 /**
- * Signatures of an expired or revoked Google Workspace grant.
- *
- * Google's own `invalid_grant` plus the statuses the psd-workspace skill emits
- * on that path (`token-revoked`, `needs-auth`) and the prose the broker
- * returns. Matched case-insensitively against the run's recorded error text.
+ * Signatures that can ONLY come from the Google Workspace path: Google's own
+ * `invalid_grant`, the psd-workspace skill's `token-revoked` status, and the
+ * Workspace broker's prose (`app/api/agent/workspace-execute/route.ts`).
  */
-const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
+const WORKSPACE_AUTH_PATTERNS: readonly RegExp[] = [
   /invalid_grant/i,
   /token[-_ ]revoked/i,
+  /workspace (?:authorization|access) (?:is required|was revoked)/i,
+];
+
+/**
+ * Auth signatures every integration shares. Canva, Plaud, PSD Data, and AI
+ * Studio skills all emit `needs-auth` too, and the auth notice's fix is a
+ * Google Workspace consent link — so on these alone the notice would tell a
+ * Canva user their mail and calendar access expired and hand them the wrong
+ * link. They count only when the same text names Google or Workspace.
+ */
+const GENERIC_AUTH_PATTERNS: readonly RegExp[] = [
   /needs[-_ ]auth/i,
-  /workspace authorization (?:is required|was revoked)/i,
   /authorization (?:has )?expired/i,
   /re-?authorize/i,
 ];
+const WORKSPACE_CONTEXT = /\b(?:google|workspace|gmail|psd-workspace)\b/i;
 
 export function isWorkspaceAuthFailure(text: string | null | undefined): boolean {
   if (typeof text !== 'string' || text.length === 0) return false;
-  return AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(text));
+  if (WORKSPACE_AUTH_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  return (
+    GENERIC_AUTH_PATTERNS.some((pattern) => pattern.test(text))
+    && WORKSPACE_CONTEXT.test(text)
+  );
 }
 
 export type ScheduleFailureNoticeDecision =

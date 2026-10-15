@@ -40,9 +40,10 @@ describe('isWorkspaceAuthFailure', () => {
     ['Workspace authorization was revoked'],
     ['Workspace authorization is required'],
     ['status=token-revoked'],
-    ['needs-auth'],
     ['your Google authorization has expired'],
-    ['click the link to re-authorize'],
+    // psd-workspace's own needs-auth / revoked prose names Workspace.
+    ['{"status":"needs-auth","kind":"user_account","message":"Workspace authorization is required"}'],
+    ['Workspace access was revoked — click the link to re-authorize.'],
   ])('matches %p', (text) => {
     expect(isWorkspaceAuthFailure(text)).toBe(true);
   });
@@ -54,6 +55,13 @@ describe('isWorkspaceAuthFailure', () => {
     ['Agent temporarily unavailable for scheduled task'],
     ['This scheduled task ran out of time before it could finish.'],
     ['Chat delivery failed and was queued for retry: 503'],
+    // Codex P2 on PR #1925: other integrations share `needs-auth`. These must
+    // not be told their Google access expired, nor handed a Workspace link.
+    ['needs-auth'],
+    ['{"status":"needs-auth","consent_chat_hyperlink":"<https://x|Connect your Canva account>"}'],
+    ['{"status":"needs-auth","consent_chat_hyperlink":"<https://x|Connect your Plaud account>"}'],
+    ['needs-auth: owner authorization is required'],
+    ['click the link to re-authorize'],
   ])('does not match %p', (text) => {
     expect(isWorkspaceAuthFailure(text)).toBe(false);
   });
