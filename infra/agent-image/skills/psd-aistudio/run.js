@@ -125,6 +125,8 @@ function usage() {
       "  repositories-add-item --repository-id N --name <text> (--content <text> | --file <path>)",
       "      Adds one UTF-8 text item (max 1 MiB) to a repository the caller owns",
       "      or administers. Binary/office files use the REST upload endpoints.",
+      "      PREFER --file for anything sensitive: --content puts the text in argv,",
+      "      where it is visible in the process list and shell history.",
       "",
     ].join("\n"),
   );

@@ -273,12 +273,18 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   (`/api/v1/repositories/{id}/items/uploads`), not this skill.
 - The item is ingested through the same version/generation/embedding pipeline as
   an uploaded file, so it is **not searchable the instant the call returns**.
-  The response carries `processingStatus`, a `searchable` boolean, and a `note`
-  — surface that to the caller rather than implying the content is live, and
-  re-check with `repositories-describe` before relying on
-  `repositories-search` to find it.
+  The response carries `processingStatus`, an `ingestion` state, `searchable`
+  (always `false` at that moment, on both the canonical and the legacy path) and
+  a `note` — surface that rather than implying the content is live, and re-check
+  with `repositories-describe` before relying on `repositories-search`.
+  `ingestion: "failed"` means registration already failed and nothing is in
+  flight: **retry, do not poll.**
 - `--file` problems (missing path, not a regular file, over 1 MiB) exit **1**
   (usage), the same as `create-assistant --file`.
+- **Use `--file`, not `--content`, for anything sensitive.** `--content` puts the
+  item text in argv, where it shows up in the process list and shell history.
+  Student work, IEP material, and anything else you would not paste into a
+  shared terminal go in a file.
 - **An OAuth connection made before #1907 does not carry the write scopes.** The
   insufficient-scope hint says to `disconnect` and `connect` again; that is the
   fix, not a platform fault.

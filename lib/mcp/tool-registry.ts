@@ -683,11 +683,11 @@ Example:
       properties: {
         name: {
           type: "string",
-          description: "Repository name (1-500 characters).",
+          description: "Repository name (1-500 bytes, UTF-8).",
         },
         description: {
           type: "string",
-          description: "Optional repository description (max 2000 characters).",
+          description: "Optional repository description (max 2000 bytes, UTF-8). An empty string is treated as absent.",
         },
       },
       required: ["name"],
@@ -696,7 +696,7 @@ Example:
   {
     name: "repositories_add_item",
     description:
-      "Add a text item to an existing repository the authenticated caller owns or administers. Ingestion is ASYNCHRONOUS: the result carries `processingStatus` and a `searchable` flag, and until processing completes the item will NOT be found by repositories_search. A repository the caller cannot modify — and one that is absent, deleted, or system-managed — is reported as 'Repository not found', which means 'not yours', not necessarily 'does not exist'.",
+      "Add a text item to an existing repository the authenticated caller owns or administers. Ingestion is ASYNCHRONOUS: the result carries `processingStatus`, an `ingestion` state and `searchable: false`, because the item is never searchable at the moment this returns. `ingestion: \"failed\"` means registration already failed and nothing is in flight — retry rather than waiting. A repository the caller cannot modify — and one that is absent, deleted, or system-managed — is reported as 'Repository not found', which means 'not yours', not necessarily 'does not exist'.",
     inputSchema: {
       type: "object",
       properties: {
@@ -706,7 +706,7 @@ Example:
         },
         name: {
           type: "string",
-          description: "Item name (1-500 characters).",
+          description: "Item name (1-500 bytes, UTF-8).",
         },
         content: {
           type: "string",

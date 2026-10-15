@@ -11,6 +11,9 @@ graders:
   # The negative assertion this eval exists for: filing content into an existing
   # repository must never spawn a second one. repositories_create is destructive
   # and private-by-default, so a stray call leaves an orphan knowledge base the
-  # owner has to find and clean up.
-  - {"type":"output_match","pattern":"(?is)^(?!.*\\bcreated a new repository\\b).*EVAL-1907 Bell Times"}
+  # owner has to find and clean up. Asserted at the TOOL-CALL level, not on the
+  # wording of the final answer — a stray create with a tactful closing sentence
+  # would slip past a text match.
+  - {"type":"no_route_called","route":"/api/agent/aistudio","method":"POST","body":{"params.name":{"exact":"repositories_create"}}}
+  - {"type":"output_match","pattern":"(?is)EVAL-1907 Bell Times"}
   - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_add_item"},"params.arguments.repositoryId":{"exact":1907},"params.arguments.name":{"exact":"EVAL-1907 Bell Times"}}}

@@ -55,7 +55,7 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"item\":{\"id\":9071,\"repositoryId\":1907,\"name\":\"EVAL-1907 Bell Times\",\"type\":\"text\",\"processingStatus\":\"pending\"},\"searchable\":false,\"note\":\"Item accepted. It is NOT searchable yet.\"}"
+                "text": "{\"item\":{\"id\":9071,\"repositoryId\":1907,\"name\":\"EVAL-1907 Bell Times\",\"type\":\"text\",\"processingStatus\":\"pending\"},\"ingestion\":\"processing\",\"searchable\":false,\"note\":\"Item accepted. It is NOT searchable yet.\"}"
               }
             ]
           }

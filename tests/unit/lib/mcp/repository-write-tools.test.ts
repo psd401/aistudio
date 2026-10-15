@@ -160,6 +160,29 @@ describe("MCP repositories_create (#1907)", () => {
     })
   })
 
+  it("treats a blank description as absent, matching the Repository Manager UI", async () => {
+    mockCreateRepository.mockResolvedValue({
+      id: 44,
+      name: "Notes",
+      description: null,
+      isPublic: false,
+      repositoryKind: "durable",
+      createdAt: null,
+    })
+
+    const result = await TOOL_HANDLERS.repositories_create(
+      { name: "Notes", description: "   " },
+      CONTEXT
+    )
+
+    // The UI's create form accepts a blank description; rejecting it here would
+    // make the two surfaces disagree over a field the caller just left empty.
+    expect(result.isError).toBeUndefined()
+    expect(mockCreateRepository).toHaveBeenCalledWith(
+      expect.objectContaining({ description: null })
+    )
+  })
+
   it("omits an absent description rather than storing an empty string", async () => {
     mockCreateRepository.mockResolvedValue({
       id: 43,
@@ -219,6 +242,7 @@ describe("MCP repositories_add_item (#1907)", () => {
     name: "Bell times",
     type: "text",
     processingStatus: "pending",
+    processingError: null,
     createdAt: new Date("2026-10-14T00:00:00.000Z"),
   }
 
@@ -248,6 +272,7 @@ describe("MCP repositories_add_item (#1907)", () => {
       name: "Bell times",
       type: "text",
       processingStatus: "pending",
+      processingError: null,
       createdAt: "2026-10-14T00:00:00.000Z",
     })
   })
@@ -295,7 +320,7 @@ describe("MCP repositories_add_item (#1907)", () => {
     expect(mockCreateRepositoryTextItem).not.toHaveBeenCalled()
   })
 
-  it("reports that an item still processing is NOT searchable yet", async () => {
+  it("reports an accepted item as processing and NOT searchable", async () => {
     mockCreateRepositoryTextItem.mockResolvedValue(item)
 
     const result = await TOOL_HANDLERS.repositories_add_item(
@@ -303,14 +328,17 @@ describe("MCP repositories_add_item (#1907)", () => {
       CONTEXT
     )
 
-    // After the Repository Manager cutover the canonical generation is the only
-    // searchable copy and ingestion is asynchronous, so a bare success would
-    // let an agent conclude its own write is immediately findable.
+    expect(payload(result).ingestion).toBe("processing")
     expect(payload(result).searchable).toBe(false)
     expect(payload(result).note).toContain("NOT searchable yet")
   })
 
-  it("reports a completed item as searchable", async () => {
+  it("never claims a just-added item is searchable, even at status completed", async () => {
+    // `completed` at this point can only be the pre-cutover legacy path, which
+    // inserts the chunk with a NULL embedding and no index_generation_id. Every
+    // retrieval query filters on `chunk.embedding IS NOT NULL` (v2 also on the
+    // generation), so the item stays invisible until embedding-recovery runs —
+    // claiming otherwise is the exact overclaim this flag exists to prevent.
     mockCreateRepositoryTextItem.mockResolvedValue({
       ...item,
       processingStatus: "completed",
@@ -321,7 +349,29 @@ describe("MCP repositories_add_item (#1907)", () => {
       CONTEXT
     )
 
-    expect(payload(result).searchable).toBe(true)
+    expect(payload(result).searchable).toBe(false)
+    expect(payload(result).ingestion).toBe("processing")
+  })
+
+  it("tells the agent to RETRY, not poll, when ingestion already failed", async () => {
+    // The row is re-read after the canonical shadow-write, so `failed` means
+    // registration already failed and nothing is in flight. "Check back later"
+    // would make an agent poll forever.
+    mockCreateRepositoryTextItem.mockResolvedValue({
+      ...item,
+      processingStatus: "failed",
+      processingError: "Canonical content registration failed. Retry this item.",
+    })
+
+    const result = await TOOL_HANDLERS.repositories_add_item(
+      { repositoryId: 42, name: "Bell times", content: "7:45 AM" },
+      CONTEXT
+    )
+
+    expect(payload(result).ingestion).toBe("failed")
+    expect(payload(result).searchable).toBe(false)
+    expect(payload(result).note).toContain("Do NOT wait or poll")
+    expect(payload(result).item.processingError).toContain("Retry this item")
   })
 
   it("preserves content verbatim while rejecting whitespace-only content", async () => {

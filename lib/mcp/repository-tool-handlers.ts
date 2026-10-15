@@ -106,7 +106,20 @@ function boundedText(maxBytes: number) {
 
 const createRepositorySchema = z.object({
   name: boundedText(REPOSITORY_NAME_MAX_BYTES),
-  description: boundedText(REPOSITORY_DESCRIPTION_MAX_BYTES).optional(),
+  // An empty/whitespace description is ABSENT, not invalid: the Repository
+  // Manager UI accepts a blank description field, and rejecting the call would
+  // make the two surfaces disagree over a field the caller left empty.
+  description: z
+    .string()
+    .trim()
+    .max(REPOSITORY_DESCRIPTION_MAX_BYTES * 4)
+    .refine(
+      (value) =>
+        Buffer.byteLength(value, "utf8") <= REPOSITORY_DESCRIPTION_MAX_BYTES,
+      { message: `must not exceed ${REPOSITORY_DESCRIPTION_MAX_BYTES} bytes` }
+    )
+    .transform((value) => (value.length > 0 ? value : undefined))
+    .optional(),
 })
 
 const addItemSchema = z.object({
@@ -326,6 +339,21 @@ async function handleRepositoriesAddItem(
     callerAction: "repositories_add_item",
   })
 
+  // The row is re-read AFTER the canonical shadow-write, so `failed` here means
+  // registration already failed and NOTHING is in flight — an agent told to
+  // "check back later" would poll forever. Report the three outcomes
+  // distinctly.
+  //
+  // `searchable` is never true at this point, on either path, and saying
+  // otherwise is the misreport this field exists to prevent:
+  //   - canonical path: status is `pending` and the generation/embedding the
+  //     retrieval queries select on does not exist yet;
+  //   - legacy path: status is `completed` immediately, but the chunk is
+  //     inserted with a NULL embedding and no index_generation_id, and every
+  //     retrieval query filters on `chunk.embedding IS NOT NULL` (and v2 on
+  //     `chunk.index_generation_id`), so it stays invisible until
+  //     embedding-recovery backfills it.
+  const failed = item.processingStatus === "failed"
   return ok({
     item: {
       id: item.id,
@@ -333,17 +361,14 @@ async function handleRepositoriesAddItem(
       name: item.name,
       type: item.type,
       processingStatus: item.processingStatus,
+      processingError: item.processingError,
       createdAt: item.createdAt?.toISOString() ?? null,
     },
-    // Stated explicitly so an agent cannot read a successful add as "this is in
-    // the index now". Ingestion is asynchronous, and after the Repository
-    // Manager cutover the canonical generation is the ONLY searchable copy, so
-    // an immediate repositories_search would miss content that was accepted.
-    searchable: item.processingStatus === "completed",
-    note:
-      item.processingStatus === "completed"
-        ? "Item is indexed and searchable now."
-        : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously. Re-check with repositories_describe before relying on repositories_search to find it.",
+    ingestion: failed ? "failed" : "processing",
+    searchable: false,
+    note: failed
+      ? "Ingestion FAILED — the item row exists but nothing is processing it. Do NOT wait or poll: retry the item from Repository Manager, or add it again."
+      : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously. Re-check the item's processingStatus with repositories_describe before relying on repositories_search to find it.",
   })
 }
 

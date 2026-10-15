@@ -624,9 +624,15 @@ Both enforce authorization in two layers, and the scope is only the first:
 A created repository is never public: widening visibility stays a human action
 in Repository Manager. An added item is ingested asynchronously through the same
 version/generation/embedding pipeline as an upload, so the response carries
-`processingStatus` plus an explicit `searchable` boolean and `note` — after the
-Repository Manager cutover the canonical generation is the only searchable copy,
-so a search issued immediately after a successful add will not find the content.
+`processingStatus`, an `ingestion` state (`processing` or `failed`), a
+`searchable` flag and a `note`.
+
+`searchable` is **always false** at that moment, on both paths: the canonical
+path has no generation or embedding yet, and the pre-cutover legacy path writes
+the chunk with a NULL `embedding` and no `index_generation_id`, which every
+retrieval query filters on. `ingestion: "failed"` means canonical registration
+already failed and nothing is in flight — the caller should retry the item, not
+poll for it.
 
 Name and description are bounded in UTF-8 **bytes** (500 / 2000), as inline
 content is (1 MiB), so a multi-byte name cannot carry several times the intended
