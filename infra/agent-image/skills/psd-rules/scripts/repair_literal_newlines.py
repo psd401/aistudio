@@ -49,11 +49,13 @@ shape is the same, but there is no parser to catch a wrong guess.
 
 Where no proof can exist the script says so rather than choosing. A Python
 comment holding `\n`-separated example code is indistinguishable from a
-collapsed body — both are one comment token whose pieces parse — so in a file
-that parses, a candidate line whose every escape is inside a comment is
-reported ambiguous. The exception is a single-line file: a collapsed script
-opening with a shebang IS one comment token and cannot have been meant that
-way, which is why that case is still repaired.
+collapsed body — both are one comment token — so a candidate line whose every
+escape sits inside a comment is reported ambiguous. The exception is a
+single-line file: a collapsed script opening with a shebang IS one comment
+token and cannot have been meant that way, which is why that case is still
+repaired. A partial collapse whose body happens to begin with a comment in an
+otherwise correct file is refused along with the prose, since no signal
+separates them; the message says to split the comment off by hand.
 
 Line-by-line matters because the real-world shape is usually PARTIAL collapse:
 a few correct header lines followed by a body collapsed onto one line. The
@@ -288,14 +290,17 @@ def _javascript_records(text):
     while index < length:
         char = text[index]
 
-        if char == "\\" and index + 1 < length and text[index + 1] == "\n":
+        if char == "\\" and text[index + 1:index + 2] in ("\n", "\r"):
             # A backslash immediately before a real newline is a line
             # continuation, and a JS string may legally span lines that way.
             # Ending the string here marked the continuation line's escapes as
-            # code and rewrote a valid file.
+            # code and rewrote a valid file. `\r\n` counts: a CRLF file's
+            # continuation is the same construct.
+            index += 2
+            if text[index - 1] == "\r" and text[index:index + 1] == "\n":
+                index += 1
             row += 1
             column = 0
-            index += 2
             continue
 
         if char == "\n":
@@ -460,23 +465,66 @@ def parses_cleanly(text, language):
     return False
 
 
-def _python_spans(text, wanted):
-    """``{line_number: [(start_col, end_col)]}`` for the wanted token kinds.
+def _tokenize_prefix(text):
+    """(tokens, failed_row) — tokens up to the first error, and its 1-based row.
 
-    Tokens found BEFORE a tokenising error are kept rather than discarded. One
-    collapsed line makes the rest of the file untokenisable, and throwing the
-    whole result away took the protection off every literal that came before
-    it — a raw string's data was rewritten alongside the real collapsed line.
-    What was tokenised was tokenised.
+    ``failed_row`` is None when the whole text tokenised.
     """
-    lines = split_lines(text)
-    spans = {}
     tokens = []
     try:
         for token in tokenize.generate_tokens(io.StringIO(text).readline):
             tokens.append(token)
-    except Exception:  # SyntaxError, TokenError, IndentationError, ...
-        pass
+    except Exception as error:  # TokenError, SyntaxError, IndentationError
+        row = None
+        args = getattr(error, "args", ())
+        if len(args) > 1 and isinstance(args[1], tuple) and args[1]:
+            row = args[1][0]
+        if not isinstance(row, int):
+            row = getattr(error, "lineno", None)
+        if not isinstance(row, int) or row < 1:
+            row = tokens[-1].end[0] if tokens else 1
+        return tokens, max(row, 1)
+    return tokens, None
+
+
+def _python_spans(text, wanted):
+    """``{line_number: [(start_col, end_col)]}`` for the wanted token kinds.
+
+    A collapsed line is untokenisable — a backslash in code position is a
+    TokenError — and it would otherwise take every literal in the file down
+    with it. So tokenising RESUMES past each failure instead of stopping:
+    tokens before the error were being kept already, and a literal after it is
+    just as real. A triple-quoted string sitting after a collapsed line had its
+    data rewritten because the scan never reached it.
+
+    Resuming can also mis-pair quotes in the fragment it restarts on, which
+    can only ever mark more escapes as legitimate — fewer repairs, never a
+    wrong one.
+    """
+    lines = split_lines(text)
+    spans = {}
+    tokens = []
+    offset = 0
+    remaining = text
+    # Bounded so a pathological file cannot turn this into a quadratic walk.
+    for _attempt in range(32):
+        found, failed_row = _tokenize_prefix(remaining)
+        tokens.extend(
+            token._replace(
+                start=(token.start[0] + offset, token.start[1]),
+                end=(token.end[0] + offset, token.end[1]),
+            )
+            for token in found
+        )
+        if failed_row is None:
+            break
+        remaining_lines = split_lines(remaining)
+        if failed_row >= len(remaining_lines):
+            break
+        offset += failed_row
+        remaining = "".join(remaining_lines[failed_row:])
+        if not remaining:
+            break
     for token in tokens:
         name = tokenize.tok_name.get(token.type, "")
         if not any(name == kind or name.startswith(kind) for kind in wanted):
@@ -638,31 +686,36 @@ def diagnose(text, path):
                     sorted(broken_lines + unsure_lines))
         return "clean", real_lines, literal, []
 
+    # A candidate whose every escape is inside a comment is set aside LINE BY
+    # LINE, never as a group: a comment holding `\n`-separated example code is
+    # indistinguishable from a collapsed body — both are one comment token —
+    # and repairing the wrong one turned a working file's comment into live
+    # statements. Judged as a group, one real collapse elsewhere in the file
+    # dragged such a comment into the repair with it.
+    #
+    # Asked whether or not the rest of the file parses: prose next to a syntax
+    # error is still prose, and the proof that a repair stops the file parsing
+    # is no help in a file that never parsed.
+    #
+    # A single-line file is exempt, and that exemption is what keeps the main
+    # case working: a collapsed script opening with a shebang IS one comment
+    # token and cannot have been meant that way. The cost is a partial
+    # collapse whose body happens to begin with a comment in an otherwise
+    # correct file — the same shape, so it is set aside too, and the message
+    # says to split the comment off by hand.
+    comment_held = []
+    if broken_lines and language == PYTHON and real_lines > 1:
+        comments = python_comment_spans(text)
+        remaining = []
+        for number in broken_lines:
+            escapes = [r for r in records.get(number, []) if r[1] == "n"]
+            if _within_spans(escapes, comments, number):
+                comment_held.append(number)
+            else:
+                remaining.append(number)
+        broken_lines = remaining
+
     if broken_lines:
-        if language == PYTHON and real_lines > 1 and parses_cleanly(
-            text, language
-        ):
-            comments = python_comment_spans(text)
-            if all(
-                _within_spans(
-                    [r for r in records.get(number, []) if r[1] == "n"],
-                    comments,
-                    number,
-                )
-                for number in broken_lines
-            ) and not _vetoed(text, language, broken_lines, records):
-                # Every escape is inside a comment in a file that works. A
-                # comment holding `\n`-separated example code is
-                # indistinguishable from a collapsed body — both are one
-                # comment token whose pieces are valid code — and repairing
-                # one turned a working file's comment into live statements.
-                # The two proofs in _vetoed did not separate them either, so
-                # say so instead of guessing.
-                #
-                # A single-line file is exempt: a collapsed script that opens
-                # with a shebang IS one comment, it cannot have been meant
-                # that way, and it is the most common shape of this bug.
-                return "comment-ambiguous", real_lines, literal, broken_lines
         if any(
             record[3]
             for number in broken_lines
@@ -676,7 +729,14 @@ def diagnose(text, path):
             return "comment-mixed", real_lines, literal, broken_lines
         if _vetoed(text, language, broken_lines, records):
             return "clean", real_lines, literal, []
+        # Any comment-held candidate stays exactly as it is while these are
+        # repaired, which is why they were separated above.
         return "broken", real_lines, literal, broken_lines
+
+    if comment_held:
+        if _vetoed(text, language, comment_held, records):
+            return "clean", real_lines, literal, []
+        return "comment-ambiguous", real_lines, literal, comment_held
     if unsure_lines:
         # The candidate's escapes were not evidence. For JS/TS that is the
         # stream scan's positive answer — they are string, comment or regex
@@ -786,11 +846,11 @@ def main() -> int:
     if verdict == "comment-ambiguous":
         print(
             f"ambiguous: {args.path} line(s) {_describe(lines)} look "
-            "collapsed, but every escape there is inside a comment in a file "
-            "that parses — prose holding example code and a collapsed body "
-            "look the same there, and repairing the wrong one would turn a "
-            "comment into live statements. The file was NOT modified. If that "
-            "line really is collapsed, split the comment off it by hand.",
+            "collapsed, but every escape there is inside a comment — prose "
+            "holding example code and a collapsed body look the same there, "
+            "and repairing the wrong one would turn a comment into live "
+            "statements. The file was NOT modified. If that line really is "
+            "collapsed, split the comment off it by hand and run this again.",
             file=sys.stderr,
         )
         return 2

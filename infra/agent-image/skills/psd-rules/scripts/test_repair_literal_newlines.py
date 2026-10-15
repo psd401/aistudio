@@ -223,6 +223,61 @@ COMMENT_HOLDING_EXAMPLE_CODE = (
     "print(x)\n"
 )
 
+# Comment prose with a NON-`#` tail, in a file that does not parse. Neither
+# proof in _vetoed reaches it — the pieces are not all comments, and "the
+# repair stops it parsing" is no help in a file that never parsed — so the
+# comment-span refusal has to apply whether or not the file parses.
+COMMENT_PROSE_TAIL_UNPARSEABLE = (
+    "x = 1\n"
+    "    # Lines split on \\n\\n\\n and \\n\\n\\n here, for the legacy "
+    "export format.\n"
+    "def broken():\n"
+    "    return 1 +\n"
+)
+
+# A partial collapse whose body happens to begin with a comment, in a file
+# whose other lines are correct. It has exactly the shape of comment prose, so
+# it is refused along with it — the documented cost of that refusal.
+COLLAPSED_BODY_BEHIND_A_COMMENT = (
+    "#!/usr/bin/env python3\n"
+    "import sys\n"
+    '# main body\\ndef main():\\n    print("hello from the collapsed body")'
+    "\\n    return 0\\n\\nsys.exit(main())\n"
+)
+
+# Healthy JS whose string is continued with a backslash across CRLF endings.
+# The continuation handling covered LF but not CRLF, so the next line's
+# escapes were read as code and the file was rewritten into invalid JS.
+HEALTHY_JS_CRLF_CONTINUATION = (
+    'const s = "start \\\r\n'
+    "alpha\\n\\n\\n and more text here to pass the sixty character "
+    'threshold";\r\n'
+    "console.log(s);\r\n"
+)
+
+# A valid triple-quoted string AFTER a collapsed line. Tokenising stopped at
+# the collapsed line, so the string that followed was never given a span and
+# its data was rewritten along with the real candidate.
+COLLAPSED_THEN_DOCSTRING = (
+    'def main():\\n    print("hello from the collapsed body here")'
+    "\\n    return 0\\n\n"
+    'DOC = """\n'
+    "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf"
+    "\\nhotel\\nindia\\njuliet\\nkilo\n"
+    '"""\nprint(DOC)\n'
+)
+
+# One file holding BOTH a real collapse and a healthy comment that carries
+# example code. Judged as a group, the real candidate made the comment proof
+# fail and the comment was repaired too.
+COLLAPSE_BESIDE_A_COMMENT_EXAMPLE = (
+    "x = 1\n"
+    "# example: a = 2\\nb = 3\\nc = a + b\\nprint(c)\\n# end of example\n"
+    'def main():\\n    print("hello from the collapsed body here")'
+    "\\n    return 0\\n\n"
+    "main()\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -374,6 +429,35 @@ class Diagnose(unittest.TestCase):
         # file that is all comment cannot have been meant that way.
         self.assertEqual(
             rln.diagnose(COLLAPSED_SHEBANG, "s.py")[0], "broken")
+
+    def test_comment_prose_with_a_tail_is_refused_when_nothing_parses(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COMMENT_PROSE_TAIL_UNPARSEABLE, "t.py")
+        self.assertEqual(verdict, "comment-ambiguous")
+        self.assertEqual(lines, [2])
+
+    def test_a_collapsed_body_behind_a_comment_is_refused_not_guessed(self):
+        # Documented cost: no signal separates this from comment prose, so it
+        # is refused rather than repaired, and the message says what to do.
+        self.assertEqual(
+            rln.diagnose(COLLAPSED_BODY_BEHIND_A_COMMENT, "b.py")[0],
+            "comment-ambiguous")
+
+    def test_a_crlf_continued_js_string_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_CRLF_CONTINUATION, "c.js")[0], "clean")
+
+    def test_a_string_after_a_collapsed_line_keeps_its_span(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSED_THEN_DOCSTRING, "d.py")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_a_real_collapse_does_not_drag_a_comment_in_with_it(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSE_BESIDE_A_COMMENT_EXAMPLE, "m.py")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [3])
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -645,6 +729,17 @@ class FileHandling(unittest.TestCase):
             os.chmod(directory, 0o755)
             shutil.rmtree(directory)
 
+    def test_a_crlf_continued_js_file_is_left_byte_identical(self):
+        raw = HEALTHY_JS_CRLF_CONTINUATION.encode("utf-8")
+        path = self.write_temp(raw, ".js")
+        try:
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 0)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), raw)
+        finally:
+            os.unlink(path)
+
     def test_crlf_line_endings_survive_a_repair(self):
         raw = (
             'import sys\\nimport json\\nprint(json.dumps({"ok": True}))\\n'
@@ -781,6 +876,27 @@ class Languages(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertEqual(content, COMMENT_HOLDING_EXAMPLE_CODE)
         self.assertIn("inside a comment", proc.stderr)
+
+    def test_comment_prose_with_a_tail_is_left_identical(self):
+        proc, content = self.run_on(COMMENT_PROSE_TAIL_UNPARSEABLE, ".py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, COMMENT_PROSE_TAIL_UNPARSEABLE)
+
+    def test_only_the_collapsed_line_changes_beside_a_docstring(self):
+        proc, content = self.run_on(COLLAPSED_THEN_DOCSTRING, ".py")
+        self.assertEqual(proc.returncode, 0)
+        compile(content, "<repaired>", "exec")
+        self.assertIn("alpha\\nbravo\\ncharlie", content)
+
+    def test_only_the_collapsed_line_changes_beside_a_comment(self):
+        proc, content = self.run_on(COLLAPSE_BESIDE_A_COMMENT_EXAMPLE, ".py")
+        self.assertEqual(proc.returncode, 0)
+        compile(content, "<repaired>", "exec")
+        self.assertIn(
+            "# example: a = 2\\nb = 3\\nc = a + b\\nprint(c)\\n"
+            "# end of example\n",
+            content,
+        )
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
