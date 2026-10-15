@@ -13,6 +13,8 @@ import {
   dispatchContentProcessingJob,
   registerCanonicalText,
   registerCanonicalTextIfEnabled,
+  type CanonicalUploadRegistration,
+  type RegisterCanonicalTextInput,
 } from "@/lib/repositories/content-platform";
 import {
   getContentPlatformConfig,
@@ -88,33 +90,50 @@ export interface CreateRepositoryTextItemInput {
 }
 
 /**
- * Shadow-write inline text through the canonical S3 / version / generation /
- * embedding pipeline.
+ * The pair of canonical registration functions a shadow write calls: the
+ * unconditional one after the Repository Manager cutover, the rollout-gated one
+ * (returns `null` while dual-write is off) before it.
+ */
+export interface CanonicalShadowWriteRegistrars<TInput> {
+  register: (input: TInput) => Promise<CanonicalUploadRegistration>;
+  registerIfEnabled: (
+    input: TInput
+  ) => Promise<CanonicalUploadRegistration | null>;
+  /**
+   * Noun used in the log messages, e.g. `"inline text"` or `"repository"`, so
+   * each source keeps a distinguishable message.
+   */
+  logNoun: string;
+}
+
+/**
+ * Shadow-write a just-created repository item through the canonical S3 /
+ * version / generation / embedding pipeline, then dispatch its processing job.
+ *
+ * Shared by every legacy ingestion path (inline text here, uploads in
+ * `actions/repositories/repository-items.actions.ts`) so the dispatch and
+ * failure handling cannot drift between them.
  *
  * Deliberately non-throwing: a canonical failure marks the item `failed` (so the
  * owner can retry it) rather than failing the whole add, because the legacy row
  * is already committed. `canonicalRequired` is true after the Repository Manager
- * cutover, when the canonical version is the ONLY searchable copy.
+ * cutover, when the canonical version is the ONLY searchable copy. A dispatch
+ * failure is only logged: the job row exists and scheduled dispatch picks it up.
  */
-async function shadowWriteCanonicalText(
-  input: {
-    itemId: number;
-    repositoryId: number;
-    userId: number;
-    name: string;
-    content: string;
-    traceId: string;
-  },
+export async function shadowWriteCanonical<TInput extends { itemId: number }>(
+  input: TInput,
+  registrars: CanonicalShadowWriteRegistrars<TInput>,
   log: ReturnType<typeof createLogger>,
   canonicalRequired = false
 ): Promise<void> {
+  const { logNoun } = registrars;
   try {
     const canonical = canonicalRequired
-      ? await registerCanonicalText(input)
-      : await registerCanonicalTextIfEnabled(input);
+      ? await registrars.register(input)
+      : await registrars.registerIfEnabled(input);
     if (!canonical) return;
 
-    log.info("Canonical inline text version registered", {
+    log.info(`Canonical ${logNoun} version registered`, {
       itemId: input.itemId,
       versionId: canonical.version.id,
       processingJobId: canonical.inspectJob.id,
@@ -127,16 +146,13 @@ async function shadowWriteCanonicalText(
         itemVersionId: canonical.version.id,
       });
     } catch (dispatchError) {
-      log.warn(
-        "Canonical inline text processing is pending scheduled dispatch",
-        {
-          processingJobId: canonical.inspectJob.id,
-          error:
-            dispatchError instanceof Error
-              ? dispatchError.message
-              : "Unknown error",
-        }
-      );
+      log.warn(`Canonical ${logNoun} processing is pending scheduled dispatch`, {
+        processingJobId: canonical.inspectJob.id,
+        error:
+          dispatchError instanceof Error
+            ? dispatchError.message
+            : "Unknown error",
+      });
     }
   } catch (error) {
     await updateRepositoryItemStatus(
@@ -144,18 +160,25 @@ async function shadowWriteCanonicalText(
       "failed",
       "Canonical content registration failed. Retry this item."
     ).catch((statusError) => {
-      log.error("Failed to expose canonical inline text registration failure", {
+      log.error(`Failed to expose canonical ${logNoun} registration failure`, {
         itemId: input.itemId,
         error:
           statusError instanceof Error ? statusError.message : "Unknown error",
       });
     });
-    log.error("Canonical inline text shadow write failed", {
+    log.error(`Canonical ${logNoun} shadow write failed`, {
       itemId: input.itemId,
       error: error instanceof Error ? error.message : "Unknown error",
     });
   }
 }
+
+const INLINE_TEXT_REGISTRARS: CanonicalShadowWriteRegistrars<RegisterCanonicalTextInput> =
+  {
+    register: registerCanonicalText,
+    registerIfEnabled: registerCanonicalTextIfEnabled,
+    logNoun: "inline text",
+  };
 
 /**
  * Create one inline-text repository item and start its processing.
@@ -223,7 +246,7 @@ export async function createRepositoryTextItem(
   // legacy row for rollback, but shadow-write a repository-scoped text object so
   // Retrieval v2 receives an immutable version, generation, embeddings, and
   // exact citation through the same worker as file uploads.
-  await shadowWriteCanonicalText(
+  await shadowWriteCanonical(
     {
       itemId,
       repositoryId: input.repositoryId,
@@ -232,6 +255,7 @@ export async function createRepositoryTextItem(
       content: input.content,
       traceId: input.traceId,
     },
+    INLINE_TEXT_REGISTRARS,
     log,
     canonicalCutover
   );
