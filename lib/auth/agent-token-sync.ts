@@ -7,14 +7,25 @@
  * environments, so we mirror the refresh token into Secrets Manager at a
  * path the agent's IAM role can read.
  *
- * Two trigger points write here:
+ * Two trigger points write here, and they are deliberately asymmetric
+ * (#1902 — a secret per signed-in user cost ~$125/month in never-read
+ * secrets):
  *
  *   1. NextAuth JWT callback — on initial sign-in and on every silent
- *      refresh (`auth.ts`). Best-effort; failures must not break login.
+ *      refresh (`auth.ts`). **Update-only**: it rotates a secret that
+ *      already exists and does nothing when there is none, so users who
+ *      never touch the agent never get a secret. Best-effort; failures must
+ *      not break login.
  *   2. /agent-connect-data consent page — when the agent forces an auth
- *      because no token exists (or it's expired). Cross-environment path:
- *      a prod user clicks the consent URL, lands here in *dev*, and the
- *      page sends them through Cognito to mint a refresh token in dev.
+ *      because no token exists (or it's expired). This is the **only**
+ *      caller that passes `{ createIfMissing: true }` and therefore the only
+ *      path that can create the secret. Cross-environment path: a prod user
+ *      clicks the consent URL, lands here in *dev*, and the page sends them
+ *      through Cognito to mint a refresh token in dev.
+ *
+ * A missing secret is already handled end-to-end: the `psd-data` skill mints
+ * a `kind: cognito_data` consent link whenever the token is missing or
+ * expired (`infra/agent-image/skills/psd-data/common.js`).
  *
  * Storage path mirrors the `psd-credentials` / `psd-workspace` convention:
  *   psd-agent-creds/{environment}/user/{ownerEmail}/cognito-refresh
@@ -205,7 +216,9 @@ async function persistCognitoRefreshSecret(options: {
   secretString: string
   ownerEmail: string
   environment: string
+  createIfMissing: boolean
 }): Promise<string | null> {
+  const { createIfMissing, ...secretOptions } = options
   const {
     PutSecretValueCommand,
     CreateSecretCommand,
@@ -215,20 +228,29 @@ async function persistCognitoRefreshSecret(options: {
   try {
     const response = await client.send(
       new PutSecretValueCommand({
-        SecretId: options.secretId,
-        SecretString: options.secretString,
+        SecretId: secretOptions.secretId,
+        SecretString: secretOptions.secretString,
       }),
     )
     log.info("Cognito refresh token rotated in Secrets Manager", {
-      secretId: options.secretId,
+      secretId: secretOptions.secretId,
     })
     return response.ARN ?? null
   } catch (error) {
     if (error instanceof ResourceNotFoundException) {
+      if (!createIfMissing) {
+        // #1902: sign-in must not provision a secret for a user who has never
+        // connected the agent. The consent flow creates it on demand.
+        log.debug(
+          "No cognito-refresh secret for user — skipping create (update-only caller)",
+          { secretId: secretOptions.secretId },
+        )
+        return null
+      }
       return createRefreshSecret({
         client,
         sdk: { CreateSecretCommand, PutSecretValueCommand },
-        ...options,
+        ...secretOptions,
       })
     }
     log.warn("Cognito refresh token PutSecretValue failed", {
@@ -239,6 +261,16 @@ async function persistCognitoRefreshSecret(options: {
   }
 }
 
+export interface SyncCognitoRefreshOptions {
+  /**
+   * Create the secret when none exists yet. Defaults to `false` so the
+   * high-frequency sign-in path only ever *rotates* an existing secret
+   * (#1902). Only `/agent-connect-data` — the explicit user consent flow —
+   * may pass `true`.
+   */
+  createIfMissing?: boolean
+}
+
 /**
  * Persist (or refresh) the user's Cognito refresh token in Secrets Manager.
  *
@@ -246,12 +278,14 @@ async function persistCognitoRefreshSecret(options: {
  * NextAuth callbacks invoke it without `await`, and a failure here must not
  * block sign-in. Errors are logged at WARN level.
  *
- * @returns the secret ARN on success, null in local dev (skipped) or if the
- *          required env vars aren't set.
+ * @returns the secret ARN on success; null in local dev (skipped), if the
+ *          required env vars aren't set, or if no secret exists and
+ *          `createIfMissing` is false.
  */
 export async function syncCognitoRefreshForAgent(
   ownerEmail: string,
   refreshToken: string,
+  options: SyncCognitoRefreshOptions = {},
 ): Promise<string | null> {
   if (shouldSkipRefreshSync(ownerEmail, refreshToken)) return null
   const configuration = cognitoRefreshConfiguration(ownerEmail)
@@ -273,5 +307,6 @@ export async function syncCognitoRefreshForAgent(
     secretString,
     ownerEmail,
     environment,
+    createIfMissing: options.createIfMissing === true,
   })
 }
