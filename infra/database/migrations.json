@@ -179,6 +179,7 @@
     "186-agent-sonnet-5-5-pricing.sql",
     "187-agent-credential-entry-consent-kind.sql",
     "188-agent-schedule-owner-notified.sql",
-    "189-openclaw-repository-write-scopes.sql"
+    "189-openclaw-repository-write-scopes.sql",
+    "190-atrium-capture-execute-scope.sql"
   ]
 }
