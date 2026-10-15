@@ -17,6 +17,7 @@ import type {
 } from "./retrieval-v2/types";
 import {
   assertRepositoriesSearchable,
+  selectLegacyKeywordSearchableRepositoryIds,
   getRepositoryReadiness,
   type RepositoryReadiness,
   type RepositoryReadinessSnapshot,
@@ -168,9 +169,18 @@ export async function searchRepositoryCatalog(input: {
   if (requestedIds.length > 0) {
     const accessible = await getUserAccessibleRepositories(input.cognitoSub);
     const accessibleIds = new Set(accessible.map((repository) => repository.id));
-    await assertRepositoriesSearchable(
-      repositoryIds.filter((repositoryId) => accessibleIds.has(repositoryId))
+    const gatedIds = repositoryIds.filter((repositoryId) =>
+      accessibleIds.has(repositoryId)
     );
+    // This search runs retrieval v2 WITH legacy compatibility (the default
+    // below), so a repository whose only content is legacy keyword-searchable
+    // chunks is genuinely searchable here even though readiness calls it
+    // `failed`. Without this, a targeted search for an item just written on
+    // the legacy path returned REPOSITORY_NOT_READY (#1907 follow-up).
+    await assertRepositoriesSearchable(gatedIds, {
+      legacyKeywordSearchableIds:
+        await selectLegacyKeywordSearchableRepositoryIds(gatedIds),
+    });
   }
   return retrieveRepositoryContent({
     query: input.query,

@@ -10,6 +10,7 @@ const mockAccessibleIds = jest.fn();
 const mockRetrieve = jest.fn();
 const mockExecuteQuery = jest.fn();
 const mockAssertRepositoriesSearchable = jest.fn();
+const mockSelectLegacyKeywordSearchableRepositoryIds = jest.fn();
 
 jest.mock("@/lib/db/drizzle", () => ({
   getUserAccessibleRepositories: (...args: unknown[]) =>
@@ -43,6 +44,8 @@ jest.mock("@/lib/repositories/readiness-service", () => ({
   ),
   assertRepositoriesSearchable: (...args: unknown[]) =>
     mockAssertRepositoriesSearchable(...args),
+  selectLegacyKeywordSearchableRepositoryIds: (...args: unknown[]) =>
+    mockSelectLegacyKeywordSearchableRepositoryIds(...args),
 }));
 
 import {
@@ -96,6 +99,7 @@ describe("repository catalog service", () => {
     jest.clearAllMocks();
     mockAccessibleRepositories.mockResolvedValue(accessibleRows);
     mockAssertRepositoriesSearchable.mockResolvedValue([]);
+    mockSelectLegacyKeywordSearchableRepositoryIds.mockResolvedValue(new Set());
   });
 
   it("lists and describes only the repositories returned by the live ACL query", async () => {
@@ -144,6 +148,30 @@ describe("repository catalog service", () => {
       limit: 5,
       threshold: undefined,
     });
+  });
+
+  it("exempts legacy keyword-searchable repositories from the gate on a targeted search", async () => {
+    // This search runs retrieval v2 WITH legacy compatibility, so a repository
+    // whose only content is legacy chunks is searchable here even though
+    // readiness calls it failed (#1907 follow-up).
+    mockRetrieve.mockResolvedValue({ results: [], diagnostics: {} });
+    const legacyIds = new Set([9]);
+    mockSelectLegacyKeywordSearchableRepositoryIds.mockResolvedValue(legacyIds);
+
+    await searchRepositoryCatalog({
+      cognitoSub: "caller-sub",
+      query: "bell times",
+      repositoryIds: [9, 4, 404],
+    });
+
+    // Only accessible ids are gated, and the exemption set comes from them.
+    expect(mockSelectLegacyKeywordSearchableRepositoryIds).toHaveBeenCalledWith([9, 4]);
+    expect(mockAssertRepositoriesSearchable).toHaveBeenCalledWith([9, 4], {
+      legacyKeywordSearchableIds: legacyIds,
+    });
+    expect(mockRetrieve).toHaveBeenCalledWith(
+      expect.objectContaining({ repositoryIds: [9, 4, 404] })
+    );
   });
 
   it("source disclosure pins the active generation/current version and rechecks both ACL layers", async () => {

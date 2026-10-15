@@ -360,11 +360,12 @@ async function handleRepositoriesAddItem(
   //     neither embedding-recovery (claims generation chunks only) nor dense
   //     retrieval (active canonical generations only) ever reaches it, so it is
   //     keyword-only until the repository moves to canonical ingestion
-  //     → "keyword". Only an UNTARGETED search reaches it: with repositoryIds,
-  //     searchRepositoryCatalog runs assertRepositoriesSearchable first, and
-  //     readiness classifies a repository with active items but no active
-  //     generation as `failed` → REPOSITORY_NOT_READY. The note says so rather
-  //     than loosening that gate, which also guards Nexus bindings.
+  //     → "keyword". The note steers to a TARGETED search: an untargeted one
+  //     only covers the first 50 catalog repositories, and a targeted one
+  //     reaches legacy-only repositories because searchRepositoryCatalog
+  //     exempts them from the readiness gate
+  //     (selectLegacyKeywordSearchableRepositoryIds) — this search, unlike
+  //     Nexus, retrieves legacy-compatible chunks.
   const failed = item.processingStatus === "failed"
   const legacyCompleted = !failed && item.writePath === "legacy"
   return ok({
@@ -382,7 +383,7 @@ async function handleRepositoriesAddItem(
     note: failed
       ? "Ingestion FAILED — the item row exists but nothing is processing it. Do NOT wait or poll: retry the item from Repository Manager, or add it again."
       : legacyCompleted
-        ? "Item stored. repositories_search can find it by keyword match only, and only when called WITHOUT repositoryIds: a search targeted at this repository returns REPOSITORY_NOT_READY until the repository has a canonical index. Meaning-based (semantic) search does not cover it on this deployment until the repository moves to canonical ingestion."
+        ? "Item stored. repositories_search can find it by keyword match only — pass repositoryIds: [this item's repositoryId] to confirm. Meaning-based (semantic) search does not cover it on this deployment until the repository moves to canonical ingestion."
         : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.",
   })
 }

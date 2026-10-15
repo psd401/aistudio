@@ -356,9 +356,10 @@ describe("MCP repositories_add_item (#1907)", () => {
     expect(payload(result).ingestion).toBe("completed")
     expect(payload(result).searchable).toBe("keyword")
     expect(payload(result).note).toContain("by keyword match only")
-    // A targeted search is refused by the readiness gate for a legacy-only
-    // repository, so the note must steer to an untargeted search.
-    expect(payload(result).note).toContain("WITHOUT repositoryIds")
+    // An untargeted search only covers the first 50 catalog repositories, so
+    // the note steers to a search filtered to the item's repository (which the
+    // catalog search exempts from the readiness gate for legacy-only repos).
+    expect(payload(result).note).toContain("pass repositoryIds")
     expect(payload(result).note).not.toMatch(/backfill|start once/i)
   })
 

@@ -254,7 +254,7 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-create --user <email> \
   --name "Transportation SOPs" [--description "Routing and bell-time procedures"]
 node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   --repository-id 42 --name "2026-27 bell times" \
-  (--content "<text>" | --file /tmp/bell-times.md)
+  (--content "<text>" | --file /home/node/.openclaw/work/bell-times.md)
 ```
 
 - `repositories-create` needs `repositories:create`; `repositories-add-item`
@@ -277,9 +277,8 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   `searchable` and a `note` — surface the note rather than implying the content
   is live. `searchable` is `"no"` while ingestion is `processing`; on the legacy
   write path it is `"keyword"` with `ingestion: "completed"` (keyword search
-  finds it now, but only via `repositories-search` WITHOUT a repository filter —
-  a filtered search returns `REPOSITORY_NOT_READY` until the repository has a
-  canonical index; semantic search does not cover it on that deployment). No tool
+  finds it now — confirm with `repositories-search --repository-ids <its
+  repositoryId>`; semantic search does not cover it on that deployment). No tool
   reports a single item's status (`repositories-describe` is repository-level),
   so confirm the item is live by finding it with `repositories-search` before
   relying on it.
