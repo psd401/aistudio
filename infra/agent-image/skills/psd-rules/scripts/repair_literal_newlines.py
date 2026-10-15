@@ -41,9 +41,19 @@ and it tests that signature LINE BY LINE:
     statement after it commented out.
 
 Double-escaping escapes the delimiters as well as the breaks, so a line may
-arrive as `SEP = \"alpha\nbravo\"`. When a line carries no bare quote at
+arrive as `SEP = \"alpha\nbravo\"`. When a Python line carries no bare quote at
 all those escaped quotes are the real delimiters: they move the string state,
 both ends are un-escaped, and the escapes between them are the string's data.
+In JavaScript an escaped quote in code position ends the scan instead — the
+shape is the same, but there is no parser to catch a wrong guess.
+
+Where no proof can exist the script says so rather than choosing. A Python
+comment holding `\n`-separated example code is indistinguishable from a
+collapsed body — both are one comment token whose pieces parse — so in a file
+that parses, a candidate line whose every escape is inside a comment is
+reported ambiguous. The exception is a single-line file: a collapsed script
+opening with a shebang IS one comment token and cannot have been meant that
+way, which is why that case is still repaired.
 
 Line-by-line matters because the real-world shape is usually PARTIAL collapse:
 a few correct header lines followed by a body collapsed onto one line. The
@@ -71,8 +81,8 @@ Each language earns its own evidence test, because only some can be verified:
     `/* */` block opened earlier carries no quote of its own and would look
     exactly like a collapsed body. It is scanned as ONE STREAM across the
     whole file (see _javascript_records), and if that scan cannot be trusted
-    — it ends mid-template, or meets a slash that may open a regex literal —
-    the file is reported ambiguous rather than guessed at.
+    — it ends unbalanced, or meets a slash that may open a regex literal, or
+    an escaped quote — the file is reported ambiguous rather than guessed at.
 
 A candidate line without enough evidence is reported ambiguous (exit 2) and
 left byte-identical.
