@@ -2462,6 +2462,12 @@ export class AgentPlatformStack extends cdk.Stack {
         // Write-only here: one row per delivered scheduled post so a reply in
         // that Chat thread reaches this run's conversation (#1891).
         THREAD_SESSIONS_TABLE: resources.threadSessionsTable.tableName,
+        // Used for exactly one call: minting the owner's re-authorization
+        // link for a schedule that failed on a revoked Google grant (#1890).
+        // Empty → the owner still gets the failure DM, worded without a link.
+        APP_BASE_URL: props.appBaseUrl ?? '',
+        AGENT_INTERNAL_API_KEY_SECRET_ID:
+          resources.agentInternalApiKeySecret.secretName,
       },
     });
 
@@ -2471,6 +2477,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
+    resources.agentInternalApiKeySecret.grantRead(resources.cronLambdaRole);
     resources.routerQueue.grantSendMessages(resources.cronLambdaRole);
     resources.cronReconciliationQueue.grantSendMessages(
       resources.cronLambdaRole,
@@ -3476,6 +3483,22 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(resources.routerLambda).add('Environment', environment);
     cdk.Tags.of(resources.routerLambda).add('ManagedBy', 'cdk');
+
+    // Update the CONSUMER of the Chat-delivery envelope before its PRODUCER.
+    //
+    // The cron queues that envelope and the router parses it with a strict key
+    // allowlist, so any field the cron adds is a field the router must already
+    // accept. Both functions live in this stack and a code-only update to two
+    // Lambdas is otherwise unordered: in the window where the new cron has
+    // shipped and the old router has not, a scheduled post whose primary Chat
+    // delivery failed would be REJECTED by the old parser as malformed and
+    // dead-lettered — the owner silently loses the brief this very issue
+    // (#1890) exists to stop losing. CloudFormation processes updates in
+    // dependency order, so this closes that window.
+    //
+    // Direction matters and must not be reversed: the router does not
+    // reference the cron, and a dependency the other way would be a cycle.
+    resources.cronLambda.node.addDependency(resources.routerLambda);
 
     // Thread → conversation map (#1891). The router only ever reads it, so it
     // is granted here instead of in the role factory's read/write table list.

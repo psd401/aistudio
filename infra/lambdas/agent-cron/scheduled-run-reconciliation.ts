@@ -14,6 +14,14 @@ export interface ScheduledRunReconciliationMessage {
   scheduleName: string;
   sessionId: string;
   startedBy: string;
+  /**
+   * Where to reach the owner if this reconciliation ends in a failure (#1890).
+   * Optional: messages queued by a bundle that predates these fields can still
+   * be in flight during a rolling deploy, and such a run is still recorded —
+   * only the courtesy message is skipped.
+   */
+  dmSpaceName?: string;
+  workspacePrefix?: string;
 }
 
 export interface ScheduledRunReconciliationDependencies {
@@ -37,6 +45,12 @@ export type ScheduledRunReconciliationResult =
       status: 'terminalized';
       errorMessage: string;
     };
+
+const DM_SPACE_RE = /^spaces\/[\w-]{1,256}$/;
+
+function validDmSpaceName(value: unknown): value is string {
+  return typeof value === 'string' && DM_SPACE_RE.test(value);
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null
@@ -112,6 +126,14 @@ export function parseScheduledRunReconciliationMessage(
     scheduleName: requiredString(record, 'scheduleName', 200),
     sessionId: requiredString(record, 'sessionId', 128),
     startedBy,
+    // Validated, not trusted: the space name becomes the destination of a Chat
+    // message, so anything malformed is dropped and the notice skipped.
+    ...(validDmSpaceName(record.dmSpaceName)
+      ? { dmSpaceName: record.dmSpaceName }
+      : {}),
+    ...(optionalString(record, 'workspacePrefix', 512)
+      ? { workspacePrefix: optionalString(record, 'workspacePrefix', 512) }
+      : {}),
   };
 }
 

@@ -51,6 +51,57 @@ export function createScheduledInvocationContextToken(
   return `${signingInput}.${signature}`;
 }
 
+export interface AgentRequestProof {
+  'X-Agent-Request-Proof-Version': 'v1';
+  'X-Agent-Request-Proof-Timestamp': string;
+  'X-Agent-Request-Proof-Nonce': string;
+  'X-Agent-Request-Proof-Body-Sha256': string;
+  'X-Agent-Request-Proof-Signature': string;
+}
+
+/**
+ * Per-request proof headers for a call this Lambda makes to an `/api/agent/*`
+ * broker route, bound to the exact method, route, and body.
+ *
+ * Kept in lockstep with the verifier in `lib/agent-workspace/invocation-context.ts`
+ * and with the router's identical helper — the canonical string, the base64url
+ * proof key, and the header names are all part of that contract.
+ */
+export function createAgentRequestProof(
+  requestProofKey: string,
+  input: { method: string; route: string; body: string | Buffer },
+  options: { timestamp?: number; nonce?: string } = {},
+): AgentRequestProof {
+  const timestamp = String(
+    options.timestamp ?? Math.floor(Date.now() / 1000),
+  );
+  const nonce = options.nonce ?? crypto.randomUUID();
+  const method = input.method.toUpperCase();
+  const bodySha256 = crypto
+    .createHash('sha256')
+    .update(input.body)
+    .digest('hex');
+  const canonical = [
+    'v1',
+    timestamp,
+    nonce,
+    method,
+    input.route,
+    bodySha256,
+  ].join('\n');
+  const signature = crypto
+    .createHmac('sha256', Buffer.from(requestProofKey, 'base64url'))
+    .update(canonical)
+    .digest('base64url');
+  return {
+    'X-Agent-Request-Proof-Version': 'v1',
+    'X-Agent-Request-Proof-Timestamp': timestamp,
+    'X-Agent-Request-Proof-Nonce': nonce,
+    'X-Agent-Request-Proof-Body-Sha256': bodySha256,
+    'X-Agent-Request-Proof-Signature': signature,
+  };
+}
+
 export function deriveScheduledRequestProofKey(
   secret: string,
   token: string,

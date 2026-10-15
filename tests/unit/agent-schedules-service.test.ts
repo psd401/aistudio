@@ -101,18 +101,33 @@ function scheduleRecord(
 
 function harness(
   latestRuns: Map<string, AgentScheduleLastRun> = new Map(),
+  failureStreaks: Map<string, number> = new Map(),
 ) {
   const dynamoSend = jest.fn()
   const schedulerSend = jest.fn()
   const latestBySchedule = jest.fn().mockResolvedValue(latestRuns)
   const recentForOwner = jest.fn().mockResolvedValue([])
+  const consecutiveFailuresBySchedule = jest
+    .fn()
+    .mockResolvedValue(failureStreaks)
   const service = new AgentScheduleService(
     config,
     { send: dynamoSend } as unknown as AgentScheduleDynamoClient,
     { send: schedulerSend } as unknown as SchedulerClient,
-    { latestBySchedule, recentForOwner } as AgentScheduleRunReader,
+    {
+      latestBySchedule,
+      recentForOwner,
+      consecutiveFailuresBySchedule,
+    } as AgentScheduleRunReader,
   )
-  return { service, dynamoSend, schedulerSend, latestBySchedule, recentForOwner }
+  return {
+    service,
+    dynamoSend,
+    schedulerSend,
+    latestBySchedule,
+    recentForOwner,
+    consecutiveFailuresBySchedule,
+  }
 }
 
 function defineAgentScheduleServiceAuthorityBoundarySuite1Part1() {
@@ -418,6 +433,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
     })
   })
 
+}
+
+function defineAgentScheduleRunEnrichmentSuite() {
   it("marks run status unknown when telemetry is unavailable", async () => {
     const { service, dynamoSend, latestBySchedule } = harness()
     dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
@@ -429,6 +447,105 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part2() {it("rolls bac
         lastRunAt: null,
         lastRunStatus: "unknown",
         lastRunError: null,
+        // An unreadable history must not read as a healthy schedule OR as a
+        // failing one (#1890); "unknown" already says it cannot be read.
+        consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
+        failing: false,
+      }),
+    ])
+  })
+
+}
+
+function defineAgentScheduleFailureStreakSuite() {
+  it("marks a schedule failing at three consecutive failed runs", async () => {
+    // #1890: the owner-visible signal that a standing job has stopped working.
+    const { service, dynamoSend, consecutiveFailuresBySchedule } = harness(
+      new Map(),
+      new Map([
+        [SCHEDULE_ID, 2],
+        ["a273413f-7a93-4e43-9b49-1bc8880be024", 7],
+      ]),
+    )
+    dynamoSend.mockResolvedValueOnce({
+      Items: [
+        scheduleRecord(),
+        scheduleRecord({
+          scheduleId: "a273413f-7a93-4e43-9b49-1bc8880be024",
+          name: "Broken brief",
+          createdAt: "2026-07-26T00:00:00.000Z",
+        }),
+      ],
+    })
+
+    const schedules = await service.list(OWNER)
+
+    expect(consecutiveFailuresBySchedule).toHaveBeenCalledWith(OWNER, [
+      SCHEDULE_ID,
+      "a273413f-7a93-4e43-9b49-1bc8880be024",
+    ])
+    expect(schedules[0]).toMatchObject({
+      consecutiveFailures: 2,
+      failing: false,
+    })
+    expect(schedules[1]).toMatchObject({
+      consecutiveFailures: 7,
+      consecutiveFailuresCapped: false,
+      failing: true,
+    })
+  })
+
+}
+
+function defineAgentScheduleSaturationSuite() {
+  it("reports a saturated streak as capped, so a reader says 'at least'", async () => {
+    // The count is measured over a bounded number of runs, so at that bound it
+    // is a floor. Saturation is the server's verdict for the same reason
+    // `failing` is: a reader inferring it would need its own copy of the bound.
+    const { service, dynamoSend } = harness(
+      new Map(),
+      new Map([[SCHEDULE_ID, 500]]),
+    )
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        consecutiveFailures: 500,
+        consecutiveFailuresCapped: true,
+        failing: true,
+      }),
+    ])
+  })
+
+  it("degrades both run fields when only the streak query fails", async () => {
+    // Reporting "last run failed" beside a silently-zeroed streak would read
+    // as "failed once, not failing" — worse than saying it cannot be read.
+    const { service, dynamoSend, consecutiveFailuresBySchedule } = harness(
+      new Map([
+        [
+          SCHEDULE_ID,
+          {
+            createdAt: new Date("2026-10-14T13:30:00.000Z"),
+            status: "error",
+            errorMessage: "Agent temporarily unavailable",
+          },
+        ],
+      ]),
+    )
+    dynamoSend.mockResolvedValueOnce({ Items: [scheduleRecord()] })
+    consecutiveFailuresBySchedule.mockRejectedValueOnce(
+      new Error("Aurora unavailable"),
+    )
+
+    await expect(service.list(OWNER)).resolves.toEqual([
+      expect.objectContaining({
+        scheduleId: SCHEDULE_ID,
+        lastRunAt: null,
+        lastRunStatus: "unknown",
+        consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
+        failing: false,
       }),
     ])
   })
@@ -528,6 +645,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
       {
         recentForOwner: jest.fn().mockResolvedValue([]),
         latestBySchedule: jest.fn().mockResolvedValue(new Map()),
+        consecutiveFailuresBySchedule: jest
+          .fn()
+          .mockResolvedValue(new Map()),
       },
     )
     await expect(service.delete(OWNER, SCHEDULE_ID)).resolves.toBe(SCHEDULE_ID)
@@ -629,6 +749,9 @@ function defineAgentScheduleServiceAuthorityBoundarySuite1Part3() {it("repairs a
 const defineAgentScheduleServiceAuthorityBoundarySuite1 = () => {
   defineAgentScheduleServiceAuthorityBoundarySuite1Part1()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part2()
+  defineAgentScheduleRunEnrichmentSuite()
+  defineAgentScheduleFailureStreakSuite()
+  defineAgentScheduleSaturationSuite()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part2b()
   defineAgentScheduleServiceAuthorityBoundarySuite1Part3()
 };

@@ -177,6 +177,7 @@
     "184-atrium-version-data-access.sql",
     "185-atrium-live-follows-head-backfill.sql",
     "186-agent-sonnet-5-5-pricing.sql",
-    "187-agent-credential-entry-consent-kind.sql"
+    "187-agent-credential-entry-consent-kind.sql",
+    "188-agent-schedule-owner-notified.sql"
   ]
 }

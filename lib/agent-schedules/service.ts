@@ -33,6 +33,8 @@ import {
 import { describeScheduleExpression } from "@/lib/agent-schedules/schedule-description";
 import {
   DrizzleAgentScheduleRunReader,
+  FAILING_SCHEDULE_THRESHOLD,
+  FAILURE_STREAK_RUN_LIMIT,
   type AgentScheduleLastRun,
   type AgentScheduleRun,
   type AgentScheduleRunReader,
@@ -112,6 +114,21 @@ export type PublicAgentSchedule = Pick<
   lastRunAt: string | null;
   lastRunStatus: string | null;
   lastRunError: string | null;
+  /**
+   * Failed runs since this schedule's last success. `lastRunStatus` alone
+   * cannot tell a one-off blip from a job that has been broken for a month,
+   * which is how ~30 staff kept a dead schedule without knowing (#1890).
+   */
+  consecutiveFailures: number;
+  /**
+   * `consecutiveFailures` is a FLOOR, not a total: the streak reached the
+   * bounded number of runs the count is measured over. A reader must say "at
+   * least N" rather than N, which is a number the owner could check and find
+   * wrong — a five-minute schedule saturates this in about two days.
+   */
+  consecutiveFailuresCapped: boolean;
+  /** `consecutiveFailures` has reached the attention threshold. */
+  failing: boolean;
   degraded: boolean;
   degradedReason: string | null;
 };
@@ -396,10 +413,41 @@ export function scheduleTransactionToken(
     .slice(0, 36);
 }
 
+/**
+ * The failure-streak fields every schedule shape reports (#1890).
+ *
+ * Zeroed when run enrichment is unavailable: an unreadable history must not
+ * read as a healthy schedule OR as a failing one, and `lastRunStatus` already
+ * reports "unknown" for that case.
+ */
+function runHealth(
+  runEnrichmentAvailable: boolean,
+  consecutiveFailures: number,
+): Pick<
+  PublicAgentSchedule,
+  "consecutiveFailures" | "consecutiveFailuresCapped" | "failing"
+> {
+  return runEnrichmentAvailable
+    ? {
+        consecutiveFailures,
+        // Saturation is the server's to report, for the same reason `failing`
+        // is: a reader that inferred it would need its own copy of the bound.
+        consecutiveFailuresCapped:
+          consecutiveFailures >= FAILURE_STREAK_RUN_LIMIT,
+        failing: consecutiveFailures >= FAILING_SCHEDULE_THRESHOLD,
+      }
+    : {
+        consecutiveFailures: 0,
+        consecutiveFailuresCapped: false,
+        failing: false,
+      };
+}
+
 function publicSchedule(
   record: AgentScheduleRecord,
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
+  consecutiveFailures = 0,
 ): PublicAgentSchedule {
   const summary = describeScheduleExpression(
     record.schedulerExpression,
@@ -431,6 +479,7 @@ function publicSchedule(
     lastRunError: lastRun?.errorMessage
       ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
       : null,
+    ...runHealth(runEnrichmentAvailable, consecutiveFailures),
     degraded: false,
     degradedReason: null,
   };
@@ -450,6 +499,7 @@ function publicDegradedSchedule(
   value: Record<string, unknown>,
   lastRun?: AgentScheduleLastRun,
   runEnrichmentAvailable = true,
+  consecutiveFailures = 0,
 ): PublicAgentSchedule {
   const schedulerExpression = degradedString(
     value.schedulerExpression,
@@ -489,6 +539,7 @@ function publicDegradedSchedule(
     lastRunError: lastRun?.errorMessage
       ? lastRun.errorMessage.slice(0, LAST_RUN_ERROR_MAX_LENGTH)
       : null,
+    ...runHealth(runEnrichmentAvailable, consecutiveFailures),
     degraded: true,
     degradedReason: "Schedule record requires migration",
   };
@@ -1141,14 +1192,20 @@ export class AgentScheduleService {
         : degradedString(candidate.value.scheduleId, 128, "unknown"),
     );
     let lastRuns = new Map<string, AgentScheduleLastRun>();
+    let failureStreaks = new Map<string, number>();
     let runEnrichmentAvailable = true;
     try {
-      lastRuns = await this.runReader.latestBySchedule(
-        ownerEmail,
-        scheduleIds,
-      );
+      // One failure of either query degrades BOTH: reporting a last-run status
+      // beside a silently-zeroed failure streak would say "last run failed,
+      // not failing", which is worse than saying the history is unreadable.
+      [lastRuns, failureStreaks] = await Promise.all([
+        this.runReader.latestBySchedule(ownerEmail, scheduleIds),
+        this.runReader.consecutiveFailuresBySchedule(ownerEmail, scheduleIds),
+      ]);
     } catch (error) {
       runEnrichmentAvailable = false;
+      lastRuns = new Map();
+      failureStreaks = new Map();
       log.warn("Latest schedule run enrichment unavailable", {
         scheduleCount: candidates.length,
         error: error instanceof Error ? error.message : String(error),
@@ -1160,11 +1217,13 @@ export class AgentScheduleService {
             candidate.record,
             lastRuns.get(scheduleIds[index]),
             runEnrichmentAvailable,
+            failureStreaks.get(scheduleIds[index]) ?? 0,
           )
         : publicDegradedSchedule(
             candidate.value,
             lastRuns.get(scheduleIds[index]),
             runEnrichmentAvailable,
+            failureStreaks.get(scheduleIds[index]) ?? 0,
           ),
     );
   }

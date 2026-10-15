@@ -64,9 +64,14 @@ import {
 import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
 import { fitChatMessageText } from './chat-text-budget';
 import {
+  createAgentRequestProof,
   createScheduledInvocationContextToken,
   deriveScheduledRequestProofKey,
 } from './invocation-context';
+import {
+  buildScheduleFailureNoticeText,
+  decideScheduleFailureNotice,
+} from './schedule-failure-notice';
 import {
   loadAuthorizedSchedule,
   type AuthorizedSchedule,
@@ -93,6 +98,7 @@ import {
   reservePromotedRunId,
   settlePromotedTurnFailure,
   updatePromotedRunTerminal,
+  type RunTelemetry,
 } from './run-telemetry';
 import { runSchedulePreflight } from './schedule-preflight';
 import {
@@ -240,6 +246,12 @@ const JOB_CONTAINER_NAME = process.env.JOB_CONTAINER_NAME || 'job-runner';
 const ROUTER_QUEUE_URL = process.env.ROUTER_QUEUE_URL || '';
 const SCHEDULE_RECONCILIATION_QUEUE_URL =
   process.env.SCHEDULE_RECONCILIATION_QUEUE_URL || '';
+// Web-tier broker, used only to mint the owner's re-authorization link when a
+// schedule fails on a revoked Google grant (#1890). Unset → the failure DM
+// still goes out, with the reply-to-me wording instead of a link.
+const APP_BASE_URL = process.env.APP_BASE_URL || '';
+const AGENT_INTERNAL_API_KEY_SECRET_ID =
+  process.env.AGENT_INTERNAL_API_KEY_SECRET_ID || '';
 
 const runTelemetry = createRunTelemetry(
   {
@@ -266,6 +278,9 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000;
 
 let cachedInvocationSigningSecret: string | null = null;
 let invocationSigningSecretCachedAt: number | null = null;
+
+let cachedInternalApiKey: string | null = null;
+let internalApiKeyCachedAt: number | null = null;
 
 
 // ---------------------------------------------------------------------------
@@ -343,6 +358,121 @@ async function getInvocationSigningSecret(): Promise<string> {
   cachedInvocationSigningSecret = secret;
   invocationSigningSecretCachedAt = Date.now();
   return secret;
+}
+
+/**
+ * Internal API key for the Next.js `/api/agent/*` broker, mirroring the
+ * router. Returns `null` when unconfigured so the caller fails closed to the
+ * link-free wording rather than issuing an unauthenticated request.
+ */
+async function getInternalApiKey(): Promise<string | null> {
+  if (process.env.AGENT_INTERNAL_API_KEY) {
+    return process.env.AGENT_INTERNAL_API_KEY;
+  }
+  if (
+    cachedInternalApiKey
+    && internalApiKeyCachedAt
+    && Date.now() - internalApiKeyCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedInternalApiKey;
+  }
+  if (!AGENT_INTERNAL_API_KEY_SECRET_ID) return null;
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({
+      SecretId: AGENT_INTERNAL_API_KEY_SECRET_ID,
+    }),
+  );
+  cachedInternalApiKey = result.SecretString || '';
+  internalApiKeyCachedAt = Date.now();
+  return cachedInternalApiKey;
+}
+
+const CONSENT_LINK_ROUTE = '/api/agent/consent-link';
+const CONSENT_LINK_TIMEOUT_MS = 5000;
+
+/**
+ * Mint the owner's Google re-authorization link for a failure DM (#1890).
+ *
+ * Deliberately best-effort and `null` on every failure: the owner must still
+ * hear that their schedule is broken even if the link cannot be issued (the
+ * broker rate-limits consent links to 20/hour per owner), so the DM text has a
+ * link-free fallback. The owner is taken from the authoritative schedule
+ * record and bound into the signed context — the broker derives it from there
+ * and rejects any body selector.
+ */
+async function mintOwnerConsentLink(
+  schedule: { ownerEmail: string; scheduleId: string; workspacePrefix: string },
+  sessionId: string,
+  log: Logger,
+): Promise<string | null> {
+  if (!APP_BASE_URL) return null;
+  try {
+    const apiKey = await getInternalApiKey();
+    if (!apiKey) return null;
+    const invocationSecret = await getInvocationSigningSecret();
+    const invocationContext = createScheduledInvocationContextToken(
+      invocationSecret,
+      {
+        ownerEmail: schedule.ownerEmail,
+        sessionId,
+        workspacePrefix: schedule.workspacePrefix,
+      },
+    );
+    const requestBody = JSON.stringify({ kind: 'user_account' });
+    const response = await fetch(
+      `${APP_BASE_URL.replace(/\/+$/, '')}${CONSENT_LINK_ROUTE}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'X-Agent-Invocation-Context': invocationContext,
+          ...createAgentRequestProof(
+            deriveScheduledRequestProofKey(
+              invocationSecret,
+              invocationContext,
+            ),
+            {
+              method: 'POST',
+              route: CONSENT_LINK_ROUTE,
+              body: requestBody,
+            },
+          ),
+        },
+        body: requestBody,
+        signal: AbortSignal.timeout(CONSENT_LINK_TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      log.warn('Consent link for a failing schedule returned non-OK', {
+        httpStatus: response.status,
+        scheduleId: schedule.scheduleId,
+      });
+      return null;
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      url?: unknown;
+    };
+    // Only an absolute https URL on the app's own origin reaches the owner: a
+    // Chat hyperlink is a click target, so an unexpected shape is dropped
+    // rather than rendered.
+    if (typeof body.url !== 'string') return null;
+    const expectedOrigin = new URL(APP_BASE_URL).origin;
+    const parsed = new URL(body.url, expectedOrigin);
+    if (parsed.protocol !== 'https:' || parsed.origin !== expectedOrigin) {
+      log.warn('Consent link had an unexpected origin', {
+        scheduleId: schedule.scheduleId,
+      });
+      return null;
+    }
+    return parsed.toString();
+  } catch (error) {
+    log.warn('Failed to mint a consent link for a failing schedule', {
+      scheduleId: schedule.scheduleId,
+      error: errorDetail(error),
+    });
+    return null;
+  }
 }
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
@@ -1327,6 +1457,7 @@ async function enqueueScheduledChatDelivery(
   text: string,
   requestId: string,
   log: Logger,
+  fireKey?: string,
 ): Promise<void> {
   if (!ROUTER_QUEUE_URL) {
     throw new Error('ROUTER_QUEUE_URL is not configured');
@@ -1335,6 +1466,7 @@ async function enqueueScheduledChatDelivery(
     spaceName,
     text,
     requestId,
+    fireKey,
   );
   if (
     Buffer.byteLength(messageBody, 'utf8') >
@@ -1379,6 +1511,7 @@ function buildScheduledChatDeliveryEnvelope(
   spaceName: string,
   text: string,
   requestId: string,
+  fireKey?: string,
 ): string {
   return JSON.stringify({
     kind: 'agent-chat-delivery-v1',
@@ -1389,6 +1522,11 @@ function buildScheduledChatDeliveryEnvelope(
       durableDelivery: false,
       deliveryRequestId: requestId,
     },
+    // Optional: the router resolves the `deferred` run row this fire left
+    // behind. A fire with no key (a legacy invocation that carries no
+    // occurrence identity) simply omits it; the row then stays `deferred`,
+    // which is still truthful — it is never silently promoted to success.
+    ...(fireKey ? { scheduledRun: { fireKey } } : {}),
   });
 }
 
@@ -1580,6 +1718,10 @@ async function enqueuePromotionReconciliation(
     scheduleName,
     sessionId,
     startedBy: launchIdentity.startedBy,
+    // Carried so a reconciliation that ends in failure can tell the owner,
+    // without a second read of the authoritative schedule record (#1890).
+    dmSpaceName: schedule.dmSpaceName,
+    workspacePrefix: schedule.workspacePrefix,
   };
   try {
     if (!SCHEDULE_RECONCILIATION_QUEUE_URL) {
@@ -1752,11 +1894,23 @@ async function tryPromoteScheduledResult(
 interface ScheduledDeliveryDependencies {
   sendPreparedChatMessage: typeof sendPreparedChatMessage;
   recordThreadSession: typeof recordThreadSession;
+  enqueueScheduledChatDelivery: typeof enqueueScheduledChatDelivery;
+  recordRun: typeof runTelemetry.recordRun;
+  failureStreak: typeof runTelemetry.failureStreak;
+  markOwnerNotified: typeof runTelemetry.markOwnerNotified;
+  sendChatMessage: typeof sendChatMessage;
+  mintOwnerConsentLink: typeof mintOwnerConsentLink;
 }
 
 const scheduledDeliveryDependencies: ScheduledDeliveryDependencies = {
   sendPreparedChatMessage,
   recordThreadSession,
+  enqueueScheduledChatDelivery,
+  recordRun: (...args) => runTelemetry.recordRun(...args),
+  failureStreak: (...args) => runTelemetry.failureStreak(...args),
+  markOwnerNotified: (...args) => runTelemetry.markOwnerNotified(...args),
+  sendChatMessage,
+  mintOwnerConsentLink,
 };
 
 function deliverScheduledResult(
@@ -1781,16 +1935,22 @@ async function deliverScheduledResultWithDependencies(
       scheduleId: schedule.scheduleId,
       scheduleName,
     });
-    return recordScheduledCompletion(context);
+    return recordScheduledCompletion(context, dependencies);
   }
-  const deliveryText = `📋 **${scheduleName}**\n\n${result.response}`;
+  // Single-asterisk bold: Google Chat shows `**name**` as literal asterisks
+  // (infra/agent-image/chat_format.py documents the subset). The agent's own
+  // prose below is already converted by that module at the harness boundary;
+  // this header is composed here and so was never converted.
+  const deliveryText = `📋 *${scheduleName}*\n\n${result.response}`;
   const preparedDelivery = prepareScheduledChatMessage(
     schedule.dmSpaceName,
     deliveryText,
     log,
   );
   const deliveryRequestId = crypto.randomUUID();
-  let deliveredThreadName: string | null = null;
+  // Uninitialized: every path out of the catch below now returns, so a
+  // placeholder would only be dead weight.
+  let deliveredThreadName: string | null;
   try {
     deliveredThreadName = await dependencies.sendPreparedChatMessage(
       schedule.dmSpaceName,
@@ -1801,11 +1961,17 @@ async function deliverScheduledResultWithDependencies(
   } catch (error) {
     const initialDetail = errorDetail(error);
     try {
-      await enqueueScheduledChatDelivery(
+      await dependencies.enqueueScheduledChatDelivery(
         schedule.dmSpaceName,
         preparedDelivery.retryText,
         deliveryRequestId,
         log,
+        // Carries THIS fire's identity so the router can resolve the deferred
+        // run row once the queued post lands (or dead-letters). Only for a run
+        // that succeeded: a failed run is not waiting on its delivery to know
+        // its outcome, and a key here would let the router settle it as
+        // `success` the moment its error message reached the owner.
+        result.ok ? context.fireIdentity?.key : undefined,
       );
     } catch (enqueueError) {
       const enqueueDetail = errorDetail(enqueueError);
@@ -1814,7 +1980,10 @@ async function deliverScheduledResultWithDependencies(
         enqueueError: enqueueDetail,
         deliveryRequestId,
       });
-      await runTelemetry.recordRun(
+      const hardFailure =
+        `Chat delivery failed: ${initialDetail}; ` +
+        `durable enqueue failed: ${enqueueDetail}`;
+      await dependencies.recordRun(
         {
           fireKey: context.fireIdentity?.key,
           userEmail: schedule.ownerEmail,
@@ -1825,14 +1994,38 @@ async function deliverScheduledResultWithDependencies(
           outputTokens: result.outputTokens,
           latencyMs: Date.now() - startTime,
           status: 'error',
-          errorMessage:
-            `Chat delivery failed: ${initialDetail}; ` +
-            `durable enqueue failed: ${enqueueDetail}`,
+          errorMessage: hardFailure,
         },
         log,
       );
+      // This branch used to return without attempting the notice, so repeated
+      // failures here could reach any streak length in silence — and it is
+      // reachable while the owner's DM still works, since the rich scheduled
+      // post can be rejected where a short plain-text warning would land.
+      await notifyOwnerIfScheduleFailing(
+        noticeTargetFromContext(context),
+        { errorMessage: hardFailure, fullErrorMessage: hardFailure },
+        log,
+        dependencies,
+      );
       return { status: 'error', scheduleId: schedule.scheduleId };
     }
+    // A failed run is `error` however its delivery goes (Codex P2 on PR
+    // #1925): recorded as `deferred`, the router would settle it as `success`
+    // once the queued error message landed, and a schedule failing on every
+    // run would reset its own streak whenever Chat hiccuped. The message
+    // itself is still queued above, so the owner still receives it.
+    if (!result.ok) return recordScheduledCompletion(context, dependencies);
+    // The post did NOT happen; it is on the retry queue. Recording this as
+    // success is the bug in #1890 — a run row said the brief was delivered
+    // while the owner had nothing, and nothing ever came back to correct it.
+    // The row is resolved by the router when the queued delivery finishes.
+    return recordScheduledDeferral(
+      context,
+      initialDetail,
+      deliveryRequestId,
+      dependencies,
+    );
   }
   // A reply in this thread is about THIS post, so point it at the run's
   // transcript instead of the generic space+thread session the router would
@@ -1869,7 +2062,7 @@ async function deliverScheduledResultWithDependencies(
     deliveredThreadName,
     dependencies,
   );
-  return recordScheduledCompletion(context);
+  return recordScheduledCompletion(context, dependencies);
 }
 
 /**
@@ -1896,12 +2089,178 @@ async function recordScheduledThreadSession(
   );
 }
 
+/**
+ * Record a run whose answer exists but whose Chat post is still on the retry
+ * queue, and tell the owner if this is the run that makes the schedule
+ * visibly broken.
+ *
+ * Returns `error` rather than `success`: the owner has nothing in hand yet.
+ * Nothing acts on this value (the Lambda's return is observational), so the
+ * honest status costs nothing and a misleading one costs a month of silence.
+ */
+async function recordScheduledDeferral(
+  context: ScheduledResultContext,
+  deliveryDetail: string,
+  deliveryRequestId: string,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
+): Promise<HandlerResult> {
+  const { schedule, scheduleName, sessionId, result, startTime, log } = context;
+  const errorMessage =
+    `Chat delivery failed and was queued for retry: ${deliveryDetail}`;
+  await dependencies.recordRun(
+    {
+      fireKey: context.fireIdentity?.key,
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status: 'deferred',
+      errorMessage,
+    },
+    log,
+  );
+  log.warn('Scheduled response deferred to the durable retry queue', {
+    scheduleId: schedule.scheduleId,
+    scheduleName,
+    deliveryRequestId,
+    hasFireKey: Boolean(context.fireIdentity?.key),
+  });
+  await notifyOwnerIfScheduleFailing(
+    noticeTargetFromContext(context),
+    { errorMessage, fullErrorMessage: errorMessage },
+    log,
+    dependencies,
+  );
+  return { status: 'error', scheduleId: schedule.scheduleId };
+}
+
+/**
+ * One Chat DM to the schedule's owner when their standing job has become
+ * visibly broken (#1890).
+ *
+ * Entirely best-effort: a scheduled run that actually worked must never be
+ * reported as failed because a courtesy DM could not be sent.
+ */
+/**
+ * Everything the owner notice needs, independent of which path produced the
+ * failed run. The direct path builds it from the authoritative schedule
+ * record; the promoted path builds it from the JOB_PAYLOAD the cron wrote at
+ * promotion time. One notifier serves both (#1890).
+ */
+interface ScheduleNoticeTarget {
+  ownerEmail: string;
+  scheduleId: string;
+  scheduleName: string;
+  dmSpaceName: string;
+  workspacePrefix: string;
+  sessionId: string;
+  fireKey?: string;
+}
+
+/**
+ * Narrowed to the four fields the target needs, so both the delivery context
+ * and the pre-execution guard context satisfy it without a cast.
+ */
+type NoticeContext = Pick<
+  ScheduledResultContext,
+  'schedule' | 'scheduleName' | 'sessionId' | 'fireIdentity'
+>;
+
+function noticeTargetFromContext(
+  context: NoticeContext,
+): ScheduleNoticeTarget {
+  return {
+    ownerEmail: context.schedule.ownerEmail,
+    scheduleId: context.schedule.scheduleId,
+    scheduleName: context.scheduleName,
+    dmSpaceName: context.schedule.dmSpaceName,
+    workspacePrefix: context.schedule.workspacePrefix,
+    sessionId: context.sessionId,
+    ...(context.fireIdentity?.key ? { fireKey: context.fireIdentity.key } : {}),
+  };
+}
+
+async function notifyOwnerIfScheduleFailing(
+  target: ScheduleNoticeTarget,
+  recorded: { errorMessage: string | null; fullErrorMessage: string | null },
+  log: Logger,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
+): Promise<void> {
+  const { ownerEmail, scheduleId, scheduleName, sessionId } = target;
+  try {
+    const streak = await dependencies.failureStreak(
+      { userEmail: ownerEmail, scheduleId },
+      log,
+    );
+    // `null` is "unreadable", not "no failures" — staying quiet is the only
+    // safe reading, since the streak and the suppression both live in those
+    // rows. The next failing run reads them again.
+    if (!streak) return;
+    const decision = decideScheduleFailureNotice({
+      streak,
+      currentErrorMessage: recorded.fullErrorMessage,
+    });
+    if (!decision.notify) return;
+    const consentUrl =
+      decision.reason === 'auth'
+        ? await dependencies.mintOwnerConsentLink(target, sessionId, log)
+        : null;
+    await dependencies.sendChatMessage(
+      target.dmSpaceName,
+      buildScheduleFailureNoticeText({
+        scheduleName,
+        reason: decision.reason,
+        consecutiveFailures: decision.consecutiveFailures,
+        // A caller with no text of its own (the supervisor, when the job
+        // runner already stored the real error) defers to the stored newest
+        // error, which is what the streak was classified on anyway.
+        errorMessage: recorded.errorMessage ?? streak.newestErrorMessage,
+        consentUrl,
+      }),
+      log,
+    );
+    // Stamp only now that Chat has accepted the message. Stamping first would
+    // silence the schedule on a send that never landed — the same silence
+    // #1890 exists to end, just harder to notice. Stamping after risks one
+    // repeat message instead, which is the right way round.
+    await dependencies.markOwnerNotified(
+      {
+        userEmail: ownerEmail,
+        scheduleId,
+        ...(target.fireKey ? { fireKey: target.fireKey } : {}),
+      },
+      log,
+    );
+    log.warn('Told the owner their schedule is failing', {
+      scheduleId,
+      scheduleName,
+      reason: decision.reason,
+      consecutiveFailures: decision.consecutiveFailures,
+      hasConsentUrl: Boolean(consentUrl),
+    });
+  } catch (error) {
+    log.error('Failed to notify the owner of a failing schedule', {
+      scheduleId,
+      error: errorDetail(error),
+    });
+  }
+}
+
 async function recordScheduledCompletion(
   context: ScheduledResultContext,
+  dependencies: ScheduledDeliveryDependencies = scheduledDeliveryDependencies,
 ): Promise<HandlerResult> {
   const { schedule, scheduleName, sessionId, result, startTime, log } = context;
   const status: 'success' | 'error' = result.ok ? 'success' : 'error';
-  await runTelemetry.recordRun(
+  // Sanitized like every other error text that crosses a boundary here: this
+  // one now reaches the owner's Chat DM, not just the admin page.
+  const errorMessage = result.ok
+    ? undefined
+    : sanitizeDiagnostic(result.response, 500);
+  await dependencies.recordRun(
     {
       fireKey: context.fireIdentity?.key,
       userEmail: schedule.ownerEmail,
@@ -1912,10 +2271,23 @@ async function recordScheduledCompletion(
       outputTokens: result.outputTokens,
       latencyMs: Date.now() - startTime,
       status,
-      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
+      errorMessage,
     },
     log,
   );
+  if (status === 'error') {
+    await notifyOwnerIfScheduleFailing(
+      noticeTargetFromContext(context),
+      {
+        errorMessage: errorMessage ?? null,
+        // Untruncated, so an authorization signature sitting past the 500th
+        // character still classifies this as the "speak now" case.
+        fullErrorMessage: sanitizeDiagnostic(result.response),
+      },
+      log,
+      dependencies,
+    );
+  }
   log.info('Scheduled task completed', {
     scheduleId: schedule.scheduleId,
     scheduleName,
@@ -1997,6 +2369,39 @@ async function executeLockedScheduledTurn(
 
 type ScheduleGuardFailure = JobLockFailure | ScheduleFireFailure;
 
+/**
+ * Phases where the failure means the owner got NOTHING, which is the only kind
+ * the notice should speak about.
+ *
+ * An allowlist rather than a denylist, because the message it gates says "has
+ * not reached you" — a phase added later that fires after delivery would, by
+ * default, tell someone a schedule they just received had not arrived.
+ *
+ * Left out, deliberately:
+ * - `fire-in-progress` / `fire-executing` / `fire-completed`: each is a
+ *   duplicate invocation that found ANOTHER invocation already owning this
+ *   fire. That other one can still deliver (or already has), so a notice here
+ *   could tell the owner a run is missing minutes before it arrives. Today
+ *   these are `recordRun: false` and never reach this path at all; leaving
+ *   them out keeps that true if the flag ever changes.
+ * - `lock-renew`: a renewal failure happens once the turn is already under
+ *   way.
+ * - `fire-completion` never arrives here: `finalizeScheduleFire` records it
+ *   as a failure only, because it fires AFTER delivery.
+ */
+const OWNER_MISSED_GUARD_PHASES: ReadonlySet<string> = new Set([
+  'fire-config',
+  'fire-acquire',
+  'fire-begin',
+  'lock-config',
+  'lock-acquire',
+  'lock-contention',
+]);
+
+function missedTheOwner(failure: ScheduleGuardFailure): boolean {
+  return OWNER_MISSED_GUARD_PHASES.has(failure.phase);
+}
+
 async function recordScheduleGuardFailure(
   context: Omit<LockedScheduleContext, 'lambdaContext'>,
   failure: ScheduleGuardFailure,
@@ -2025,6 +2430,28 @@ async function recordScheduleGuardFailure(
     },
     log,
   );
+  // A guard failure never reaches the agent, so it never reached the notice
+  // either — yet its `error` row counts in both streak readers and makes
+  // `psd-schedules list` report the schedule as failing. A schedule whose
+  // workspace lock is wedged would therefore be marked broken with its owner
+  // told nothing, indefinitely. `skipped` (a coalesced fire that never ran) is
+  // excluded, as everywhere else.
+  //
+  // A retryable guard failure records this row before throwing for Lambda's
+  // async retry, so a streak already two long can be pushed to three by a
+  // contention that the retry then clears. That costs one slightly-early
+  // message about a schedule which had in fact just failed twice — the
+  // trade is deliberate, and the other way round is the silence above.
+  if (status === 'error' && missedTheOwner(failure)) {
+    await notifyOwnerIfScheduleFailing(
+      noticeTargetFromContext(context),
+      {
+        errorMessage: failure.errorMessage,
+        fullErrorMessage: failure.errorMessage,
+      },
+      log,
+    );
+  }
   return { status, scheduleId: schedule.scheduleId };
 }
 
@@ -2152,16 +2579,37 @@ async function finalizeScheduleFire(
   // The scheduled turn has already reached a terminal external outcome. Make
   // the durability gap visible, but never release/retry the claim here: doing
   // so would replay AgentCore tools and Chat delivery after successful work.
-  await recordScheduleGuardFailure(
-    context,
+  await recordFireCompletionGap(context, completion.errorMessage);
+}
+
+/**
+ * A failure record ONLY, never a run row — which is why `telemetry` is typed to
+ * offer nothing else.
+ *
+ * The run row for this fire already holds its real outcome under the same
+ * `fire_key`, and a run write would upsert over it: a brief the owner just
+ * received would become an `error` that both streak readers count, that
+ * `list` reports as failing, and that a later genuine failure would cite in
+ * "has not reached you for N runs" (#1890).
+ */
+async function recordFireCompletionGap(
+  context: Omit<LockedScheduleContext, 'lambdaContext'>,
+  errorMessage: string,
+  telemetry: Pick<RunTelemetry, 'recordCronFailure'> = runTelemetry,
+): Promise<void> {
+  const { schedule, scheduleName, sessionId, log } = context;
+  await telemetry.recordCronFailure(
     {
-      phase: 'fire-completion',
+      userEmail: schedule.ownerEmail,
+      scheduleId: schedule.scheduleId,
+      fireKey: context.fireIdentity?.key,
+      scheduleName,
+      sessionId,
+      errorMessage,
       severity: 'error',
-      errorMessage: completion.errorMessage,
-      retryable: false,
-      recordRun: true,
+      context: { phase: 'fire-completion' },
     },
-    'error',
+    log,
   );
 }
 
@@ -2401,6 +2849,29 @@ async function handleJobRunnerStopped(
         ),
       recordFailure: (record) =>
         runTelemetry.recordCronFailureStrict(record, log),
+      // Closes the promoted path (#1890). This supervisor is invoked for every
+      // stopped job task, whichever side wrote the terminal row, so it is the
+      // one hook that covers a normal job-runner failure, a hard task failure,
+      // and a reconciliation repair alike — and the JOB_PAYLOAD it reads
+      // already carries the owner's DM space, so no second read of the
+      // authoritative schedule record is needed.
+      notifyOwner: (run, target) =>
+        notifyOwnerIfScheduleFailing(
+          {
+            ownerEmail: run.userEmail,
+            scheduleId: run.scheduleId,
+            scheduleName: run.scheduleName ?? run.scheduleId,
+            dmSpaceName: target.dmSpaceName,
+            workspacePrefix: target.workspacePrefix,
+            sessionId: run.sessionId,
+            ...(run.fireKey ? { fireKey: run.fireKey } : {}),
+          },
+          {
+            errorMessage: run.errorMessage ?? null,
+            fullErrorMessage: run.errorMessage ?? null,
+          },
+          log,
+        ),
     },
     log,
   );
@@ -2485,6 +2956,28 @@ async function handleScheduledRunReconciliation(
     scheduleId: message.scheduleId,
     startedBy: message.startedBy,
   });
+  // The third and last path that writes a promoted run's terminal error row,
+  // after the job runner itself and the stopped-task supervisor. All three now
+  // reach the notice, so a schedule that only ever fails via promotion is no
+  // longer silent (#1890).
+  if (message.dmSpaceName) {
+    await notifyOwnerIfScheduleFailing(
+      {
+        ownerEmail: message.userEmail,
+        scheduleId: message.scheduleId,
+        scheduleName: message.scheduleName,
+        dmSpaceName: message.dmSpaceName,
+        workspacePrefix: message.workspacePrefix ?? '',
+        sessionId: message.sessionId,
+        fireKey: message.fireKey,
+      },
+      {
+        errorMessage: reconciliation.errorMessage,
+        fullErrorMessage: reconciliation.errorMessage,
+      },
+      log,
+    );
+  }
   return { status: 'error', scheduleId: message.scheduleId };
 }
 
@@ -2518,6 +3011,10 @@ export const agentCronTestHelpers = {
   shouldRetainScheduledTurnLock,
   deliverScheduledResult,
   deliverScheduledResultWithDependencies,
+  scheduledDeliveryDependencies,
+  guardFailureMissedTheOwner: missedTheOwner,
+  recordFireCompletionGap,
+  notifyOwnerIfScheduleFailing,
 };
 
 export async function handler(

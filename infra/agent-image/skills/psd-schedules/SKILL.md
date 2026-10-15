@@ -58,6 +58,30 @@ detail when applicable. Schedules that have not fired yet report
 `lastRunStatus: "never run"`. If run telemetry is temporarily unavailable,
 the status is `"unknown"` instead of being reported as never run.
 
+A schedule with 3 or more consecutive failed runs also reports
+`failing: true` and a `failingReason` naming the streak. When the streak is
+long enough to saturate the window the count is measured over, the reason says
+"at least N" — report it that way rather than as an exact total. Treat that as
+actionable, not informational: say so plainly in your reply, run
+`runs.js --schedule-id <id>` for the reason, and fix or disable the schedule.
+
+The platform usually sends the owner one Chat message of its own when a
+schedule starts failing, so lead with what you FOUND rather than repeating a
+generic "this is broken" warning. Do not assert that they were already told —
+you cannot see whether that message went out, and for a schedule that was
+already failing before this existed, or whose message failed to send, it may
+not have.
+
+Run statuses you will see in `lastRunStatus` and in `runs`:
+
+| Status | Meaning |
+|---|---|
+| `success` | Ran and the answer reached the owner. |
+| `error` | Ran and failed, or produced nothing usable. Read `errorMessage`. |
+| `deferred` | Ran and produced an answer, but the Chat post failed and is queued for retry. **Not** "has not run yet" — the owner has nothing in hand, so count it as a failure. It becomes `success` or `error` when the retry finishes. |
+| `skipped` | Never ran; the fire was coalesced away. Not a failure. |
+| `promoted` | Handed to the background job runner; its own row carries the outcome. |
+
 ### `update_schedule` — change fields on an existing schedule
 
 ```bash
