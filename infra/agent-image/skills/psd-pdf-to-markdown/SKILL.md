@@ -78,8 +78,11 @@ images.** Render the pages and read them:
 
 ```bash
 python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
-  --path /home/node/.openclaw/work/scan.pdf --rasterize-pages /home/node/.openclaw/work/pdf-pages
+  --path /home/node/.openclaw/work/scan.pdf --rasterize-pages /home/node/.openclaw/work/pdf-pages/scan
 ```
+
+The `--rasterize-pages` directory must be empty. `work/` survives between turns,
+so give every scan its own directory (`pdf-pages/<name>`) rather than reusing one.
 
 The result carries `pages_rendered` (absolute PNG paths, one per page, 150 DPI) plus
 `text_layer: "none"`. **Read those images and answer the question from them.** Do not

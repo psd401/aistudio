@@ -44,6 +44,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import sys
 import tempfile
@@ -421,6 +422,18 @@ def drop_image_references(markdown: str, dropped) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
+def _fresh_raster_dir() -> Path:
+    """A rasterize target that cannot already hold another scan's pages.
+
+    work/ survives between turns (#1895), so a FIXED suggestion such as
+    work/pdf-pages would still hold the previous scan's renders, and the
+    must-be-empty check below would refuse the very command we recommend —
+    for the next scan and for every retry. A fresh name per suggestion
+    avoids that without ever deleting anything.
+    """
+    return WORK_DIR / "pdf-pages" / secrets.token_hex(4)
+
+
 def _rerun_command_with_rasterize(args) -> str:
     """The exact command that turns this dead end into a readable result."""
     if args.url:
@@ -431,7 +444,7 @@ def _rerun_command_with_rasterize(args) -> str:
         source = f'--path "{args.path}"'
     return (
         "python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py "
-        f"{source} --rasterize-pages {WORK_DIR / 'pdf-pages'}"
+        f"{source} --rasterize-pages {_fresh_raster_dir()}"
     )
 
 
@@ -575,7 +588,11 @@ def main():
                 "bad_args",
             )
         if any(raster_dir.iterdir()):
-            _fail("--rasterize-pages directory must be empty", "bad_args")
+            _fail(
+                "--rasterize-pages directory must be empty; use a new one, "
+                f"e.g. --rasterize-pages {_fresh_raster_dir()}",
+                "bad_args",
+            )
 
     with tempfile.TemporaryDirectory() as tmp:
         # Resolve the input PDF to a local path.

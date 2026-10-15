@@ -3612,9 +3612,14 @@ class DurableScratchDirectoryTests(unittest.TestCase):
 
         seen = []
         real = workspace_sync._remote_mutable_paths_to_delete
-        spy_mock = mock.Mock(side_effect=lambda *a: (
-            seen.append(real(*a)) or (_ for _ in ()).throw(_Stop())
-        ))
+
+        def record_then_stop(*args):
+            # Capture what the deletion pass would remove, then stop the push
+            # before it reaches the broker.
+            seen.append(real(*args))
+            raise _Stop()
+
+        spy_mock = mock.Mock(side_effect=record_then_stop)
         with self._patch_workspace(), mock.patch.object(
             workspace_sync,
             "_open_regular_no_follow",
@@ -3696,9 +3701,14 @@ class DurableScratchDirectoryTests(unittest.TestCase):
 
         seen = []
         real = workspace_sync._remote_mutable_paths_to_delete
-        spy_mock = mock.Mock(side_effect=lambda *a: (
-            seen.append(real(*a)) or (_ for _ in ()).throw(_Stop())
-        ))
+
+        def record_then_stop(*args):
+            # Capture what the deletion pass would remove, then stop the push
+            # before it reaches the broker.
+            seen.append(real(*args))
+            raise _Stop()
+
+        spy_mock = mock.Mock(side_effect=record_then_stop)
         with self._patch_workspace(), mock.patch.object(
             workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 1
         ), mock.patch.object(
