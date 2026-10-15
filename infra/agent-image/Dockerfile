@@ -193,8 +193,15 @@ RUN python3 -m venv /opt/agentcore-venv && \
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
 
-# Create workspace and config directories
-RUN mkdir -p /home/node/.openclaw/memory
+# Create workspace and config directories.
+#
+# `work/` is the durable scratch directory every skill writes its working files
+# and finished outputs into (#1895). It is created here for the cold path that
+# never reaches a restore, and recreated after every restore by
+# workspace_sync.ensure_work_directory() — an empty directory is not an S3
+# object, so it cannot come back from a pull on its own. Both are needed: the
+# model must be able to name the path without first checking whether it exists.
+RUN mkdir -p /home/node/.openclaw/memory /home/node/.openclaw/work
 
 # Copy PSD configuration files
 # openclaw.json tuning notes (keep here — JSON can't carry comments and

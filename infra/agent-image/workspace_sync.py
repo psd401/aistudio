@@ -217,6 +217,43 @@ MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 # window. Lowering works in the other order: a stale, smaller value here is
 # merely conservative and rejects early with a clear message.
 BROKER_PRIVATE_UPLOAD_MAX_BYTES = 512 * 1024 * 1024
+# ---------------------------------------------------------------------------
+# Durable scratch directory (#1895)
+# ---------------------------------------------------------------------------
+# Thirteen skills used to tell the agent to write its working files AND its
+# finished outputs under /tmp. /tmp is not part of the workspace — this module
+# only round-trips /home/node/.openclaw — and each turn may land on a fresh
+# microVM, so anything left in /tmp between turns is simply gone. In a read of
+# 375 staff members' agent use (Aug–Oct 2026) that cost real deliveries: PDFs
+# and signs that "sat unpublished in /tmp" were never sent (a first-day teacher
+# left with nothing), a case manager's bulk build was set back by the wipes,
+# and a deputy principal's proposal source came back ENOENT and had to be
+# rebuilt.
+#
+# `work/` is an ordinary checkpoint-MANAGED subdirectory of the workspace, so
+# it needs no new sync machinery: it is listed, pulled, pushed and
+# generation-fenced exactly like `memory/`. It inherits the policy exclusions
+# in lib/agent-workspace/workspace-policy.json, which is what keeps a
+# `work/node_modules` or `work/.venv` out of the checkpoint
+# (_is_regenerable_segment matches those segments at any depth).
+#
+# What it does need is its own per-file ceiling — see
+# MAX_WORK_FILE_SYNC_BYTES.
+WORK_DIR_RELATIVE = "work"
+# Per-file sync ceiling that applies to `work/` ONLY, deliberately far below
+# BROKER_PRIVATE_UPLOAD_MAX_BYTES (512 MiB).
+#
+# Scratch is where the media, print and render skills land their output, and
+# the whole workspace is restored on every cold boot: a single 300 MB render
+# that rode along would be re-downloaded for the rest of the owner's life on
+# this prefix. Over this size the file is EXCLUDED with a logged warning and
+# the push still SUCCEEDS — see push_workspace(). That asymmetry is the point:
+# failing the push instead would also throw away the turn's memory writes, and
+# the oversized file is still on local disk for the remainder of the turn, so
+# same-turn delivery (psd-rules Rule 16) is unaffected. Large media belongs in
+# `.media-scratch/` — checkpoint-excluded, transport-only — via
+# skills/_shared/media-relay.js.
+MAX_WORK_FILE_SYNC_BYTES = 64 * 1024 * 1024
 # Raised from 1,000 (#1353) after that cap silently destroyed a user's agent
 # memory on 2026-07-27. Real workspaces already exceed it: two of the 38 live
 # prefixes hold ~5,000 objects each. The cap is a runaway-traversal backstop,
@@ -855,6 +892,77 @@ def _should_skip_relative(relative: str) -> bool:
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
+
+
+def _is_work_relative(relative: str) -> bool:
+    """True for a path inside the durable scratch directory (#1895)."""
+    rel = relative.lstrip("/")
+    return rel == WORK_DIR_RELATIVE or rel.startswith(
+        f"{WORK_DIR_RELATIVE}/"
+    )
+
+
+def ensure_work_directory() -> None:
+    """Create the durable scratch directory before the model's first tool call.
+
+    S3 has no directories, so an EMPTY `work/` is never an object and never
+    comes back from a restore; a forced exact restore also prunes it as an
+    uncommitted local extra. Recreating it after every restore is the only
+    reason a skill can name the path unconditionally instead of teaching the
+    model to mkdir first — which is exactly the step that got skipped when the
+    skills said /tmp.
+
+    Ownership follows the workspace root rather than the caller: the restore
+    runs as root in the wrapper while OpenClaw is dropped to `node`, so a
+    root-owned 0700 directory here would be unwritable by every skill. This
+    mirrors _prepare_committed_remote_parents().
+    """
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    workspace_metadata = WORKSPACE_DIR.stat()
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        created = False
+        try:
+            metadata = os.stat(
+                WORK_DIR_RELATIVE,
+                dir_fd=workspace_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            os.mkdir(WORK_DIR_RELATIVE, mode=0o700, dir_fd=workspace_fd)
+            created = True
+        else:
+            if not stat.S_ISDIR(metadata.st_mode):
+                # A symlink or regular file at this name would silently
+                # redirect every skill's output out of the synced tree — the
+                # precise failure this directory exists to end. Replace it.
+                logger.warning(
+                    "workspace scratch path %s was not a directory; replacing",
+                    WORK_DIR_RELATIVE,
+                )
+                os.unlink(WORK_DIR_RELATIVE, dir_fd=workspace_fd)
+                os.mkdir(WORK_DIR_RELATIVE, mode=0o700, dir_fd=workspace_fd)
+                created = True
+        if created:
+            work_fd = os.open(
+                WORK_DIR_RELATIVE,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=workspace_fd,
+            )
+            try:
+                os.fchown(
+                    work_fd,
+                    workspace_metadata.st_uid,
+                    workspace_metadata.st_gid,
+                )
+                os.fchmod(work_fd, 0o700)
+            finally:
+                os.close(work_fd)
+    finally:
+        os.close(workspace_fd)
 
 
 def _is_checkpoint_managed_relative(relative: str) -> bool:
@@ -2425,6 +2533,10 @@ def pull_workspace(
     _pending_atomic_workspace_finalizations.pop(prefix, None)
     _force_exact_workspace_restores.discard(prefix)
 
+    # After the tree is exact, never before: a forced exact restore prunes
+    # uncommitted local extras, and an empty scratch directory is one.
+    ensure_work_directory()
+
     logger.info(
         "workspace pull: prefix=%s files=%d skipped=%d migrated=%s "
         "generation=%s elapsed_s=%.1f",
@@ -2478,6 +2590,9 @@ def refresh_workspace(prefix: str) -> int:
         and cached.generation == snapshot.generation
     ):
         _committed_workspace_generations[prefix] = checkpoint.generation
+        # A warm, unchanged workspace skips pull_workspace entirely, so this
+        # is the only place the scratch directory gets recreated on that path.
+        ensure_work_directory()
         logger.info(
             "workspace refresh: prefix=%s generation=%s unchanged",
             prefix,
@@ -3417,6 +3532,24 @@ def push_workspace(
         except OSError as exc:
             logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
             preparation_errors.append(f"{relative}: {exc}")
+            continue
+        if (
+            _is_work_relative(relative)
+            and metadata.st_size > MAX_WORK_FILE_SYNC_BYTES
+        ):
+            source.close()
+            # EXCLUDED, not an error — see MAX_WORK_FILE_SYNC_BYTES. The path
+            # deliberately stays in local_mutable_paths so the deletion pass
+            # below leaves any earlier, smaller committed version alone: a
+            # stale copy in S3 is recoverable, a delete-marker is not.
+            logger.warning(
+                "workspace push exclude oversized scratch file %s "
+                "(%d bytes exceeds the %d-byte %s/ sync limit)",
+                relative,
+                metadata.st_size,
+                MAX_WORK_FILE_SYNC_BYTES,
+                WORK_DIR_RELATIVE,
+            )
             continue
         if metadata.st_size > BROKER_PRIVATE_UPLOAD_MAX_BYTES:
             source.close()
