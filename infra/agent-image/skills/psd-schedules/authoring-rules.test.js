@@ -82,3 +82,80 @@ describe('scheduled-run capability documentation', () => {
     expect(operations).toEqual(['list', 'runs']);
   });
 });
+
+/**
+ * Duplicate-prevention guidance (#1889).
+ *
+ * The broker now refuses a name collision (`name_conflict`) and a likely
+ * duplicate (`possible_duplicate`), both HTTP 409 with the existing schedule's
+ * id. That only stops duplicates if the SKILL.md tells the agent to list
+ * first, to update rather than re-create, and to retire the schedule it is
+ * replacing — the old behaviour was to retry the failed create under a new
+ * name, which is exactly how one counselor got four form watchers in a day.
+ */
+describe('duplicate-prevention guidance', () => {
+  test('tells the agent to list before create', () => {
+    expect(SKILL).toMatch(/Run `list` before every `create`/);
+  });
+
+  test('tells the agent to update rather than create a second schedule', () => {
+    expect(SKILL).toContain('Never create a second schedule for the same job');
+    expect(SKILL).toMatch(/Creating is not how you change a schedule/);
+  });
+
+  test('tells the agent to retire the schedule it replaces', () => {
+    // Semantic, not prose-shaped: the replacement guidance must name both
+    // ways to retire the old schedule, in whatever wording it uses.
+    const section = SKILL.slice(
+      SKILL.indexOf('Never create a second schedule for the same job')
+    );
+    expect(section).toMatch(/\bdelete\b/);
+    expect(section).toMatch(/--enabled false/);
+    expect(section).toMatch(/\bfirst\b/);
+  });
+
+  test('documents both refusal codes the broker returns', () => {
+    expect(SKILL).toContain('name_conflict');
+    expect(SKILL).toContain('possible_duplicate');
+    expect(SKILL).toMatch(/existingScheduleId/);
+  });
+
+  test('documents --confirm-new and warns against using it to bypass errors', () => {
+    expect(SKILL).toContain('--confirm-new');
+    expect(SKILL).toMatch(/It is \*\*not\*\* the way past an\s*\n?error/);
+  });
+
+  test('matches the flag create.js actually accepts', () => {
+    const create = fs.readFileSync(path.join(__dirname, 'create.js'), 'utf8');
+    expect(create).toContain("args['confirm-new']");
+    expect(create).toContain('confirmNew:');
+    expect(create).toContain('[--confirm-new]');
+  });
+
+  test('tells the agent what a 409 without a code means', () => {
+    // The integrity refusals also answer 409, with no `code`. Without this
+    // carve-out the table above reads as "409 implies one of these two", and
+    // the agent would hunt for a field that is not there — or try to rename
+    // its way out of a corrupt-record error.
+    expect(SKILL).toMatch(/409 that carries no `code`/);
+  });
+
+  test('create.js and update.js surface the code the SKILL.md table tells the agent to read', () => {
+    // The broker returns `code` in the JSON body, which requestAgentBroker
+    // hangs off error.responseBody. Printing only error.message meant the
+    // documented field never reached the agent. Both scripts can be refused.
+    const common = fs.readFileSync(path.join(__dirname, 'common.js'), 'utf8');
+    expect(common).toContain('responseBody');
+    const create = fs.readFileSync(path.join(__dirname, 'create.js'), 'utf8');
+    const update = fs.readFileSync(path.join(__dirname, 'update.js'), 'utf8');
+    expect(create).toContain('main().catch(failWithRefusal)');
+    expect(update).toContain('main().catch(failWithRefusal)');
+  });
+
+  test('matches the flag update.js actually accepts', () => {
+    const update = fs.readFileSync(path.join(__dirname, 'update.js'), 'utf8');
+    expect(update).toContain("args['confirm-new']");
+    expect(update).toContain('[--confirm-new]');
+    expect(SKILL).toMatch(/\[--enabled true\|false\] \[--confirm-new\]/);
+  });
+});

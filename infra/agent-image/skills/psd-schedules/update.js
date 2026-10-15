@@ -10,6 +10,7 @@ const {
   parseArgs,
   emit,
   requestScheduleOperation,
+  failWithRefusal,
 } = require('./common');
 
 function parseBoolean(value) {
@@ -24,7 +25,12 @@ async function main() {
   if (args.help) {
     process.stdout.write(
       'Usage: update.js --schedule-id <id> [--name <n>] [--prompt <p>] ' +
-        '[--cron <c>] [--timezone <tz>] [--enabled true|false]\n',
+        '[--cron <c>] [--timezone <tz>] [--enabled true|false] ' +
+        '[--confirm-new]\n\n' +
+        'The broker refuses an update that would leave this schedule an ' +
+        'enabled copy of another one (code "possible_duplicate", HTTP 409 ' +
+        'with the existing schedule id). Pass --confirm-new only when both ' +
+        'are genuinely wanted.\n',
     );
     return;
   }
@@ -46,9 +52,8 @@ async function main() {
     payload.enabled = parseBoolean(args.enabled);
   }
   if (Object.keys(payload).length === 2) fail('No fields provided to update');
+  if (args['confirm-new'] === true) payload.confirmNew = true;
   emit(await requestScheduleOperation(payload));
 }
 
-main().catch((error) => {
-  fail(error instanceof Error ? error.message : String(error));
-});
+main().catch(failWithRefusal);

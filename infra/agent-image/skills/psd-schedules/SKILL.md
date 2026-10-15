@@ -39,8 +39,13 @@ node /opt/psd-skills/psd-schedules/create.js \
   --name "<display name>" \
   --prompt "<what to prompt the agent at fire time>" \
   --cron "<5-field cron>" \
-  --timezone "<IANA TZ, default America/Los_Angeles>"
+  --timezone "<IANA TZ, default America/Los_Angeles>" \
+  [--confirm-new]
 ```
+
+**Run `list` before every `create`.** Not as a courtesy — the broker refuses
+creates that look like duplicates, and `list` is how you find the schedule you
+should have been changing instead.
 
 ### `list_schedules` — list the caller's schedules
 
@@ -59,7 +64,7 @@ the status is `"unknown"` instead of being reported as never run.
 node /opt/psd-skills/psd-schedules/update.js \
   --schedule-id <id> \
   [--name "<name>"] [--prompt "<prompt>"] [--cron "<cron>"] \
-  [--timezone "<tz>"] [--enabled true|false]
+  [--timezone "<tz>"] [--enabled true|false] [--confirm-new]
 ```
 
 ### `delete_schedule` — remove a schedule permanently
@@ -212,8 +217,9 @@ context the future-you will have. So:
 ## Workflow
 
 **Creating.** Gather name, prompt, time-of-day, day(s), timezone (default
-Pacific). Translate to cron. State the full schedule back in plain language
-and confirm. Run `create`. Then read back what was actually saved — see below.
+Pacific). Translate to cron. **Run `list` first** and check whether this job
+already exists. State the full schedule back in plain language and confirm.
+Run `create`. Then read back what was actually saved — see below.
 
 **Modifying.** If you don't know the `scheduleId`, run `list` first. Then
 `update` or `delete`. Confirm what changed — don't echo raw JSON. Read back
@@ -252,6 +258,53 @@ schedule is paused and will not fire until it is enabled. Schedules created
 before this read-back existed were never re-checked — several have been firing on the wrong days or
 in the wrong month for weeks, unnoticed, because nothing ever showed the owner
 what was stored.
+
+## Never create a second schedule for the same job
+
+Creating is not how you change a schedule. `update` is.
+
+- **The user is changing an existing job** — a different time, a tweaked
+  prompt, a new name — then `list`, find it, and `update` it. Do not create.
+- **You are replacing a job** with a differently-shaped one, then retire the
+  old schedule **first** — `delete` it, or `update` it with `--enabled false`
+  — and only then create the replacement. Retiring it first also keeps a
+  replacement that happens to share the old cadence and opening prompt from
+  being refused as a duplicate of the thing it replaces. An old schedule left
+  enabled beside its replacement keeps firing; one assistant principal
+  received both for weeks.
+- **A `create` failed** — read the error and act on it. Never retry the same
+  create under a new name.
+
+The broker enforces this, and both refusals are HTTP 409 carrying the existing
+schedule's id:
+
+| `code` | Meaning | What to do |
+|---|---|---|
+| `name_conflict` | A schedule with that name already exists | `update` the schedule at `existingScheduleId`, or `delete` it first |
+| `possible_duplicate` | An **enabled** schedule already runs the same cadence and the same opening prompt | `update` the schedule at `existingScheduleId`, or pass `--confirm-new` |
+
+`update` gets the same `possible_duplicate` refusal when it would leave the
+schedule an enabled copy of another one — re-enabling it, or changing the
+cadence or prompt of an enabled one. A rename alone is never refused. If the
+user is replacing the other schedule, retire that one first, then retry the
+update.
+
+A 409 that carries no `code` is neither of these — it is a data-integrity
+refusal on an existing record, not a duplicate. Report its message to the user
+and stop; renaming or `--confirm-new` will not clear it.
+
+If `list` does not show the schedule the 409 names, do **not** force the
+create through with `--confirm-new`. That combination means the broker and the
+listing disagree — report the id from the error to the user and ask, rather
+than adding a schedule nobody can see.
+
+`--confirm-new` is for the rare case where a second copy is genuinely wanted
+(same cadence, deliberately duplicated job). It is **not** the way past an
+error — if you cannot explain to the user why they want two, you want
+`update`. Four near-identical 15-minute form watchers landed in one counselor's
+account in a single day because each failed create was retried under a new
+name; one of them had a stale baseline and messaged "no new submissions" every
+ten minutes.
 
 **Rules.**
 

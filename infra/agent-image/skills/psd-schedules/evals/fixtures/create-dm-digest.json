@@ -2,6 +2,17 @@
   {
     "route": "/api/agent/schedules",
     "method": "POST",
+    "request_body": {"operation": "list"},
+    "response": {
+      "status": 200,
+      "body": {
+        "schedules": []
+      }
+    }
+  },
+  {
+    "route": "/api/agent/schedules",
+    "method": "POST",
     "request_body": {"operation": "create"},
     "response": {
       "status": 200,
