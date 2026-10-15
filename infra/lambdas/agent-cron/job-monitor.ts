@@ -270,7 +270,7 @@ export function isJobRunnerStoppedEvent(
  * message cannot be sent.
  */
 async function tellOwnerIfPossible(
-  record: ScheduledRunRecord,
+  run: { record: ScheduledRunRecord; terminalApplied: boolean },
   rawPayload: string,
   dependencies: JobMonitorDependencies,
   log: JobMonitorLogger,
@@ -282,7 +282,14 @@ async function tellOwnerIfPossible(
     log.warn('Promoted job failure has no owner DM target in its payload', context);
     return;
   }
-  await dependencies.notifyOwner(record, target);
+  // Not applied means the job runner already terminalized this row with the
+  // real agent/tool error, and the supervisor's own "task stopped" text was
+  // never stored. Hand the notice no message of its own, so it reports the
+  // stored one the streak reader returns instead of the container exit.
+  await dependencies.notifyOwner(
+    run.terminalApplied ? run.record : { ...run.record, errorMessage: undefined },
+    target,
+  );
 }
 
 export async function monitorStoppedJob(
@@ -335,9 +342,9 @@ export async function monitorStoppedJob(
       },
     });
   }
-  await dependencies.writeRun(record);
+  const terminalApplied = await dependencies.writeRun(record);
   if (errorMessage) {
-    await tellOwnerIfPossible(record, payload, dependencies, log, {
+    await tellOwnerIfPossible({ record, terminalApplied }, payload, dependencies, log, {
       scheduleId: identity.scheduleId,
       taskArn: event.detail.taskArn,
     });

@@ -82,7 +82,9 @@ function stoppedEvent(exitCode = 1) {
   };
 }
 
-function harness(options: { rawPayload?: string; exitCode?: number } = {}) {
+function harness(
+  options: { rawPayload?: string; exitCode?: number; applied?: boolean } = {},
+) {
   const notices: Array<{
     run: Record<string, unknown>;
     target: Record<string, unknown>;
@@ -100,7 +102,7 @@ function harness(options: { rawPayload?: string; exitCode?: number } = {}) {
             task(options.rawPayload ?? payload(), options.exitCode ?? 1),
           writeRun: async (record) => {
             runs.push(record as unknown as Record<string, unknown>);
-            return true;
+            return options.applied ?? true;
           },
           recordFailure: async () => undefined,
           notifyOwner: async (run, target) => {
@@ -137,6 +139,20 @@ describe('a promoted job that fails reaches the owner notice', () => {
       dmSpaceName: 'spaces/owner-dm',
       workspacePrefix: 'owner-a1b2c3d4',
     });
+  });
+
+  test('carries its own stop text only when its terminal write was applied', async () => {
+    // Codex P2 on PR #1925: when the job runner already stored the real
+    // agent/tool error, the supervisor's update does not apply, and its
+    // synthesized "task stopped" text must not replace that cause in the DM.
+    const applied = harness();
+    await applied.run();
+    expect(applied.notices[0].run.errorMessage).toEqual(expect.any(String));
+
+    const alreadyTerminal = harness({ applied: false });
+    await alreadyTerminal.run();
+    expect(alreadyTerminal.notices).toHaveLength(1);
+    expect(alreadyTerminal.notices[0].run.errorMessage).toBeUndefined();
   });
 
   test('a job that exits cleanly notifies nobody', async () => {

@@ -2205,7 +2205,10 @@ async function notifyOwnerIfScheduleFailing(
         scheduleName,
         reason: decision.reason,
         consecutiveFailures: decision.consecutiveFailures,
-        errorMessage: recorded.errorMessage,
+        // A caller with no text of its own (the supervisor, when the job
+        // runner already stored the real error) defers to the stored newest
+        // error, which is what the streak was classified on anyway.
+        errorMessage: recorded.errorMessage ?? streak.newestErrorMessage,
         consentUrl,
       }),
       log,
@@ -3002,6 +3005,7 @@ export const agentCronTestHelpers = {
   scheduledDeliveryDependencies,
   guardFailureMissedTheOwner: missedTheOwner,
   recordFireCompletionGap,
+  notifyOwnerIfScheduleFailing,
 };
 
 export async function handler(

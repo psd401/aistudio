@@ -297,6 +297,38 @@ describe('the owner hears about a schedule that keeps failing', () => {
     );
   });
 
+  test('a caller with no message of its own reports the stored newest error', async () => {
+    // Codex P2 on PR #1925: the stopped-task supervisor passes no text when
+    // the job runner already stored the real cause, and the DM must name that
+    // cause rather than "Last reason" going blank or generic.
+    const { recorded, deps } = dependencies({
+      streak: {
+        consecutiveFailures: 3,
+        newestErrorMessage: 'Drive quota exceeded while saving the report',
+      },
+    });
+
+    await agentCronTestHelpers.notifyOwnerIfScheduleFailing(
+      {
+        ownerEmail: 'owner@psd401.net',
+        scheduleId: 'sched-morning',
+        scheduleName: 'Morning brief',
+        dmSpaceName: 'spaces/owner-dm',
+        workspacePrefix: 'owner-a1b2c3d4',
+        sessionId: 'agent-rt-owner-sched',
+        fireKey: FIRE_KEY,
+      },
+      { errorMessage: null, fullErrorMessage: null },
+      silentLog() as never,
+      deps as never,
+    );
+
+    expect(recorded.dms).toHaveLength(1);
+    expect(recorded.dms[0]).toContain(
+      'Drive quota exceeded while saving the report',
+    );
+  });
+
   test('a failure after the owner was told sends nothing', async () => {
     const { recorded, deps } = dependencies({
       streak: {
