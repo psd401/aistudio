@@ -219,6 +219,11 @@ class SuiteLoadingTests(unittest.TestCase):
 
         negative_task_ids = {
             "aistudio-explain-without-call",
+            # Filing content into an EXISTING repository must not spawn a
+            # second one: repositories_create is destructive and
+            # private-by-default, so a stray call leaves an orphan knowledge
+            # base the owner has to find and clean up (#1907).
+            "aistudio-repository-add-item-existing",
             "atrium-add-artifact-persistence",
             "atrium-draft-without-publish",
             "canva-ideas-without-design",

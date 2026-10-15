@@ -1,0 +1,16 @@
+id: aistudio-repository-add-item-existing
+skill: psd-aistudio
+level: L1
+workspace: pure
+suite: regression
+prompt: "The AI Studio repository 'EVAL-1907 Transportation SOPs' already exists. Add a text item named exactly EVAL-1907 Bell Times, with the content 'First bell rings at 7:45 AM.', to that existing repository. Do not create a new repository."
+trials: 3
+fixtures:
+  - fixtures/repository-add-item-existing.json
+graders:
+  # The negative assertion this eval exists for: filing content into an existing
+  # repository must never spawn a second one. repositories_create is destructive
+  # and private-by-default, so a stray call leaves an orphan knowledge base the
+  # owner has to find and clean up.
+  - {"type":"output_match","pattern":"(?is)^(?!.*\\bcreated a new repository\\b).*EVAL-1907 Bell Times"}
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_add_item"},"params.arguments.repositoryId":{"exact":1907},"params.arguments.name":{"exact":"EVAL-1907 Bell Times"}}}
