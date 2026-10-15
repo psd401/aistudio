@@ -366,7 +366,9 @@ a differently-broken file, so the loop can repeat for many turns.
    - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
      The file is untouched; in those languages a literal `\n` cannot be told
      apart from prose. Fix it by hand, or move the logic into a `.py` file.
-   - `unreadable` (exit 2) — the path is missing or not UTF-8 text.
+   - `unreadable` / `unwritable` (exit 2) — the path is missing, is not UTF-8
+     text, or could not be written. The file is untouched either way; check
+     the path before anything else.
 
    **Rewriting is the trap.** This step used to say "rewrite it as a file" —
    but it WAS a file, and `write` is what produced the literal `\n`. Rewriting
