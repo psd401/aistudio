@@ -195,6 +195,24 @@ COMMENT_ONLY_PROSE = (
     "print(x)\n"
 )
 
+# Double-escaped JS: the delimiters arrived as `\"` too. The JS scan tracks
+# strings by their quotes and cannot follow that, and it turned the string's
+# `\n` data into raw newlines — illegal in a JS string — while reporting
+# success. JS has no verifier, so it must refuse.
+DOUBLE_ESCAPED_JS = (
+    'const SEP = \\"alpha\\nbravo\\ncharlie\\";\\n'
+    "console.log(SEP);\\nprocess.exit(0);\\n"
+)
+
+# Healthy comment prose in a file that has an unrelated syntax error. The
+# prose is still prose, and a warning after the fact does not put it back.
+COMMENT_PROSE_UNPARSEABLE = (
+    "x = 1\n"
+    "# first \\n# second \\n# third \\n# fourth part of the prose here\n"
+    "def broken():\n"
+    "    return 1 +\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -326,6 +344,14 @@ class Diagnose(unittest.TestCase):
 
     def test_prose_whose_every_piece_stays_a_comment_is_left_alone(self):
         self.assertEqual(rln.diagnose(COMMENT_ONLY_PROSE, "p.py")[0], "clean")
+
+    def test_double_escaped_js_is_refused(self):
+        self.assertEqual(
+            rln.diagnose(DOUBLE_ESCAPED_JS, "d.js")[0], "ambiguous")
+
+    def test_comment_prose_survives_an_unrelated_syntax_error(self):
+        self.assertEqual(
+            rln.diagnose(COMMENT_PROSE_UNPARSEABLE, "p.py")[0], "clean")
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -597,6 +623,22 @@ class FileHandling(unittest.TestCase):
             os.chmod(directory, 0o755)
             shutil.rmtree(directory)
 
+    def test_crlf_line_endings_survive_a_repair(self):
+        raw = (
+            'import sys\\nimport json\\nprint(json.dumps({"ok": True}))\\n'
+            "sys.exit(0)\\n\r\n"
+        ).encode("utf-8")
+        path = self.write_temp(raw)
+        try:
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 0)
+            with open(path, "rb") as handle:
+                fixed = handle.read()
+            self.assertTrue(fixed.endswith(b"\r\n"))
+            compile(fixed.decode("utf-8"), "<repaired>", "exec")
+        finally:
+            os.unlink(path)
+
     def test_an_empty_file_is_clean(self):
         path = self.write_temp(b"")
         try:
@@ -686,12 +728,31 @@ class Languages(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(content, COMMENT_ONLY_PROSE)
 
+    def test_an_escaped_backtick_does_not_close_a_template(self):
+        original = (
+            "const t = `a \\\\`b\\\\` and \\\\n\\\\n\\\\n separators plus more "
+            "text to pass the threshold`;\n"
+        )
+        proc, content = self.run_on(original, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, original)
+
     def test_a_collapsed_js_file_is_repaired(self):
         proc, content = self.run_on(COLLAPSED_JS, ".js")
         self.assertEqual(proc.returncode, 0)
         self.assertIn("repaired", proc.stdout)
         self.assertIn('const fs = require("fs");\n', content)
         self.assertNotIn("\\n", content)
+
+    def test_a_double_escaped_js_file_is_left_identical(self):
+        proc, content = self.run_on(DOUBLE_ESCAPED_JS, ".js")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, DOUBLE_ESCAPED_JS)
+
+    def test_comment_prose_in_an_unparseable_file_is_left_identical(self):
+        proc, content = self.run_on(COMMENT_PROSE_UNPARSEABLE, ".py")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, COMMENT_PROSE_UNPARSEABLE)
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")

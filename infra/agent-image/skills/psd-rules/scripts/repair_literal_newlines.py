@@ -299,9 +299,18 @@ def _javascript_records(text):
             continue
 
         if char == "\\" and index + 1 < length:
+            nxt = text[index + 1]
+            if state == "code" and nxt in "\"'`":
+                # An escaped quote cannot appear in code position in valid JS,
+                # so this file is double-escaped: its delimiters arrived as
+                # `\"` too. This scan tracks strings by their quotes and
+                # cannot follow that, and it converted a string's `\n` data
+                # into raw newlines — illegal in a JS string — while
+                # reporting success. `_line_records` handles the shape for the
+                # languages that have a verifier; JS has none, so it refuses.
+                return None
             records.setdefault(row, []).append(
-                [column, text[index + 1], state == "code",
-                 state == "line-comment"])
+                [column, nxt, state == "code", state == "line-comment"])
             index += 2
             column += 2
             continue
@@ -537,11 +546,15 @@ def _vetoed(text, language, broken_lines, records):
     to the records themselves in `diagnose`, which protects them line by line
     instead of all-or-nothing.
     """
+    if _stays_all_comments(text, broken_lines, language, records):
+        # Asked without regard to whether the file parses. Comment prose is
+        # still comment prose in a file that has an unrelated syntax error
+        # elsewhere, and rewriting it there is just as wrong — a warning after
+        # the fact does not put the comment back.
+        return True
     if not parses_cleanly(text, language):
         return False
     if language == JSON:
-        return True
-    if _stays_all_comments(text, broken_lines, language, records):
         return True
     return not parses_cleanly(
         apply_repair(text, broken_lines, language, records), language
@@ -740,10 +753,12 @@ def main() -> int:
             )
         else:
             print(
-                f"ambiguous: {args.path} could not be scanned reliably — it "
-                "ends inside a template literal or a /* */ comment, or it "
-                "uses a slash that may open a regex literal, so the file was "
-                "NOT modified.",
+                f"ambiguous: {args.path} could not be scanned reliably, so "
+                "the file was NOT modified. It ends inside a template literal "
+                "or a /* */ comment, or it uses a slash that may open a regex "
+                "literal, or its quotes arrived escaped as well (`\\\"`) — "
+                "none of which can be told apart from a collapse without a "
+                "real JS parser.",
                 file=sys.stderr,
             )
         return 2
