@@ -805,5 +805,78 @@ class Languages(unittest.TestCase):
         self.assertEqual(content, original)
 
 
+class EveryLegitimateConstruct(unittest.TestCase):
+    """The safety contract, construct by construct.
+
+    A `\\n` escape is legitimate in exactly these places, and every file below
+    WORKS as written. None of them may be modified — this is the table to add
+    to when a new construct turns up, rather than another one-off test.
+    """
+
+    PAD = " and a good deal of extra text to clear the length threshold"
+    ESC = "\\n\\n\\n\\n"
+
+    def cases(self):
+        pad, esc = self.PAD, self.ESC
+        return [
+            ("python double-quoted", ".py",
+             f'x = "a{esc}b{pad}"\nprint(x)\n'),
+            ("python single-quoted", ".py",
+             f"x = 'a{esc}b{pad}'\nprint(x)\n"),
+            ("python triple-quoted", ".py",
+             f'x = """\na{esc}b{pad}\n"""\nprint(x)\n'),
+            ("python raw string", ".py",
+             f'x = r"a{esc}b{pad}"\nprint(x)\n'),
+            ("python f-string", ".py",
+             f'n = 1\nx = f"{{n}}a{esc}b{pad}"\nprint(x)\n'),
+            ("python bytes", ".py",
+             f'x = b"a{esc}b{pad}"\nprint(x)\n'),
+            ("python implicit concat", ".py",
+             f'x = ("a{esc}b{pad}"\n     "c")\nprint(x)\n'),
+            ("python dict value", ".py",
+             f'd = {{"k": "a{esc}b{pad}"}}\nprint(d)\n'),
+            ("python comment", ".py",
+             f'x = 1  # a{esc}b{pad}\nprint(x)\n'),
+            ("python docstring", ".py",
+             f'def f():\n    """a{esc}b{pad}"""\n    return 1\nprint(f())\n'),
+            ("js double-quoted", ".js",
+             f'const x = "a{esc}b{pad}";\nconsole.log(x);\n'),
+            ("js single-quoted", ".js",
+             f"const x = 'a{esc}b{pad}';\nconsole.log(x);\n"),
+            ("js template", ".js",
+             f'const x = `a{esc}b{pad}`;\nconsole.log(x);\n'),
+            ("js template over lines", ".js",
+             f'const x = `\na{esc}b{pad}\n`;\nconsole.log(x);\n'),
+            ("js template interpolation", ".js",
+             f'const n = 1;\nconst x = `${{n}}a{esc}b{pad}`;\n'
+             "console.log(x);\n"),
+            ("js line comment", ".js",
+             f'// a{esc}b{pad}\nconsole.log(1);\n'),
+            ("js block comment", ".js",
+             f'/*\n a{esc}b{pad}\n*/\nconsole.log(1);\n'),
+            ("js regex literal", ".js",
+             f'const r = /a{esc}b/;\nconsole.log(r.source, "{pad}");\n'),
+            ("json string value", ".json",
+             f'{{"k": "a{esc}b{pad}"}}\n'),
+            ("json nested", ".json",
+             f'{{"a": {{"b": ["a{esc}b{pad}"]}}}}\n'),
+        ]
+
+    def test_no_working_file_is_ever_modified(self):
+        for label, suffix, source in self.cases():
+            with self.subTest(construct=label):
+                with tempfile.NamedTemporaryFile(
+                        "w", suffix=suffix, delete=False) as fh:
+                    fh.write(source)
+                    path = fh.name
+                try:
+                    subprocess.run([sys.executable, SCRIPT, path],
+                                   capture_output=True, text=True)
+                    with open(path) as handle:
+                        self.assertEqual(handle.read(), source)
+                finally:
+                    os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()
