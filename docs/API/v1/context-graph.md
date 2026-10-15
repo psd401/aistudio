@@ -633,10 +633,12 @@ the item is `completed` and `searchable: "keyword"`: the chunk's generated
 `search_vector` is matched at once by retrieval v2's legacy-compatibility
 candidates (on by default for `repositories_search`). Its `embedding` stays NULL —
 embedding-recovery and dense retrieval only cover canonical generations — so it
-is keyword-only until the repository moves to canonical ingestion — and reachable
-only by an untargeted `repositories_search`: with `repositoryIds`, the readiness
-gate classifies a repository with active items but no active generation as
-`failed` and returns `REPOSITORY_NOT_READY`. No MCP tool
+is keyword-only until the repository moves to canonical ingestion. Confirm it with
+`repositories_search` filtered to the item's `repositoryId`: that search exempts a
+repository whose only content is legacy keyword-searchable chunks from the
+readiness gate (which would otherwise call it `failed`), because it retrieves
+those chunks. An unfiltered search covers only the caller's first 50 catalog
+repositories. No MCP tool
 reports a single item's status afterwards; confirm with `repositories_search`.
 `ingestion: "failed"` means canonical registration
 already failed and nothing is in flight — the caller should retry the item, not

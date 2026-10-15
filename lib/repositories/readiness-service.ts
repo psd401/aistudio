@@ -350,7 +350,17 @@ export async function getRepositoryReadiness(
  * items, so retrieval over it is a no-op, never stale context.
  */
 export async function assertRepositoriesSearchable(
-  repositoryIds: number[]
+  repositoryIds: number[],
+  options: {
+    /**
+     * Repositories whose `"failed"` readiness the caller may ignore because it
+     * retrieves their legacy-compatible chunks (see
+     * `selectLegacyKeywordSearchableRepositoryIds`). Only a caller that runs
+     * retrieval v2 WITH legacy compatibility may pass this; every other
+     * readiness state still blocks.
+     */
+    legacyKeywordSearchableIds?: ReadonlySet<number>
+  } = {}
 ): Promise<RepositoryReadinessSnapshot[]> {
   const ids = [...new Set(repositoryIds)]
   const readiness = await getRepositoryReadiness(ids)
@@ -376,7 +386,14 @@ export async function assertRepositoriesSearchable(
       disconnected
     )
   }
-  const notReady = snapshots.filter(blocksRepositorySearch)
+  const notReady = snapshots.filter(
+    (snapshot) =>
+      blocksRepositorySearch(snapshot) &&
+      !(
+        snapshot.readiness === "failed" &&
+        options.legacyKeywordSearchableIds?.has(snapshot.repositoryId)
+      )
+  )
   if (notReady.length > 0) {
     throw new RepositoryReadinessError(
       "REPOSITORY_NOT_READY",
@@ -385,4 +402,84 @@ export async function assertRepositoriesSearchable(
     )
   }
   return snapshots
+}
+
+/**
+ * Repositories that are searchable ONLY through retrieval v2's legacy-
+ * compatibility branch: written while content dual-write was off, so their
+ * items carry pre-canonical chunks (no item version, no index generation) whose
+ * generated `search_vector` keyword search matches, but there is no active
+ * generation. Readiness classifies these `"failed"` (active items, nothing
+ * pending, no snapshot), which is right for callers that disable legacy
+ * compatibility (Nexus, Assistant Architect) but wrong for one that enables it.
+ *
+ * Deliberately narrow, so a genuinely broken repository is never exempted:
+ * active and unexpired, NO active generation, nothing pending, no failed or
+ * blocked item, no failed or building generation, and at least one active,
+ * `completed` item with a legacy chunk. Mirrors the readiness predicates above
+ * and the filters in `legacyCompatibilityCandidates`.
+ */
+export async function selectLegacyKeywordSearchableRepositoryIds(
+  repositoryIds: number[]
+): Promise<Set<number>> {
+  const ids = [...new Set(repositoryIds)].filter(
+    (id) => Number.isSafeInteger(id) && id > 0
+  )
+  if (ids.length === 0) return new Set()
+  const result = await executeQuery(
+    (db) =>
+      db.execute(sql`
+        SELECT repository.id::integer AS repository_id
+        FROM knowledge_repositories repository
+        WHERE repository.id IN (${sql.join(
+          ids.map((id) => sql`${id}`),
+          sql`, `
+        )})
+          AND repository.lifecycle_status = 'active'
+          AND (repository.expires_at IS NULL OR repository.expires_at > now())
+          AND repository.active_index_generation_id IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM repository_item_chunks chunk
+            JOIN repository_items item ON item.id = chunk.item_id
+            WHERE item.repository_id = repository.id
+              AND item.lifecycle_status = 'active'
+              AND item.processing_status = 'completed'
+              AND chunk.item_version_id IS NULL
+              AND chunk.index_generation_id IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM repository_items item
+            LEFT JOIN repository_item_versions version
+              ON version.id = item.current_version_id
+            WHERE item.repository_id = repository.id
+              AND item.lifecycle_status = 'active'
+              AND (
+                item.processing_status IN (
+                  'pending',
+                  'processing',
+                  'processing_ocr',
+                  'processing_embeddings',
+                  'failed',
+                  'embedding_failed'
+                )
+                OR version.processing_status IN ('pending', 'processing', 'failed')
+                OR version.inspection_status IN ('blocked', 'error')
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM repository_index_generations generation
+            WHERE generation.repository_id = repository.id
+              AND generation.status IN ('building', 'failed')
+          )
+      `),
+    "selectLegacyKeywordSearchableRepositoryIds"
+  )
+  return new Set(
+    toPgRows<{ repository_id: number }>(result).map((row) =>
+      Number(row.repository_id)
+    )
+  )
 }
