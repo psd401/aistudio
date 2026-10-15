@@ -36,6 +36,8 @@ const {
   workspaceDeferredRecordNeedsRetry,
   WorkspaceTurnDeferredError,
   isDuplicateMessage,
+  backgroundJobAckClaimName,
+  backgroundJobDeferralNotice,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
   markPromotedTurnRecoveredWithDependencies,
@@ -190,7 +192,8 @@ function ownerDependencies(
 ): OwnerDependencies {
   return {
     fetchChatUploads: async () => {},
-    isJobLockActive: async () => false,
+    activeJobLockIdentity: async () => null,
+    isDuplicateMessage: async () => false,
     tryAcquireSessionLock: async () => "aside-lock",
     renewSessionLock: async () => true,
     releaseSessionLock: async () => {},
@@ -1565,7 +1568,7 @@ describe("owner-DM aside routing and locks", () => {
       human.messageText,
       TEST_LOG,
       ownerDependencies({
-        isJobLockActive: async () => false,
+        activeJobLockIdentity: async () => null,
         tryAcquireSessionLock: async sessionId => {
           acquired.push(sessionId)
           return "aside-lock"
@@ -1604,9 +1607,9 @@ describe("owner-DM aside routing and locks", () => {
         human.messageText,
         TEST_LOG,
         ownerDependencies({
-          isJobLockActive: async sessionId => {
+          activeJobLockIdentity: async sessionId => {
             expect(sessionId).toBe(ownerWorkspaceLockId(OWNER_USER))
-            return true
+            return "job-lock-token"
           },
           tryAcquireSessionLock: async () => {
             lockAttempted = true
@@ -1619,7 +1622,8 @@ describe("owner-DM aside routing and locks", () => {
       )
     ).rejects.toThrow("background job")
     expect(lockAttempted).toBe(false)
-    expect(responses).toHaveLength(0)
+    expect(responses).toEqual([backgroundJobDeferralNotice])
+    expect(responses[0]).toContain("still working")
   })
 
   test("plain messages acquire the stable workspace lock without waiting", async () => {
@@ -1631,7 +1635,7 @@ describe("owner-DM aside routing and locks", () => {
       human.messageText,
       TEST_LOG,
       ownerDependencies({
-        isJobLockActive: async () => false,
+        activeJobLockIdentity: async () => null,
         tryAcquireSessionLock: async sessionId => {
           acquiredSessionId = sessionId
           return "main-lock"
@@ -1646,6 +1650,145 @@ describe("owner-DM aside routing and locks", () => {
       ownerConversationSessionId(human, OWNER_USER)
     )
     expect(turn?.isAside).toBe(false)
+  })
+})
+
+describe("background-job deferral acknowledgement", () => {
+  test("acknowledges a background job once per thread, not per message", async () => {
+    // Stands in for the dedup table's conditional PutItem: the first caller
+    // claims the name, every later caller is told it is a duplicate.
+    const claimed = new Set<string>()
+    const claimNames: string[] = []
+    const responses: { thread: string | undefined; text: string }[] = []
+    const dependencies = ownerDependencies({
+      activeJobLockIdentity: async () => "job-lock-token",
+      isDuplicateMessage: async (claimName, _log, _override, ttlSeconds) => {
+        claimNames.push(claimName)
+        // The claim has to outlive the three-hour deferral window.
+        expect(ttlSeconds).toBe(3 * 60 * 60)
+        if (claimed.has(claimName)) return true
+        claimed.add(claimName)
+        return false
+      },
+      sendGoogleChatResponse: async (_space, thread, text) => {
+        responses.push({ thread, text })
+      },
+    })
+
+    for (const messageText of ["are you done?", "hello?"]) {
+      await expect(
+        invokeOwnerAgentWithDependencies(
+          ownerHuman({ messageText }),
+          OWNER_USER,
+          messageText,
+          TEST_LOG,
+          dependencies
+        )
+      ).rejects.toThrow("background job")
+    }
+
+    const expectedClaimName = backgroundJobAckClaimName(
+      "job-lock-token",
+      "spaces/owner-dm",
+      "spaces/owner-dm/threads/one"
+    )
+    expect(responses).toEqual([
+      {
+        thread: "spaces/owner-dm/threads/one",
+        text: backgroundJobDeferralNotice,
+      },
+    ])
+    expect(claimNames).toEqual([expectedClaimName, expectedClaimName])
+  })
+
+  test("acknowledges each thread, and each new job, separately", async () => {
+    const claimed = new Set<string>()
+    const responses: (string | undefined)[] = []
+    let jobIdentity = "job-one"
+    const dependencies = ownerDependencies({
+      activeJobLockIdentity: async () => jobIdentity,
+      isDuplicateMessage: async claimName => {
+        if (claimed.has(claimName)) return true
+        claimed.add(claimName)
+        return false
+      },
+      sendGoogleChatResponse: async (_space, thread) => {
+        responses.push(thread)
+      },
+    })
+
+    const deferIn = async (threadName: string) => {
+      await expect(
+        invokeOwnerAgentWithDependencies(
+          ownerHuman({ threadName }),
+          OWNER_USER,
+          "status?",
+          TEST_LOG,
+          dependencies
+        )
+      ).rejects.toThrow("background job")
+    }
+
+    await deferIn("spaces/owner-dm/threads/one")
+    await deferIn("spaces/owner-dm/threads/two")
+    await deferIn("spaces/owner-dm/threads/one")
+    jobIdentity = "job-two"
+    await deferIn("spaces/owner-dm/threads/one")
+
+    expect(responses).toEqual([
+      "spaces/owner-dm/threads/one",
+      "spaces/owner-dm/threads/two",
+      "spaces/owner-dm/threads/one",
+    ])
+  })
+
+  test("a failed acknowledgement still defers the turn", async () => {
+    let lockAttempted = false
+    await expect(
+      invokeOwnerAgentWithDependencies(
+        ownerHuman({ messageText: "where is it?" }),
+        OWNER_USER,
+        "where is it?",
+        TEST_LOG,
+        ownerDependencies({
+          activeJobLockIdentity: async () => "job-lock-token",
+          sendGoogleChatResponse: async () => {
+            throw new Error("Chat is down")
+          },
+          tryAcquireSessionLock: async () => {
+            lockAttempted = true
+            return "unexpected"
+          },
+        })
+      )
+    ).rejects.toThrow("background job")
+    expect(lockAttempted).toBe(false)
+  })
+
+  test("a workspace-contended deferral posts no acknowledgement", async () => {
+    const responses: string[] = []
+    let claimChecked = false
+    await expect(
+      invokeOwnerAgentWithDependencies(
+        ownerHuman({ messageText: "Quick question" }),
+        OWNER_USER,
+        "Quick question",
+        TEST_LOG,
+        ownerDependencies({
+          activeJobLockIdentity: async () => null,
+          tryAcquireSessionLock: async () => null,
+          isDuplicateMessage: async () => {
+            claimChecked = true
+            return false
+          },
+          sendGoogleChatResponse: async (_space, _thread, text) => {
+            responses.push(text)
+          },
+        })
+      )
+    ).rejects.toThrow("another turn")
+    expect(responses).toEqual([])
+    expect(claimChecked).toBe(false)
   })
 })
 
@@ -1708,7 +1851,7 @@ describe("owner workspace attachment locking and contention", () => {
         human.messageText,
         TEST_LOG,
         ownerDependencies({
-          isJobLockActive: async () => false,
+          activeJobLockIdentity: async () => null,
           tryAcquireSessionLock: async () => null,
         })
       )
@@ -1728,7 +1871,7 @@ describe("owner-DM aside fallback, scope, and responses", () => {
         human.messageText,
         TEST_LOG,
         ownerDependencies({
-          isJobLockActive: async () => true,
+          activeJobLockIdentity: async () => "job-lock-token",
           tryAcquireSessionLock: async () => null,
           invokeAgentCore: async () => {
             invoked = true
@@ -1741,7 +1884,7 @@ describe("owner-DM aside fallback, scope, and responses", () => {
       )
     ).rejects.toThrow("background job")
     expect(invoked).toBe(false)
-    expect(responses).toHaveLength(0)
+    expect(responses).toEqual([backgroundJobDeferralNotice])
   })
 
   test("keeps /btw text on the main route outside owner DMs", async () => {
@@ -1804,7 +1947,7 @@ describe("owner-DM aside fallback, scope, and responses", () => {
             fetchedAttachments = attachments
             fetchedWorkspacePrefix = workspacePrefix
           },
-          isJobLockActive: async () => true,
+          activeJobLockIdentity: async () => "job-lock-token",
           invokeAgentCore: async () => {
             throw new Error("busy shared-space turns must not invoke the agent")
           },
@@ -1816,7 +1959,7 @@ describe("owner-DM aside fallback, scope, and responses", () => {
     ).rejects.toThrow("background job")
     expect(fetchedAttachments).toBeUndefined()
     expect(fetchedWorkspacePrefix).toBe("")
-    expect(responses).toEqual([])
+    expect(responses).toEqual([backgroundJobDeferralNotice])
   })
 
   test("marks explicit aside replies and preserves the aside id for promotion", async () => {
