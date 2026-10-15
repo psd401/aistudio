@@ -36,6 +36,7 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 | `repositories:search` | Run retrieval v2 over currently authorized repositories |
 | `repositories:changes` | Poll the authorized repository item change feed |
 | `repositories:write` | Add uploaded items to repositories the principal can modify |
+| `repositories:create` | Create repositories owned by the principal (MCP only — no REST route) |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -598,6 +599,36 @@ Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
 `403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
 `500 INTERNAL_ERROR`. Every response retains the standard request-id and
 rate-limit headers described above.
+
+#### Repository writes — MCP only (Issue #1907)
+
+Two write operations exist on the **MCP** surface with no REST equivalent:
+
+| MCP tool | Scope | Effect |
+|---|---|---|
+| `repositories_create` | `repositories:create` | Creates a durable, **private** repository owned by the caller |
+| `repositories_add_item` | `repositories:write` | Adds one UTF-8 text item (max 1 MiB) to a repository the caller owns or administers |
+
+Both enforce authorization in two layers, and the scope is only the first:
+
+1. the caller's live `knowledge-repositories` **capability**, re-checked against
+   their roles on every call — an OAuth access token carries the scopes its
+   grant asked for, not the scopes the caller's roles allow, so without this a
+   student who authorized a first-party client could create repositories; and
+2. for `repositories_add_item`, owner-or-administrator rights over a durable,
+   user-managed repository — the same `canModifyUserManagedDurableRepository`
+   boundary the upload routes use. Absent, deleted, ephemeral, and
+   system-managed (Atrium index) repositories are all masked as
+   `Repository not found`.
+
+A created repository is never public: widening visibility stays a human action
+in Repository Manager. An added item is ingested asynchronously through the same
+version/generation/embedding pipeline as an upload, so the response carries
+`processingStatus` and the content is not searchable until processing finishes.
+
+**Binary and office documents** still use the two-step presigned upload under
+`POST /api/v1/repositories/{id}/items/uploads` (also `repositories:write`);
+`repositories_add_item` is text only, because MCP has no binary transport.
 
 #### `POST /api/v1/repositories/{id}/items/uploads`
 

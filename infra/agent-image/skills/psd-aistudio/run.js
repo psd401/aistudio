@@ -35,6 +35,9 @@
  *                            [--reasoning <t>] [--evidence a,b] [--constraints a,b] [--conditions a,b]
  *                            [--alternatives a,b] [--related-to uuid,uuid] [--agent-id <t>]
  *   node run.js get-decision-graph [--user <email>] --node-id <uuid>
+ *   node run.js repositories-create [--user <email>] --name <text> [--description <text>]
+ *   node run.js repositories-add-item [--user <email>] --repository-id <n> --name <text>
+ *                            (--content <text> | --file <notes.md>)
  *
  * Exit codes:
  *   0   success (JSON result printed to stdout; INCLUDES the not_executable draft case)
@@ -61,6 +64,8 @@ const {
 const SECTIONS = ["actions", "features", "scopes", "all"];
 const SURFACES = ["mcp", "ai_sdk", "rest", "internal"];
 const ASSISTANT_IMPORT_MAX_BYTES = 10 * 1024 * 1024;
+/** Matches REPOSITORY_INLINE_TEXT_MAX_BYTES in the AI Studio write service. */
+const REPOSITORY_ITEM_MAX_BYTES = 1024 * 1024;
 
 function usage() {
   process.stdout.write(
@@ -112,6 +117,14 @@ function usage() {
       "                      [--modalities text,image,audio,video,table] [--limit N]",
       "  repositories-source --repository-id N --item-id N [--chunk-id N] [--limit N]",
       "  repositories-changes --repository-ids 1,2 [--cursor C] [--limit N]",
+      "",
+      "Repository writes (need repositories:create / repositories:write AND the",
+      "caller's knowledge-repositories capability; reconnect OAuth to pick them up):",
+      "  repositories-create --name <text> [--description <text>]",
+      "      Creates a PRIVATE repository owned by the caller.",
+      "  repositories-add-item --repository-id N --name <text> (--content <text> | --file <path>)",
+      "      Adds one UTF-8 text item (max 1 MiB) to a repository the caller owns",
+      "      or administers. Binary/office files use the REST upload endpoints.",
       "",
     ].join("\n"),
   );
@@ -168,7 +181,7 @@ function parseIntegerList(value, label) {
   return numbers;
 }
 
-function readBoundedImportFile(file) {
+function readBoundedFile(file, maxBytes, tooLargeMessage) {
   // Open once, inspect that exact descriptor, and read no more than its
   // inspected size. A concurrently growing file is therefore still bounded.
   // O_NONBLOCK lets the CLI reject devices/FIFOs after fstat without hanging
@@ -184,8 +197,8 @@ function readBoundedImportFile(file) {
     if (!fileStats.isFile()) {
       throw new Error("--file must refer to a regular file");
     }
-    if (fileStats.size > ASSISTANT_IMPORT_MAX_BYTES) {
-      throw new Error("assistant import file exceeds the 10 MB limit");
+    if (fileStats.size > maxBytes) {
+      throw new Error(tooLargeMessage);
     }
 
     const buffer = Buffer.alloc(fileStats.size);
@@ -205,6 +218,22 @@ function readBoundedImportFile(file) {
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+function readBoundedImportFile(file) {
+  return readBoundedFile(
+    file,
+    ASSISTANT_IMPORT_MAX_BYTES,
+    "assistant import file exceeds the 10 MB limit",
+  );
+}
+
+function readRepositoryItemFile(file) {
+  return readBoundedFile(
+    file,
+    REPOSITORY_ITEM_MAX_BYTES,
+    "repository item file exceeds the 1 MiB limit",
+  );
 }
 
 function parseImportEnvelope(args) {
@@ -250,6 +279,8 @@ function requiredScopeForTool(toolName) {
     repositories_search: "repositories:search",
     repositories_get_source: "repositories:read",
     repositories_list_changes: "repositories:changes",
+    repositories_create: "repositories:create",
+    repositories_add_item: "repositories:write",
   };
   return repositoryScopes[toolName] || `mcp:${toolName}`;
 }
@@ -556,6 +587,30 @@ async function repositoriesChangesCommand(args, email) {
   await runToolAndEmit("repositories_list_changes", toolArgs, email);
 }
 
+async function repositoriesCreateCommand(args, email) {
+  const toolArgs = { name: requireStr(args, "name", "name") };
+  const description = optStr(args, "description", "description");
+  if (description !== undefined) toolArgs.description = description;
+  await runToolAndEmit("repositories_create", toolArgs, email);
+}
+
+async function repositoriesAddItemCommand(args, email) {
+  const repositoryId = optInt(args, "repository_id", "repository-id");
+  if (repositoryId === undefined) fail("--repository-id is required");
+  const inline = optStr(args, "content", "content");
+  const file = optStr(args, "file", "file");
+  if ((inline === undefined) === (file === undefined)) {
+    fail("Provide exactly one of --content or --file");
+  }
+  const content =
+    inline !== undefined ? inline : readRepositoryItemFile(file);
+  await runToolAndEmit(
+    "repositories_add_item",
+    { repositoryId, name: requireStr(args, "name", "name"), content },
+    email,
+  );
+}
+
 const COMMAND_HANDLERS = {
   connect: connectCommand,
   disconnect: disconnectCommand,
@@ -574,6 +629,8 @@ const COMMAND_HANDLERS = {
   "repositories-search": repositoriesSearchCommand,
   "repositories-source": repositoriesSourceCommand,
   "repositories-changes": repositoriesChangesCommand,
+  "repositories-create": repositoriesCreateCommand,
+  "repositories-add-item": repositoriesAddItemCommand,
 };
 
 async function main() {

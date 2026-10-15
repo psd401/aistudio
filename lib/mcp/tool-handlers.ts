@@ -57,6 +57,15 @@ import type {
   RetrievalModality,
 } from "@/lib/repositories/retrieval-v2/types"
 import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
+import {
+  createRepositoryTextItem,
+  REPOSITORY_INLINE_TEXT_MAX_BYTES,
+} from "@/lib/repositories/repository-write-service"
+import {
+  createRepository as createRepositoryRow,
+  hasCapabilityAccess as dbHasCapabilityAccess,
+} from "@/lib/db/drizzle"
+import { canModifyUserManagedDurableRepository } from "@/actions/repositories/repository-permissions"
 
 // ============================================
 // Handler Map
@@ -77,6 +86,8 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   repositories_search: handleRepositoriesSearch,
   repositories_get_source: handleRepositoriesGetSource,
   repositories_list_changes: handleRepositoriesListChanges,
+  repositories_create: handleRepositoriesCreate,
+  repositories_add_item: handleRepositoriesAddItem,
   // Agent platform tools (#926): image gen, web fetch, document gen. Exposed on
   // the `internal` surface only (see lib/tools/catalog/manifest.ts) so they are
   // callable from the agentic Assistant Architect runtime but not the external
@@ -255,6 +266,161 @@ async function handleRepositoriesListChanges(
       limit: typeof args.limit === "number" ? args.limit : undefined,
     })
   )
+}
+
+// ============================================
+// Repository writes (Issue #1907)
+// ============================================
+
+/** Longest accepted repository/item name and repository description. */
+const REPOSITORY_NAME_MAX_LENGTH = 500
+const REPOSITORY_DESCRIPTION_MAX_LENGTH = 2000
+
+/** The UI capability that gates Repository Manager for a signed-in human. */
+const REPOSITORY_CAPABILITY = "knowledge-repositories"
+
+function toolError(text: string): McpToolResult {
+  return { content: [{ type: "text", text }], isError: true }
+}
+
+/**
+ * Trim and bound a required string argument, or return the error text to
+ * surface. Returns a discriminated result so a blank-after-trim value is a
+ * validation failure rather than silently becoming "".
+ */
+function requiredBoundedString(
+  value: unknown,
+  label: string,
+  maxLength: number
+): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !value.trim()) {
+    return { ok: false, error: `${label} is required` }
+  }
+  const trimmed = value.trim()
+  if (trimmed.length > maxLength) {
+    return {
+      ok: false,
+      error: `${label} must not exceed ${maxLength} characters`,
+    }
+  }
+  return { ok: true, value: trimmed }
+}
+
+/**
+ * The capability half of the repository write gate.
+ *
+ * A scope alone is NOT sufficient. OAuth access-token scopes come from the
+ * grant, not from the user's roles (see `lib/api/auth-middleware.ts`), so a
+ * student who authorizes the first-party agent client would otherwise carry
+ * `repositories:create` without the UI ever letting them create a repository.
+ * Re-checking the live `knowledge-repositories` capability against the caller's
+ * own roles keeps MCP exactly level with the web UI: agents do what people can.
+ */
+async function assertRepositoryCapability(
+  cognitoSub: string
+): Promise<McpToolResult | null> {
+  const allowed = await dbHasCapabilityAccess(cognitoSub, REPOSITORY_CAPABILITY)
+  return allowed
+    ? null
+    : toolError(
+        "Your account does not have access to knowledge repositories in AI Studio"
+      )
+}
+
+async function handleRepositoriesCreate(
+  args: Record<string, unknown>,
+  context: { cognitoSub: string; userId: number }
+): Promise<McpToolResult> {
+  const name = requiredBoundedString(args.name, "name", REPOSITORY_NAME_MAX_LENGTH)
+  if (!name.ok) return toolError(name.error)
+
+  let description: string | null = null
+  if (args.description !== undefined && args.description !== null) {
+    const parsed = requiredBoundedString(
+      args.description,
+      "description",
+      REPOSITORY_DESCRIPTION_MAX_LENGTH
+    )
+    if (!parsed.ok) return toolError(parsed.error)
+    description = parsed.value
+  }
+
+  const capabilityError = await assertRepositoryCapability(context.cognitoSub)
+  if (capabilityError) return capabilityError
+
+  // Private by default and owned by the caller. A repository created over MCP is
+  // deliberately NOT public: widening visibility stays a human decision in the
+  // Repository Manager UI, so an agent cannot publish a knowledge base district-
+  // wide on its own.
+  const repository = await createRepositoryRow({
+    name: name.value,
+    description,
+    ownerId: context.userId,
+    isPublic: false,
+  })
+
+  return jsonResult({
+    repository: {
+      id: repository.id,
+      name: repository.name,
+      description: repository.description,
+      visibility: repository.isPublic ? "public" : "private",
+      repositoryKind: repository.repositoryKind,
+      createdAt: repository.createdAt?.toISOString() ?? null,
+    },
+  })
+}
+
+async function handleRepositoriesAddItem(
+  args: Record<string, unknown>,
+  context: { cognitoSub: string; userId: number; requestId: string }
+): Promise<McpToolResult> {
+  const repositoryId = positiveInteger(args.repositoryId)
+  if (!repositoryId) return toolError("Valid repositoryId is required")
+
+  const name = requiredBoundedString(args.name, "name", REPOSITORY_NAME_MAX_LENGTH)
+  if (!name.ok) return toolError(name.error)
+
+  if (typeof args.content !== "string" || !args.content.trim()) {
+    return toolError("content is required")
+  }
+  // Byte length, not character count: the cap protects the stored column and the
+  // canonical S3 object, and a multi-byte character costs more than one byte.
+  if (Buffer.byteLength(args.content, "utf8") > REPOSITORY_INLINE_TEXT_MAX_BYTES) {
+    return toolError(
+      `content must not exceed ${REPOSITORY_INLINE_TEXT_MAX_BYTES} bytes`
+    )
+  }
+
+  const capabilityError = await assertRepositoryCapability(context.cognitoSub)
+  if (capabilityError) return capabilityError
+
+  // Live ACL check against the SAME boundary the REST upload routes use: owner
+  // or administrator, durable + user-managed only. It masks an absent, deleted,
+  // ephemeral, or system-managed (Atrium index) repository as "not found" so the
+  // tool never confirms that an id the caller cannot touch exists.
+  if (!(await canModifyUserManagedDurableRepository(repositoryId, context.userId))) {
+    return toolError("Repository not found")
+  }
+
+  const item = await createRepositoryTextItem({
+    repositoryId,
+    userId: context.userId,
+    name: name.value,
+    content: args.content,
+    traceId: context.requestId,
+  })
+
+  return jsonResult({
+    item: {
+      id: item.id,
+      repositoryId: item.repositoryId,
+      name: item.name,
+      type: item.type,
+      processingStatus: item.processingStatus,
+      createdAt: item.createdAt?.toISOString() ?? null,
+    },
+  })
 }
 
 // ============================================

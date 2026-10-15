@@ -171,6 +171,27 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
       },
     },
   },
+  // Repository write tools (Issue #1907). MCP-only: the REST surface for adding
+  // items is the two-step presigned upload flow under
+  // `/api/v1/repositories/{id}/items/uploads`, which is hand-documented in
+  // openapi.yaml rather than generated from a single catalog binding, and there
+  // is no REST create-repository route. Both are `destructive` so an agent loop
+  // confirms before writing.
+  repositories_create: {
+    identifier: "repositories.create",
+    requiredScope: "repositories:create",
+    internalScopes: ["repositories:create"],
+    destructive: true,
+  },
+  repositories_add_item: {
+    identifier: "repositories.add_item",
+    // Reuses the existing `repositories:write` scope already held by the REST
+    // upload routes — "add an item to a repository I can modify" is the same
+    // authority whichever surface it arrives on.
+    requiredScope: "repositories:write",
+    internalScopes: ["repositories:write"],
+    destructive: true,
+  },
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",

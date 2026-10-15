@@ -33,6 +33,12 @@ export const API_SCOPES = {
   "repositories:search": "Search authorized repositories",
   "repositories:changes": "Read authorized repository change feeds",
   "repositories:write": "Add items to repositories the API principal can modify",
+  // Issue #1907: creating a repository is a separate authority from adding items
+  // to one that already exists, so an agent can be trusted to file content into
+  // existing knowledge bases without also being able to spawn new ones. Both are
+  // additionally gated on the `knowledge-repositories` capability server-side,
+  // so holding the scope is necessary but not sufficient.
+  "repositories:create": "Create repositories owned by the API principal",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",
@@ -97,6 +103,7 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "repositories:search",
     "repositories:changes",
     "repositories:write",
+    "repositories:create",
     "documents:read",
     "graph:read",
     "mcp:search_decisions",

@@ -1,9 +1,9 @@
 {
   "summary": {
-    "actions": 34,
+    "actions": 36,
     "features": 10,
-    "scopes": 33,
-    "agentInvocableActions": 26
+    "scopes": 34,
+    "agentInvocableActions": 28
   },
   "actions": [
     {
@@ -607,6 +607,50 @@
       "agentInvocable": true
     },
     {
+      "identifier": "repositories.add_item",
+      "name": "repositories_add_item",
+      "description": "Add a text item to an existing repository the authenticated caller owns or administers. The content is ingested through the same immutable version, generation, and embedding pipeline as an uploaded file, so it becomes searchable once processing completes.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "repositories:write"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:write"
+        ],
+        "internal": [
+          "repositories:write"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
+      "identifier": "repositories.create",
+      "name": "repositories_create",
+      "description": "Create a new durable, private knowledge repository owned by the authenticated caller. Requires the knowledge-repositories capability; the caller becomes the owner and can then add items to it.",
+      "surfaces": [
+        "mcp",
+        "internal"
+      ],
+      "requiredScopes": [
+        "repositories:create"
+      ],
+      "scopesBySurface": {
+        "mcp": [
+          "repositories:create"
+        ],
+        "internal": [
+          "repositories:create"
+        ]
+      },
+      "destructive": true,
+      "agentInvocable": true
+    },
+    {
       "identifier": "repositories.describe",
       "name": "repositories_describe",
       "description": "Describe one durable repository if the authenticated user can currently access it.",
@@ -1072,6 +1116,14 @@
     {
       "scope": "repositories:changes",
       "description": "Read authorized repository change feeds",
+      "roles": [
+        "staff",
+        "administrator"
+      ]
+    },
+    {
+      "scope": "repositories:create",
+      "description": "Create repositories owned by the API principal",
       "roles": [
         "staff",
         "administrator"

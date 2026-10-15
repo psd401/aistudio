@@ -669,6 +669,54 @@ Example:
       required: ["repositoryIds"],
     },
   },
+  // Repository write tools (Issue #1907). The read side above could already
+  // discover and search repositories; these two let the caller create a
+  // repository and file text into one. Authorization is the caller's live
+  // `knowledge-repositories` capability plus ownership/administrator rights on
+  // the target repository — the scope alone is never enough.
+  {
+    name: "repositories_create",
+    description:
+      "Create a new durable, private knowledge repository owned by the authenticated caller. Requires the knowledge-repositories capability; the caller becomes the owner and can then add items to it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Repository name (1-500 characters).",
+        },
+        description: {
+          type: "string",
+          description: "Optional repository description (max 2000 characters).",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "repositories_add_item",
+    description:
+      "Add a text item to an existing repository the authenticated caller owns or administers. The content is ingested through the same immutable version, generation, and embedding pipeline as an uploaded file, so it becomes searchable once processing completes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repositoryId: {
+          type: "number",
+          description: "Target repository numeric id.",
+        },
+        name: {
+          type: "string",
+          description: "Item name (1-500 characters).",
+        },
+        content: {
+          type: "string",
+          description:
+            "Item text content (UTF-8, max 1 MiB). Binary and office documents are uploaded through the REST upload endpoints instead.",
+        },
+      },
+      required: ["repositoryId", "name", "content"],
+    },
+  },
   // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
   // discover them via tools/list.
   ...CONTENT_MCP_TOOLS,
