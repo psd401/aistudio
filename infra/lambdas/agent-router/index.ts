@@ -550,6 +550,22 @@ const CHAT_DELIVERY_RETRY_VISIBILITY_SECONDS = 60;
 const WORKSPACE_DEFER_ATTRIBUTE = 'PsdWorkspaceDeferV1';
 const WORKSPACE_DEFER_MAX_ATTEMPTS = 180;
 const WORKSPACE_DEFER_MAX_AGE_SECONDS = 3 * 60 * 60;
+const MESSAGE_DEDUP_TTL_SECONDS = 60 * 60;
+/**
+ * The one-per-job acknowledgement claim (#1892) has to outlive the longest
+ * deferral window, or a job still running after the claim expired would
+ * acknowledge the same thread a second time.
+ */
+const BACKGROUND_JOB_ACK_TTL_SECONDS = WORKSPACE_DEFER_MAX_AGE_SECONDS;
+/**
+ * Deliberately short and non-committal: the deferred turn may still fail, so
+ * this promises only that the message is queued behind the running job. It
+ * does not say "your" task: a scheduled run (Morning Brief and the like)
+ * holds the same job lock, and the user never asked for that.
+ */
+const BACKGROUND_JOB_DEFERRAL_NOTICE =
+  "I'm finishing another task first. I'll get to this message as soon " +
+  "as it's done.";
 // The queue's own redrive limit, supplied by the stack that sets it. Used to
 // decide whether THIS attempt is the one that dead-letters the record.
 //
@@ -715,10 +731,12 @@ async function tryAcquireSessionLock(
   try {
     const command = new PutCommand({
       TableName: tableName,
-      // `kind: 'job'` marks a lock held by the async job-runner (#1138) —
-      // the router replies "still working on your earlier task" instantly.
-      // The runner renews expiresAt every ~5 min, leaving enough lease margin
-      // for a full missed renewal.
+      // `kind: 'job'` marks a lock held by the async job-runner (#1138).
+      // A turn that arrives while it is held is requeued for a later retry
+      // rather than run, and the thread gets one "finishing another task
+      // first" reply per job (#1892) — see
+      // `acknowledgeBackgroundJobDeferral`. The runner renews expiresAt every
+      // ~5 min, leaving enough lease margin for a full missed renewal.
       Item: {
         sessionId,
         expiresAt,
@@ -834,41 +852,60 @@ async function renewSessionLock(
 }
 
 /**
- * True when an ACTIVE `kind='job'` lock holds this session — a background
- * job is still running (#1138). Fail-open on errors: a DDB blip must not
- * block normal message processing.
+ * The identity of the ACTIVE `kind='job'` lock holding this session, or
+ * `null` when no background job is running (#1138). The identity is the
+ * lock's token, which is stable for the life of one job and changes with
+ * the next one — so it also keys the one-per-job deferral acknowledgement
+ * (#1892). Fail-open on errors: a DDB blip must not block normal message
+ * processing.
  */
-async function isJobLockActive(
+async function activeJobLockIdentity(
   sessionId: string,
   log: ReturnType<typeof createLogger>
-): Promise<boolean> {
+): Promise<string | null> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
-  if (!tableName) return false;
+  if (!tableName) return null;
   try {
     const result = await dynamoClient.send(
-      new GetCommand({ TableName: tableName, Key: { sessionId } })
+      // Strongly consistent: an eventually consistent read can miss a lock
+      // written moments ago (the turn then defers as workspace-contended with
+      // no notice) or return one just deleted (a misleading notice and a
+      // needless deferral).
+      new GetCommand({
+        TableName: tableName,
+        Key: { sessionId },
+        ConsistentRead: true,
+      })
     );
     const item = result.Item as
-      | { kind?: string; expiresAt?: number }
+      | { kind?: string; expiresAt?: number; lockToken?: string }
       | undefined;
-    return (
-      !!item &&
-      item.kind === 'job' &&
-      typeof item.expiresAt === 'number' &&
-      item.expiresAt > Math.floor(Date.now() / 1000)
-    );
+    if (
+      !item ||
+      item.kind !== 'job' ||
+      typeof item.expiresAt !== 'number' ||
+      item.expiresAt <= Math.floor(Date.now() / 1000)
+    ) {
+      return null;
+    }
+    // A lock written before tokens existed still identifies a live job; fall
+    // back to the session id so the caller never mistakes it for "no job".
+    // Every current writer sets lockToken, so this only covers rows written
+    // before the deploy (30-min lease); for those, back-to-back jobs share
+    // one acknowledgement key and the second job may go unacknowledged.
+    return item.lockToken ?? sessionId;
   } catch (error) {
     log.warn('Job-lock check failed; treating as no job', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return false;
+    return null;
   }
 }
 
 /**
  * Returns true if this message name has already been processed (or is being
  * processed concurrently) by claiming its row via a conditional PutItem. The
- * row carries a 1-hour TTL so the table self-prunes.
+ * row carries a TTL (1 hour by default) so the table self-prunes.
  *
  * Conservative on errors: if the dedup table is unreachable we return `false`
  * so the message still flows. Better to risk a rare double-send than to drop
@@ -880,7 +917,8 @@ async function isDuplicateMessage(
   override?: {
     tableName: string | undefined;
     send: (command: PutCommand) => Promise<unknown>;
-  }
+  },
+  ttlSeconds: number = MESSAGE_DEDUP_TTL_SECONDS
 ): Promise<boolean> {
   const tableName =
     override?.tableName ?? process.env.MESSAGE_DEDUP_TABLE;
@@ -888,7 +926,7 @@ async function isDuplicateMessage(
     return false; // Dedup not configured (e.g., local tests) — pass through
   }
 
-  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour TTL
+  const expiresAt = Math.floor(Date.now() / 1000) + ttlSeconds;
   const now = Math.floor(Date.now() / 1000);
   try {
     const command = new PutCommand({
@@ -5782,7 +5820,9 @@ interface OwnerAgentTurn {
 
 interface OwnerInvocationDependencies {
   fetchChatUploads: typeof fetchChatUploads;
-  isJobLockActive: typeof isJobLockActive;
+  activeJobLockIdentity: typeof activeJobLockIdentity;
+  isDuplicateMessage: typeof isDuplicateMessage;
+  releaseMessageClaimForRetry: typeof releaseMessageClaimForRetry;
   tryAcquireSessionLock: typeof tryAcquireSessionLock;
   renewSessionLock: typeof renewSessionLock;
   releaseSessionLock: typeof releaseSessionLock;
@@ -5793,7 +5833,9 @@ interface OwnerInvocationDependencies {
 
 const ownerInvocationDependencies: OwnerInvocationDependencies = {
   fetchChatUploads,
-  isJobLockActive,
+  activeJobLockIdentity,
+  isDuplicateMessage,
+  releaseMessageClaimForRetry,
   tryAcquireSessionLock,
   renewSessionLock,
   releaseSessionLock,
@@ -5801,6 +5843,100 @@ const ownerInvocationDependencies: OwnerInvocationDependencies = {
   invokeAgentCore,
   sendGoogleChatResponse,
 };
+
+/**
+ * Claim rows for the background-job acknowledgement share the message-dedup
+ * table. A Chat message name is `spaces/<id>/messages/<id>`, which never
+ * contains `#`, so this synthetic name cannot collide with a real one.
+ */
+function backgroundJobAckClaimName(
+  jobIdentity: string,
+  spaceName: string,
+  threadName: string | undefined
+): string {
+  return [
+    'job-ack',
+    jobIdentity,
+    spaceName,
+    threadName ?? '__unthreaded__',
+  ].join('#');
+}
+
+/**
+ * Post the promised "finishing another task first" reply for a turn
+ * being deferred behind a background job (#1892). Before this, a message
+ * sent during a long job was silently requeued for up to three hours, and
+ * staff restated the request into the void.
+ *
+ * One reply per job per thread: the dedup claim is keyed by the job's lock
+ * token, so the next job acknowledges the thread again. A DDB failure makes
+ * the claim fail OPEN (a possible second reply) rather than mute the thread.
+ *
+ * A reply that does not reach Chat releases the claim, so the next
+ * redelivery tries again instead of the thread staying mute for the job.
+ * Accepted gap: if the Lambda dies between the claim and the send (timeout,
+ * crash), nothing releases the claim and that thread gets no notice for this
+ * job. Claiming after the send would trade that for duplicate notices.
+ *
+ * Never throws. The deferral is what keeps the message alive; a failed
+ * courtesy reply must not turn into a failed turn.
+ */
+async function acknowledgeBackgroundJobDeferral(
+  human: HumanMessage,
+  jobIdentity: string,
+  log: ReturnType<typeof createLogger>,
+  dependencies: Pick<
+    OwnerInvocationDependencies,
+    | 'isDuplicateMessage'
+    | 'releaseMessageClaimForRetry'
+    | 'sendGoogleChatResponse'
+  >
+): Promise<void> {
+  const claimName = backgroundJobAckClaimName(
+    jobIdentity,
+    human.spaceName,
+    human.threadName
+  );
+  let claimed = false;
+  try {
+    const alreadyAcknowledged = await dependencies.isDuplicateMessage(
+      claimName,
+      log,
+      undefined,
+      BACKGROUND_JOB_ACK_TTL_SECONDS
+    );
+    if (alreadyAcknowledged) {
+      log.info('Background-job deferral already acknowledged in this thread', {
+        spaceName: human.spaceName,
+        threadName: human.threadName,
+      });
+      return;
+    }
+    claimed = true;
+    const outcome = await dependencies.sendGoogleChatResponse(
+      human.spaceName,
+      human.threadName,
+      BACKGROUND_JOB_DEFERRAL_NOTICE,
+      log,
+      humanChatDeliveryContext(human)
+    );
+    if (outcome === 'failed') {
+      throw new Error('Chat did not accept the acknowledgement');
+    }
+    log.info('Acknowledged a turn deferred behind a background job', {
+      spaceName: human.spaceName,
+      threadName: human.threadName,
+    });
+  } catch (error) {
+    log.warn('Failed to acknowledge a turn deferred behind a background job', {
+      spaceName: human.spaceName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (claimed) {
+      await dependencies.releaseMessageClaimForRetry(claimName, log);
+    }
+  }
+}
 
 async function invokeOwnerAgentWithDependencies(
   human: HumanMessage,
@@ -5852,7 +5988,19 @@ async function invokeOwnerAgentWithDependencies(
     });
   }
 
-  if (await dependencies.isJobLockActive(workspaceLockId, log)) {
+  const jobIdentity = await dependencies.activeJobLockIdentity(
+    workspaceLockId,
+    log
+  );
+  if (jobIdentity !== null) {
+    // Tell the thread before deferring: the requeued turn can wait up to
+    // three hours, and silence is what made staff restate the request.
+    await acknowledgeBackgroundJobDeferral(
+      human,
+      jobIdentity,
+      log,
+      dependencies
+    );
     throw new WorkspaceTurnDeferredError(
       human.message.name,
       'background-job-active'
@@ -6284,6 +6432,8 @@ export const agentRouterTestHelpers = {
   workspaceDeferredRecordNeedsRetry,
   WorkspaceTurnDeferredError,
   isDuplicateMessage,
+  backgroundJobAckClaimName,
+  backgroundJobDeferralNotice: BACKGROUND_JOB_DEFERRAL_NOTICE,
   parseDeferredChatDelivery,
   parseDeferredChatDeliveryRecord,
   processDeferredChatDelivery,

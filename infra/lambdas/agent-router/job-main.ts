@@ -58,7 +58,7 @@ type JobLogger = ReturnType<typeof createLogger>;
  * Best-effort lock release when JOB_PAYLOAD fails full validation (review,
  * #1147): the router pre-acquired the kind='job' lock BEFORE launching this
  * task, so bailing on a malformed payload without releasing would leave
- * users hearing "still working on your earlier task" until the 30-min TTL
+ * users hearing "finishing another task first" until the 30-min TTL
  * expires. sessionId/lockToken are extracted loosely — independent of the
  * rest of the payload being valid.
  */
