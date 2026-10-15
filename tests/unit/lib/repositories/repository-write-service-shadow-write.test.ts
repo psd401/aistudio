@@ -61,7 +61,7 @@ async function shadowWriteCanonical(
   ...args: Parameters<
     typeof import("@/lib/repositories/repository-write-service").shadowWriteCanonical<{ itemId: number }>
   >
-): Promise<void> {
+): Promise<import("@/lib/repositories/repository-write-service").RepositoryWritePath> {
   const service = await import("@/lib/repositories/repository-write-service");
   return service.shadowWriteCanonical(...args);
 }
