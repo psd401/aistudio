@@ -213,6 +213,16 @@ COMMENT_PROSE_UNPARSEABLE = (
     "    return 1 +\n"
 )
 
+# A WORKING file whose one-line comment holds `\n`-separated example code,
+# every piece of it valid Python. That is indistinguishable from a collapsed
+# body — both are one comment token whose pieces parse — and repairing it
+# turned the comment into live statements.
+COMMENT_HOLDING_EXAMPLE_CODE = (
+    "x = 1\n"
+    "# example: a = 2\\nb = 3\\nc = a + b\\nprint(c)\\n# end of example\n"
+    "print(x)\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -352,6 +362,18 @@ class Diagnose(unittest.TestCase):
     def test_comment_prose_survives_an_unrelated_syntax_error(self):
         self.assertEqual(
             rln.diagnose(COMMENT_PROSE_UNPARSEABLE, "p.py")[0], "clean")
+
+    def test_a_comment_holding_example_code_is_refused_not_guessed(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COMMENT_HOLDING_EXAMPLE_CODE, "e.py")
+        self.assertEqual(verdict, "comment-ambiguous")
+        self.assertEqual(lines, [2])
+
+    def test_a_single_line_comment_file_is_still_repaired(self):
+        # The exemption that keeps the shebang collapse working: a one-line
+        # file that is all comment cannot have been meant that way.
+        self.assertEqual(
+            rln.diagnose(COLLAPSED_SHEBANG, "s.py")[0], "broken")
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -753,6 +775,12 @@ class Languages(unittest.TestCase):
         proc, content = self.run_on(COMMENT_PROSE_UNPARSEABLE, ".py")
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(content, COMMENT_PROSE_UNPARSEABLE)
+
+    def test_a_comment_holding_example_code_is_left_identical(self):
+        proc, content = self.run_on(COMMENT_HOLDING_EXAMPLE_CODE, ".py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, COMMENT_HOLDING_EXAMPLE_CODE)
+        self.assertIn("inside a comment", proc.stderr)
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")

@@ -355,13 +355,13 @@ a differently-broken file, so the loop can repeat for many turns.
      the error you now get.
    - `clean` — no collapsed line. The escapes are legitimate, so stop
      looking at them and debug the actual error.
-   - `ambiguous` (exit 2) — not sure, so the file is untouched: the named
-     lines' escapes sit inside string literals, or a `.js`/`.ts` file uses a
-     slash it cannot classify (a regex and a division look alike without a
-     real JS lexer), or a collapsed line also carries a `//` comment — fixing
-     only the breaks before it would leave the rest commented out, so split
-     that comment onto its own line by hand. Otherwise do not re-run it
-     hoping for a different answer and do not rewrite the file — debug the
+   - `ambiguous` (exit 2) — not sure, so the file is untouched. It says which
+     case it hit; two of them you can clear by hand: a collapsed line that
+     also carries a `//` comment, or one whose escapes are all inside a
+     comment — split that comment onto its own line and run it again.
+     Otherwise (escapes inside string literals, or a `.js`/`.ts` slash or
+     escaped quote it cannot classify without a real JS parser) do not re-run
+     it hoping for a different answer and do not rewrite the file — debug the
      error, or ask the user if you are stuck.
    - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
      The file is untouched; in those languages a literal `\n` cannot be told

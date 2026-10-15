@@ -450,21 +450,14 @@ def parses_cleanly(text, language):
     return False
 
 
-def python_string_spans(text):
-    """String-literal regions of a Python file, per the tokeniser.
-
-    ``{line_number: [(start_col, end_col)]}``. Only the tokeniser can see that
-    a line sits inside a triple-quoted string, because the opening quote is on
-    an earlier line.
+def _python_spans(text, wanted):
+    """``{line_number: [(start_col, end_col)]}`` for the wanted token kinds.
 
     Tokens found BEFORE a tokenising error are kept rather than discarded. One
     collapsed line makes the rest of the file untokenisable, and throwing the
-    whole result away took the protection off every string literal that came
-    before it — a raw string's data was rewritten alongside the real
-    collapsed line. What was tokenised was tokenised.
-
-    Comments are excluded on purpose: a collapsed file beginning with a
-    shebang is one big comment, so trusting comments would call it healthy.
+    whole result away took the protection off every literal that came before
+    it — a raw string's data was rewritten alongside the real collapsed line.
+    What was tokenised was tokenised.
     """
     lines = split_lines(text)
     spans = {}
@@ -476,7 +469,7 @@ def python_string_spans(text):
         pass
     for token in tokens:
         name = tokenize.tok_name.get(token.type, "")
-        if name != "STRING" and not name.startswith("FSTRING"):
+        if not any(name == kind or name.startswith(kind) for kind in wanted):
             continue
         (start_row, start_col), (end_row, end_col) = token.start, token.end
         for row in range(start_row, end_row + 1):
@@ -486,6 +479,33 @@ def python_string_spans(text):
                 end_col if row == end_row else line_length,
             ))
     return spans
+
+
+def python_string_spans(text):
+    """String-literal regions of a Python file, per the tokeniser.
+
+    Only the tokeniser can see that a line sits inside a triple-quoted
+    string, because the opening quote is on an earlier line. Comments are
+    excluded here on purpose: a collapsed file beginning with a shebang is one
+    big comment, so demoting comment escapes would call it healthy.
+    """
+    return _python_spans(text, ("STRING", "FSTRING"))
+
+
+def python_comment_spans(text):
+    """Comment regions of a Python file, per the tokeniser (see _vetoed)."""
+    return _python_spans(text, ("COMMENT",))
+
+
+def _within_spans(escapes, spans, number):
+    """True when every one of a line's escapes sits inside a span."""
+    line_spans = spans.get(number, [])
+    if not line_spans:
+        return False
+    return all(
+        any(start <= record[0] < end for start, end in line_spans)
+        for record in escapes
+    )
 
 
 def apply_string_spans(records, spans):
@@ -609,6 +629,30 @@ def diagnose(text, path):
         return "clean", real_lines, literal, []
 
     if broken_lines:
+        if language == PYTHON and real_lines > 1 and parses_cleanly(
+            text, language
+        ):
+            comments = python_comment_spans(text)
+            if all(
+                _within_spans(
+                    [r for r in records.get(number, []) if r[1] == "n"],
+                    comments,
+                    number,
+                )
+                for number in broken_lines
+            ) and not _vetoed(text, language, broken_lines, records):
+                # Every escape is inside a comment in a file that works. A
+                # comment holding `\n`-separated example code is
+                # indistinguishable from a collapsed body — both are one
+                # comment token whose pieces are valid code — and repairing
+                # one turned a working file's comment into live statements.
+                # The two proofs in _vetoed did not separate them either, so
+                # say so instead of guessing.
+                #
+                # A single-line file is exempt: a collapsed script that opens
+                # with a shebang IS one comment, it cannot have been meant
+                # that way, and it is the most common shape of this bug.
+                return "comment-ambiguous", real_lines, literal, broken_lines
         if any(
             record[3]
             for number in broken_lines
@@ -725,6 +769,18 @@ def main() -> int:
             "repairs .py, .js/.ts and .json files — in any other language a "
             "literal \\n cannot be told apart from comment prose, so the "
             "file was NOT modified.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if verdict == "comment-ambiguous":
+        print(
+            f"ambiguous: {args.path} line(s) {_describe(lines)} look "
+            "collapsed, but every escape there is inside a comment in a file "
+            "that parses — prose holding example code and a collapsed body "
+            "look the same there, and repairing the wrong one would turn a "
+            "comment into live statements. The file was NOT modified. If that "
+            "line really is collapsed, split the comment off it by hand.",
             file=sys.stderr,
         )
         return 2
