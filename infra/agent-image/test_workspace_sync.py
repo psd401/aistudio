@@ -3399,9 +3399,20 @@ class DurableScratchDirectoryTests(unittest.TestCase):
     def _patch_workspace(self):
         return mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root)
 
-    def _restore(self, keys, contents):
+    def _restore(self, keys, contents, last_modified=None):
         """Simulate turn 2: a fresh container restoring the same prefix."""
         bodies = {}
+        listing = {"paths": keys}
+        if last_modified is not None:
+            listing["entries"] = [
+                {
+                    "path": key,
+                    "size": len(contents[key]),
+                    "lastModified": last_modified[key],
+                    "eTag": f'"{key}"',
+                }
+                for key in keys
+            ]
 
         def fake_download_spec(relative):
             body = contents[relative]
@@ -3412,7 +3423,7 @@ class DurableScratchDirectoryTests(unittest.TestCase):
         with self._patch_workspace(), mock.patch.object(
             workspace_sync,
             "_broker_request",
-            return_value={"paths": keys},
+            return_value=listing,
         ), mock.patch.object(
             workspace_sync, "_download_spec", side_effect=fake_download_spec
         ), mock.patch.object(
@@ -3669,6 +3680,39 @@ class DurableScratchDirectoryTests(unittest.TestCase):
         ), self.assertLogs("workspace_sync", level="WARNING"):
             self.assertEqual(workspace_sync._prune_work_directory(), 2)
         self.assertEqual([p.name for p in work.iterdir()], ["f4.pdf"])
+
+    def test_prune_after_a_cold_boot_evicts_by_committed_age(self):
+        # A restore stamps every file with its download time. Without the
+        # committed LastModified, the prune would evict in download order —
+        # possibly the newest file — and carry that deletion into S3.
+        keys = ["work/newest.pdf", "work/oldest.pdf", "work/middle.pdf"]
+        contents = {key: b"x" * 10 for key in keys}
+        contents["memory/note.md"] = b"note"
+        ages = {
+            "work/oldest.pdf": 1_700_000_000,
+            "work/middle.pdf": 1_700_000_100,
+            "work/newest.pdf": 1_700_000_200,
+            "memory/note.md": 1_700_000_000,
+        }
+        self._restore([*keys, "memory/note.md"], contents, ages)
+        for key in keys:
+            self.assertEqual(
+                (self.root / key).stat().st_mtime_ns,
+                ages[key] * 1_000_000_000,
+            )
+        # Only scratch files are re-dated.
+        self.assertNotEqual(
+            (self.root / "memory" / "note.md").stat().st_mtime_ns,
+            ages["memory/note.md"] * 1_000_000_000,
+        )
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 2
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 1)
+        self.assertEqual(
+            sorted(p.name for p in (self.root / "work").iterdir()),
+            ["middle.pdf", "newest.pdf"],
+        )
 
     def test_prune_is_a_no_op_under_the_ceilings(self):
         (self.root / "work").mkdir()

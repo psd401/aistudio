@@ -49,7 +49,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +82,9 @@ class _RemoteWorkspaceSnapshot:
     sizes: dict[str, int]
     e_tags: dict[str, str]
     generation: Optional[str]
+    # S3 LastModified, epoch seconds. Used only to give a restored work/ file
+    # a durable mtime — see _download_one in pull_workspace.
+    last_modified: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2283,6 +2286,7 @@ def _list_remote_workspace_snapshot(
     seen_paths: set[str] = set()
     listed_sizes: dict[str, int] = {}
     listed_e_tags: dict[str, str] = {}
+    listed_last_modified: dict[str, int] = {}
     metadata_trusted = True
     continuation: str | None = None
     seen_continuations: set[str] = set()
@@ -2363,6 +2367,7 @@ def _list_remote_workspace_snapshot(
                     metadata_trusted = False
                     continue
                 page_metadata[entry_path] = (entry_size, e_tag)
+                listed_last_modified[entry_path] = last_modified
             if set(page_metadata) != set(page_paths):
                 metadata_trusted = False
 
@@ -2398,6 +2403,7 @@ def _list_remote_workspace_snapshot(
         sizes=listed_sizes,
         e_tags=listed_e_tags,
         generation=generation,
+        last_modified=listed_last_modified,
     )
 
 
@@ -2452,6 +2458,7 @@ def pull_workspace(
     # set has passed the same contract as the web checkpoint.
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     listed_sizes = snapshot.sizes
+    listed_last_modified = snapshot.last_modified
     skipped = 0
     exact_restore_paths = set(listed_paths)
     if prefix in _force_exact_workspace_restores:
@@ -2498,7 +2505,20 @@ def pull_workspace(
                 )
             try:
                 restored, metadata = _open_regular_no_follow(relative)
-                restored.close()
+                with restored:
+                    last_modified = listed_last_modified.get(relative)
+                    if _is_work_relative(relative) and last_modified is not None:
+                        # A download stamps the file with the restore time, so
+                        # after a cold boot every scratch file would look
+                        # equally new and _prune_work_directory would evict in
+                        # arbitrary order. The S3 LastModified is the time the
+                        # turn that wrote it pushed it — a durable age. Set via
+                        # the open descriptor, never by path.
+                        modified_ns = last_modified * 1_000_000_000
+                        os.utime(
+                            restored.fileno(), ns=(modified_ns, modified_ns)
+                        )
+                        metadata = os.fstat(restored.fileno())
                 return None, (
                     metadata.st_size,
                     metadata.st_mtime_ns,
