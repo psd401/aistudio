@@ -657,6 +657,19 @@ class Languages(unittest.TestCase):
         # The string's own data survived; only the delimiters were unescaped.
         self.assertIn('SEP = "alpha\\nbravo', content)
 
+    def test_a_repair_that_does_not_cure_the_file_says_so(self):
+        # The collapse was real, but so was a second fault. Ending on "Run it
+        # now" for a file that still will not parse is a false promise.
+        collapsed = (
+            'import sys\\nX = \\"alpha\\nbravo\\ncharlie\\" + str(1) + '
+            '\\"delta\\nprint(X)\\n'
+        )
+        proc, _content = self.run_on(collapsed, ".py")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("repaired", proc.stdout)
+        self.assertIn("still does not parse", proc.stdout)
+        self.assertNotIn("Run it now", proc.stdout)
+
     def test_a_collapsed_js_line_with_a_comment_is_left_identical(self):
         proc, content = self.run_on(COLLAPSED_JS_WITH_COMMENT, ".js")
         self.assertEqual(proc.returncode, 2)

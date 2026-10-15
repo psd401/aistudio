@@ -765,6 +765,10 @@ def main() -> int:
         return 0
 
     fixed = apply_repair(text, lines, language, records)
+    # Say so when the repair is an improvement but not a cure, rather than
+    # ending on "Run it now" for a file that still will not parse.
+    still_broken = language in (PYTHON, JSON) and not parses_cleanly(
+        fixed, language)
     try:
         write_source(args.path, fixed, had_bom)
     except OSError as error:
@@ -777,11 +781,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    closing = (
+        "It still does not parse, so the escapes were not its only problem — "
+        "debug the error you get now. Do not rewrite the file."
+        if still_broken
+        else "Run it now; do not rewrite it."
+    )
     print(
         f"repaired: {args.path} — line(s) {_describe(lines)} were collapsed; "
         f"{changing} literal escapes there became real newlines "
-        f"({len(split_lines(fixed))} lines total). Run it now; do not "
-        "rewrite it."
+        f"({len(split_lines(fixed))} lines total). {closing}"
     )
     return 0
 
