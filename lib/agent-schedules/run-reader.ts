@@ -147,9 +147,13 @@ export class DrizzleAgentScheduleRunReader
     // schedules accumulates far more of those than real runs — leaving them in
     // would spend the per-schedule run budget on rows that cannot affect the
     // answer.
-    const streakDecidingStatuses = sql.join(
-      STREAK_DECIDING_STATUSES.map((status) => sql`${status}`),
-      sql`, `,
+    //
+    // Inlined as LITERALS, not bind parameters, and only from the constant
+    // above: the partial index `idx_agent_scheduled_runs_streak` (migration
+    // 188) is usable only when the planner can prove this predicate implies
+    // the index's, and it cannot prove that through a `$n` placeholder.
+    const streakDecidingStatuses = sql.raw(
+      STREAK_DECIDING_STATUSES.map((status) => `'${status}'`).join(", "),
     );
     // The last successful run's id per schedule is the streak boundary, and
     // every failed run after it is in the current streak. `id` is the

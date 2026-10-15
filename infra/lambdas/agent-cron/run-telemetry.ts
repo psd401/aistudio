@@ -176,9 +176,11 @@ const FAILED_STATUSES = "('error', 'deferred')";
  * five-minute schedule and a yearly one.
  *
  * Still bounded, so a schedule that has been failing for years is never read
- * whole: the composite (user_id, schedule_id, created_at DESC) index from
- * migration 188 makes this an ordered range scan over one schedule's rows that
- * stops at the limit.
+ * whole: the partial `idx_agent_scheduled_runs_streak` index from migration
+ * 188 holds only streak-deciding rows in this query's order, so the scan stops
+ * at the limit instead of walking past every `skipped`/`promoted` row. That is
+ * why `STREAK_DECIDING_STATUSES` is a literal list here: the planner can match
+ * a partial index's predicate only against literals.
  *
  * The one consequence is deliberate: a streak longer than this loses sight of
  * its own stamp, so the owner is reminded again rather than never again. That

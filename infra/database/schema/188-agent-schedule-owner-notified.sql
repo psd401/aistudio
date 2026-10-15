@@ -17,19 +17,21 @@
 -- "streak >= 3 and nobody has been told yet", which is correct for a streak of
 -- any length and whatever its history.
 --
--- Also adds the composite index the streak count needs. `list` asks for every
--- schedule's consecutive-failure count on each call, and a window function
--- partitioned by schedule must materialize the owner's matching rows before
--- counting them. The existing indexes cover (user_id, created_at) and
--- (schedule_id, created_at) separately; neither lets an owner's rows be
--- narrowed by schedule and date together, so an owner running several
--- five-minute schedules would have had the whole 90-day window read per call.
+-- Also adds the index both streak readers need. They read a schedule's
+-- newest streak-deciding runs (`success`, `error`, `deferred`) newest first and
+-- stop at 500. A PARTIAL index on exactly those statuses is what makes that
+-- stop real: an index without `status` would still walk past every `skipped`
+-- and `promoted` row to find 500 deciding ones, and a contended five-minute
+-- schedule accumulates far more of those than real runs. `id DESC` is the
+-- readers' tiebreaker, so the index returns rows already in their order. The
+-- readers inline the status list as literals (never bind parameters), which
+-- is what lets the planner prove a query implies this predicate.
 --
 -- Migrations 001-005 are untouched (postgres-owned); agent_scheduled_runs was
 -- created in migration 066 and is owned by the migration role.
 --
 -- Rollback:
--- DROP INDEX IF EXISTS idx_agent_scheduled_runs_owner_schedule;
+-- DROP INDEX IF EXISTS idx_agent_scheduled_runs_streak;
 -- ALTER TABLE agent_scheduled_runs DROP COLUMN IF EXISTS owner_notified_at;
 
 ALTER TABLE agent_scheduled_runs
@@ -38,8 +40,9 @@ ALTER TABLE agent_scheduled_runs
 COMMENT ON COLUMN agent_scheduled_runs.owner_notified_at IS
     'When the schedule owner was sent the Chat message saying this schedule is failing (#1890). Set on the one run of a failure streak that carried the message; NULL on every other run. Read as the streak suppression state, so a streak that has any non-NULL value in it stays quiet until the schedule succeeds again.';
 
-CREATE INDEX IF NOT EXISTS idx_agent_scheduled_runs_owner_schedule
-    ON agent_scheduled_runs (user_id, schedule_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_scheduled_runs_streak
+    ON agent_scheduled_runs (user_id, schedule_id, created_at DESC, id DESC)
+    WHERE status IN ('success', 'error', 'deferred');
 
 UPDATE migration_log SET status = 'completed'
 WHERE description = '188-agent-schedule-owner-notified.sql' AND status = 'failed';

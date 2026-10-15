@@ -63,14 +63,12 @@ export const agentScheduledRuns = pgTable(
     uniqueIndex("uq_agent_scheduled_runs_fire")
       .on(table.fireKey)
       .where(sql`fire_key IS NOT NULL`),
-    // Narrows an owner's rows by schedule AND date together, which the
-    // consecutive-failure window function needs; the two older indexes cover
-    // only one of those dimensions each.
-    index("idx_agent_scheduled_runs_owner_schedule").on(
-      table.userId,
-      table.scheduleId,
-      desc(table.createdAt),
-    ),
+    // Both streak readers take a schedule's newest 500 streak-deciding runs.
+    // Partial on exactly those statuses so the LIMIT bounds rows READ, not
+    // rows kept after walking past every skipped/promoted one (migration 188).
+    index("idx_agent_scheduled_runs_streak")
+      .on(table.userId, table.scheduleId, desc(table.createdAt), desc(table.id))
+      .where(sql`status IN ('success', 'error', 'deferred')`),
   ],
 );
 

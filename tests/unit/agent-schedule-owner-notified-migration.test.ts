@@ -29,11 +29,11 @@ describe("schedule owner-notified migration (#1890)", () => {
     )
   })
 
-  it("indexes an owner's rows by schedule and date together", () => {
-    // The consecutive-failure count partitions by schedule inside an owner's
-    // rows; the two older indexes cover only one of those dimensions each.
+  it("indexes only the streak-deciding runs, in the readers' order", () => {
+    // Partial on the deciding statuses: without the predicate, LIMIT 500 still
+    // walks past every skipped/promoted row of a contended schedule.
     expect(migration).toMatch(
-      /CREATE INDEX IF NOT EXISTS idx_agent_scheduled_runs_owner_schedule[\s\S]+ON agent_scheduled_runs \(user_id, schedule_id, created_at DESC\)/,
+      /CREATE INDEX IF NOT EXISTS idx_agent_scheduled_runs_streak\s+ON agent_scheduled_runs \(user_id, schedule_id, created_at DESC, id DESC\)\s+WHERE status IN \('success', 'error', 'deferred'\);/,
     )
   })
 
