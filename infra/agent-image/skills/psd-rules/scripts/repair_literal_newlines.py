@@ -287,18 +287,34 @@ def _javascript_records(text):
     index = 0
     length = len(text)
 
+    if text.startswith("#!"):
+        # Step over a hashbang before the scan begins. Its slashes are not
+        # code and would otherwise hit the bare-slash refusal below, which
+        # turned away `#!/usr/bin/env node\nconst …` — the JS form of the most
+        # common shape of this bug. It ends at the first line break, real or
+        # mangled; the mangled one is left to be recorded as evidence.
+        while index < length and text[index] not in "\r\n":
+            if text[index] == "\\" and text[index + 1:index + 2] == "n":
+                break
+            index += 1
+        column = index
+
     while index < length:
         char = text[index]
 
         if char == "\\" and text[index + 1:index + 2] in ("\n", "\r"):
-            # A backslash immediately before a real newline is a line
-            # continuation, and a JS string may legally span lines that way.
-            # Ending the string here marked the continuation line's escapes as
-            # code and rewrote a valid file. `\r\n` counts: a CRLF file's
-            # continuation is the same construct.
+            # A backslash immediately before a real newline continues a STRING
+            # across the line break, which is legal in JS, and ending the
+            # string there marked the next line's escapes as code and rewrote
+            # a valid file. `\r\n` counts: a CRLF file's continuation is the
+            # same construct. It continues nothing else — a backslash does not
+            # extend a `//` comment past the line terminator — so every other
+            # state ends at the newline as usual.
             index += 2
             if text[index - 1] == "\r" and text[index:index + 1] == "\n":
                 index += 1
+            if state == "line-comment":
+                state = "code"
             row += 1
             column = 0
             continue
@@ -465,14 +481,27 @@ def parses_cleanly(text, language):
     return False
 
 
-def _tokenize_prefix(text):
-    """(tokens, failed_row) — tokens up to the first error, and its 1-based row.
+def _tokenize_prefix(lines, start):
+    """(tokens, failed_row) — tokens from ``lines[start:]`` up to the first
+    error, with ``failed_row`` its 1-based row within that slice, or None when
+    the rest tokenised.
 
-    ``failed_row`` is None when the whole text tokenised.
+    Reads through an index rather than a joined string so that resuming after
+    many failures stays linear in the file: the tokeniser stops AT the failure
+    rather than scanning past it, so each line is handed over once.
     """
+    position = [start]
+
+    def readline():
+        if position[0] >= len(lines):
+            return ""
+        line = lines[position[0]]
+        position[0] += 1
+        return line
+
     tokens = []
     try:
-        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        for token in tokenize.generate_tokens(readline):
             tokens.append(token)
     except Exception as error:  # TokenError, SyntaxError, IndentationError
         row = None
@@ -497,6 +526,13 @@ def _python_spans(text, wanted):
     just as real. A triple-quoted string sitting after a collapsed line had its
     data rewritten because the scan never reached it.
 
+    Resuming is not capped. The tokeniser stops at each failure instead of
+    scanning past it, and each resume starts after the line that failed, so
+    every line is handed over once and the whole walk is linear however many
+    collapsed lines a file holds. A capped version left everything after the
+    last allowed restart unprotected, which is the gap resuming exists to
+    close.
+
     Resuming can also mis-pair quotes in the fragment it restarts on, which
     can only ever mark more escapes as legitimate — fewer repairs, never a
     wrong one.
@@ -505,10 +541,8 @@ def _python_spans(text, wanted):
     spans = {}
     tokens = []
     offset = 0
-    remaining = text
-    # Bounded so a pathological file cannot turn this into a quadratic walk.
-    for _attempt in range(32):
-        found, failed_row = _tokenize_prefix(remaining)
+    while offset < len(lines):
+        found, failed_row = _tokenize_prefix(lines, offset)
         tokens.extend(
             token._replace(
                 start=(token.start[0] + offset, token.start[1]),
@@ -518,13 +552,8 @@ def _python_spans(text, wanted):
         )
         if failed_row is None:
             break
-        remaining_lines = split_lines(remaining)
-        if failed_row >= len(remaining_lines):
-            break
+        # failed_row is at least 1, so this always advances.
         offset += failed_row
-        remaining = "".join(remaining_lines[failed_row:])
-        if not remaining:
-            break
     for token in tokens:
         name = tokenize.tok_name.get(token.type, "")
         if not any(name == kind or name.startswith(kind) for kind in wanted):
@@ -697,14 +726,17 @@ def diagnose(text, path):
     # error is still prose, and the proof that a repair stops the file parsing
     # is no help in a file that never parsed.
     #
-    # A single-line file is exempt, and that exemption is what keeps the main
-    # case working: a collapsed script opening with a shebang IS one comment
-    # token and cannot have been meant that way. The cost is a partial
-    # collapse whose body happens to begin with a comment in an otherwise
-    # correct file — the same shape, so it is set aside too, and the message
-    # says to split the comment off by hand.
+    # A collapsed script opening with a SHEBANG is exempt, and that exemption
+    # is what keeps the main case working: such a file IS one comment token
+    # and cannot have been meant that way. The exemption is no wider than
+    # that — a one-line file that is any other comment may well be prose, and
+    # as a plain `#` comment holding example statements it was rewritten into
+    # live code. The cost is a partial collapse whose body happens to begin
+    # with a comment in an otherwise correct file: the same shape as prose, so
+    # it is set aside too, and the message says to split the comment off.
     comment_held = []
-    if broken_lines and language == PYTHON and real_lines > 1:
+    collapsed_shebang = real_lines == 1 and text.startswith("#!")
+    if broken_lines and language == PYTHON and not collapsed_shebang:
         comments = python_comment_spans(text)
         remaining = []
         for number in broken_lines:

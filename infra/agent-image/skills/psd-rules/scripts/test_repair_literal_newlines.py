@@ -278,6 +278,33 @@ COLLAPSE_BESIDE_A_COMMENT_EXAMPLE = (
     "main()\n"
 )
 
+# A ONE-LINE Python file that is a single comment holding example code. It
+# works (it does nothing), and the single-line exemption that keeps the
+# collapsed shebang repairable used to cover it too, so it was rewritten into
+# four live statements. The exemption is now for shebangs only.
+ONE_LINE_COMMENT_EXAMPLE = (
+    "# Example: a = 1\\nb = 2\\nc = a + b\\nprint(c)\\n"
+    "# end of the example here\n"
+)
+
+# A collapsed Node script. Its hashbang's slashes used to hit the bare-slash
+# refusal before any escape was recorded, so the JS form of the most common
+# shape of this bug could not be repaired at all.
+COLLAPSED_NODE_HASHBANG = (
+    '#!/usr/bin/env node\\nconst fs = require("fs");\\n'
+    'console.log(fs.existsSync("."));\\nprocess.exit(0);\\n'
+)
+
+# A `//` comment ending in a backslash, then a collapsed line. A backslash
+# does not extend a line comment past the line terminator, so keeping the
+# comment state across it read the collapsed line as comment data and
+# reported `clean` on a broken file.
+COMMENT_BACKSLASH_THEN_COLLAPSE = (
+    "const a = 1; // note \\\n"
+    'const fs = require("fs");\\nconsole.log(fs.existsSync("."));\\n'
+    "process.exit(0);\\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -458,6 +485,23 @@ class Diagnose(unittest.TestCase):
             COLLAPSE_BESIDE_A_COMMENT_EXAMPLE, "m.py")
         self.assertEqual(verdict, "broken")
         self.assertEqual(lines, [3])
+
+    def test_a_one_line_comment_example_file_is_refused(self):
+        self.assertEqual(
+            rln.diagnose(ONE_LINE_COMMENT_EXAMPLE, "e.py")[0],
+            "comment-ambiguous")
+
+    def test_a_collapsed_node_hashbang_is_repaired(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSED_NODE_HASHBANG, "n.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_a_backslash_does_not_extend_a_line_comment(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COMMENT_BACKSLASH_THEN_COLLAPSE, "c.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [2])
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -898,6 +942,23 @@ class Languages(unittest.TestCase):
             content,
         )
 
+    def test_a_one_line_comment_example_file_is_left_identical(self):
+        proc, content = self.run_on(ONE_LINE_COMMENT_EXAMPLE, ".py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, ONE_LINE_COMMENT_EXAMPLE)
+
+    def test_a_collapsed_node_hashbang_becomes_runnable(self):
+        proc, content = self.run_on(COLLAPSED_NODE_HASHBANG, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("repaired", proc.stdout)
+        self.assertTrue(content.startswith("#!/usr/bin/env node\n"))
+        self.assertNotIn("\\n", content)
+
+    def test_a_collapse_after_a_backslash_comment_is_repaired(self):
+        proc, content = self.run_on(COMMENT_BACKSLASH_THEN_COLLAPSE, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn('const fs = require("fs");\n', content)
+
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
         self.assertEqual(proc.returncode, 2)
@@ -919,6 +980,43 @@ class Languages(unittest.TestCase):
         proc, content = self.run_on(original, ".json")
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(content, original)
+
+
+class ManyCollapsedLines(unittest.TestCase):
+    """Resuming the tokeniser must not run out before the end of the file."""
+
+    def test_a_string_after_forty_collapsed_lines_keeps_its_data(self):
+        # Resuming used to stop after a fixed number of restarts, which left
+        # every literal past that point unprotected — the gap resuming exists
+        # to close.
+        collapsed = "".join(
+            'def f{i}():\\n    a = {i}\\n    print("hello from collapsed '
+            'body number {i}")\\n    return a\n'.format(i=i)
+            for i in range(40)
+        )
+        docstring = (
+            'DOC = """\n'
+            "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf"
+            "\\nhotel\\nindia\\njuliet\\nkilo\n"
+            '"""\nprint(DOC)\n'
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".py",
+                                         delete=False) as fh:
+            fh.write(collapsed + docstring)
+            path = fh.name
+        try:
+            proc = subprocess.run([sys.executable, SCRIPT, path],
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            with open(path) as handle:
+                content = handle.read()
+            compile(content, "<repaired>", "exec")
+            # Every collapsed line was repaired...
+            self.assertIn("def f39():\n", content)
+            # ...and the string after all of them kept its data.
+            self.assertIn("alpha\\nbravo\\ncharlie\\ndelta", content)
+        finally:
+            os.unlink(path)
 
 
 class EveryLegitimateConstruct(unittest.TestCase):
@@ -1014,8 +1112,9 @@ class EveryLegitimateConstruct(unittest.TestCase):
                         fh.write(combined)
                         path = fh.name
                     try:
-                        subprocess.run([sys.executable, SCRIPT, path],
-                                       capture_output=True, text=True)
+                        proc = subprocess.run([sys.executable, SCRIPT, path],
+                                              capture_output=True, text=True)
+                        self.assertIn(proc.returncode, (0, 2), proc.stderr)
                         with open(path) as handle:
                             after = handle.read()
                         for line in escaped_lines:
@@ -1037,8 +1136,9 @@ class EveryLegitimateConstruct(unittest.TestCase):
                     fh.write(raw)
                     path = fh.name
                 try:
-                    subprocess.run([sys.executable, SCRIPT, path],
-                                   capture_output=True, text=True)
+                    proc = subprocess.run([sys.executable, SCRIPT, path],
+                                          capture_output=True, text=True)
+                    self.assertIn(proc.returncode, (0, 2), proc.stderr)
                     with open(path, "rb") as handle:
                         self.assertEqual(handle.read(), raw)
                 finally:
@@ -1052,8 +1152,10 @@ class EveryLegitimateConstruct(unittest.TestCase):
                     fh.write(source)
                     path = fh.name
                 try:
-                    subprocess.run([sys.executable, SCRIPT, path],
-                                   capture_output=True, text=True)
+                    proc = subprocess.run([sys.executable, SCRIPT, path],
+                                          capture_output=True, text=True)
+                    # 0 or 2 only: a crash would also leave the file alone.
+                    self.assertIn(proc.returncode, (0, 2), proc.stderr)
                     with open(path) as handle:
                         self.assertEqual(handle.read(), source)
                 finally:
