@@ -368,6 +368,13 @@ def _javascript_records(text):
                     state = "block-comment"
                 else:
                     return None
+            elif text.startswith("<!--", index) or text.startswith("-->", index):
+                # HTML-like comments are valid line comments in non-module
+                # JavaScript, and `node --check` accepts them — a healthy file
+                # using one had its prose rewritten into invalid JS. Reading a
+                # stray `-->` as a comment (from `x-- > 5` spelled `x-->5`)
+                # only demotes escapes, which is the safe direction.
+                state = "line-comment"
         elif state == "template":
             if char == "`":
                 frame = stack.pop() if stack else ("code", 0)
@@ -627,9 +634,12 @@ def _stays_all_comments(text, broken_lines, language, records):
         repaired = apply_repair(
             lines[number - 1], [1], language,
             {1: records.get(number, [])})
-        pieces = split_lines(repaired)[1:]
-        if not pieces:
+        pieces = split_lines(repaired)
+        if len(pieces) < 2:
             return False
+        # The FIRST piece counts too. Skipping it let `x = 1\\n# first\\n#
+        # second` pass as prose — the leading `x = 1` proves it was not — and
+        # a broken file was reported clean and left collapsed.
         for piece in pieces:
             stripped = piece.strip()
             if stripped and not stripped.startswith("#"):

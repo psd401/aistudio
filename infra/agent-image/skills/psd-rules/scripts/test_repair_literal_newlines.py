@@ -305,6 +305,23 @@ COMMENT_BACKSLASH_THEN_COLLAPSE = (
     "process.exit(0);\\n"
 )
 
+# Healthy JS using an HTML-like line comment. `<!--` and `-->` are valid line
+# comments in non-module JavaScript and `node --check` accepts them, but the
+# scanner read them as code and rewrote the prose into invalid JS.
+HEALTHY_JS_HTML_COMMENT = (
+    "<!-- a legacy html style comment with \\n\\n\\n escapes in its "
+    "prose here\n"
+    "console.log(1);\n"
+)
+
+# A collapsed line whose first piece is CODE and whose remaining pieces are
+# all comments. Skipping the first piece let this pass as comment prose, so a
+# broken file was reported clean and left collapsed.
+CODE_THEN_COMMENT_TAILS = (
+    "x = 1\\n# first note about the thing\\n# second note about it"
+    "\\n# third note here\\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -502,6 +519,16 @@ class Diagnose(unittest.TestCase):
             COMMENT_BACKSLASH_THEN_COLLAPSE, "c.js")
         self.assertEqual(verdict, "broken")
         self.assertEqual(lines, [2])
+
+    def test_an_html_style_js_comment_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_HTML_COMMENT, "h.js")[0], "clean")
+
+    def test_a_leading_code_piece_defeats_the_comment_only_proof(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            CODE_THEN_COMMENT_TAILS, "t.py")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -958,6 +985,18 @@ class Languages(unittest.TestCase):
         proc, content = self.run_on(COMMENT_BACKSLASH_THEN_COLLAPSE, ".js")
         self.assertEqual(proc.returncode, 0)
         self.assertIn('const fs = require("fs");\n', content)
+
+    def test_a_healthy_html_comment_js_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_HTML_COMMENT, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_HTML_COMMENT)
+
+    def test_code_then_comment_tails_is_repaired(self):
+        proc, content = self.run_on(CODE_THEN_COMMENT_TAILS, ".py")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("repaired", proc.stdout)
+        compile(content, "<repaired>", "exec")
+        self.assertTrue(content.startswith("x = 1\n# first note"))
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
