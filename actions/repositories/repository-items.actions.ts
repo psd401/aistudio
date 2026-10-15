@@ -50,6 +50,7 @@ import {
   registerCanonicalUpload,
   registerCanonicalUploadIfEnabled,
   retryCanonicalRepositoryItem,
+  type RegisterCanonicalUploadInput,
 } from "@/lib/repositories/content-platform"
 import {
   getContentPlatformConfig,
@@ -59,7 +60,11 @@ import {
   beginRepositoryItemDeletion,
   finalizeRepositoryItemDeletion
 } from "@/lib/repositories/content-platform/deletion-service"
-import { createRepositoryTextItem } from "@/lib/repositories/repository-write-service"
+import {
+  createRepositoryTextItem,
+  shadowWriteCanonical,
+  type CanonicalShadowWriteRegistrars,
+} from "@/lib/repositories/repository-write-service"
 
 // Runtime-validated processing-status union (REV-COR-068): actions are network
 // endpoints, so the TS parameter type is not enforced on the wire.
@@ -138,19 +143,19 @@ export interface AddDocumentWithPresignedUrlInput {
   }
 }
 
+const UPLOAD_REGISTRARS: CanonicalShadowWriteRegistrars<RegisterCanonicalUploadInput> = {
+  register: registerCanonicalUpload,
+  registerIfEnabled: registerCanonicalUploadIfEnabled,
+  logNoun: "repository",
+}
+
 async function shadowWriteCanonicalUpload(
-  input: {
-    itemId: number
-    userId: number
-    objectKey: string
-    originalFileName: string
-    declaredContentType: string
-    byteSize: number
-    traceId: string
-  },
+  input: RegisterCanonicalUploadInput,
   log: ReturnType<typeof createLogger>,
   canonicalRequired = false
 ): Promise<void> {
+  // Upload-only pre-check: unsupported content types never reach canonical
+  // registration. After cutover that leaves no searchable copy, so mark failed.
   if (!isCanonicalUploadContentType(input.declaredContentType)) {
     if (canonicalRequired) {
       await updateRepositoryItemStatus(
@@ -161,49 +166,7 @@ async function shadowWriteCanonicalUpload(
     }
     return
   }
-  try {
-    const canonical = canonicalRequired
-      ? await registerCanonicalUpload(input)
-      : await registerCanonicalUploadIfEnabled(input)
-    if (!canonical) return
-
-    log.info("Canonical repository version registered", {
-      itemId: input.itemId,
-      versionId: canonical.version.id,
-      processingJobId: canonical.inspectJob.id,
-      created: canonical.created,
-    })
-    await updateRepositoryItemStatus(input.itemId, "pending", null)
-    try {
-      await dispatchContentProcessingJob({
-        jobId: canonical.inspectJob.id,
-        itemVersionId: canonical.version.id,
-      })
-    } catch (dispatchError) {
-      log.warn("Canonical processing is pending scheduled dispatch", {
-        processingJobId: canonical.inspectJob.id,
-        error:
-          dispatchError instanceof Error
-            ? dispatchError.message
-            : "Unknown error",
-      })
-    }
-  } catch (error) {
-    await updateRepositoryItemStatus(
-      input.itemId,
-      "failed",
-      "Canonical content registration failed. Retry this item."
-    ).catch((statusError) => {
-      log.error("Failed to expose canonical repository registration failure", {
-        itemId: input.itemId,
-        error: statusError instanceof Error ? statusError.message : "Unknown error",
-      })
-    })
-    log.error("Canonical repository shadow write failed", {
-      itemId: input.itemId,
-      error: error instanceof Error ? error.message : "Unknown error",
-    })
-  }
+  await shadowWriteCanonical(input, UPLOAD_REGISTRARS, log, canonicalRequired)
 }
 
 // Sanitize filename to prevent directory traversal and other security issues
