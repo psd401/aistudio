@@ -67,6 +67,15 @@ const REPOSITORY_SCOPES = Object.keys(API_SCOPES).filter((s) =>
   s.startsWith("repositories:")
 )
 
+// Assistant Execution API scope for Atrium Capture's AI guide writer (migration
+// 190) — only `assistants:execute`, deliberately. `assistants:read`,
+// `assistants:write`, and `assistants:list` stay API-key only; widening the
+// OAuth surface to those would let a first-party client manage assistants, not
+// just run one the user already has access to.
+const ASSISTANT_EXECUTION_SCOPES = Object.keys(API_SCOPES).filter(
+  (s) => s === "assistants:execute"
+)
+
 /**
  * Scopes granted for the AI Studio API resource server. Standard OIDC scopes
  * must remain in the OIDC grant portion and must not be duplicated as API
@@ -77,11 +86,12 @@ export const RESOURCE_SERVER_SCOPES = [
   ...CONTENT_SCOPES,
   ...PLATFORM_SCOPES,
   ...REPOSITORY_SCOPES,
+  ...ASSISTANT_EXECUTION_SCOPES,
 ]
 
 /**
  * All scopes the OAuth provider supports (standard OIDC + MCP + Atrium content +
- * platform capability catalog).
+ * platform capability catalog + assistants:execute).
  */
 export const ALL_OAUTH_SCOPES = [
   ...OIDC_SCOPES,
