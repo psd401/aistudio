@@ -30,7 +30,9 @@
  *   - Restoring would only bring back an already-expired token.
  *
  * SAFETY: dry-run by default — prints the plan and touches nothing. Pass
- * `--apply` to actually delete. Secret names are printed only in dry run.
+ * `--apply` to actually delete. Neither mode prints a full email: dry run
+ * lists each secret with its email masked (`j***@domain`), `--apply` prints
+ * counts only.
  *
  * Run (Kris runs this himself — do NOT run it automatically; dev first):
  *   ENVIRONMENT=dev  AWS_REGION=us-east-1 bunx tsx scripts/agent-workspace/purge-expired-cognito-refresh-secrets.ts
@@ -86,6 +88,18 @@ function isUserCognitoRefreshSecret(name: string | undefined): name is string {
   if (!name.startsWith(PREFIX) || !name.endsWith(SUFFIX)) return false
   const middle = name.slice(PREFIX.length, name.length - SUFFIX.length)
   return middle.length > 0 && !middle.includes("/")
+}
+
+/**
+ * Secret name with the email's local part masked, so a dry run against prod
+ * does not print one user email per line into the operator's terminal.
+ */
+function maskedSecretName(name: string | undefined): string {
+  if (!name) return "(unnamed)"
+  const email = name.slice(PREFIX.length, name.length - SUFFIX.length)
+  const at = email.lastIndexOf("@")
+  const masked = at > 0 ? `${email[0]}***${email.slice(at)}` : "***"
+  return `${PREFIX}${masked}${SUFFIX}`
 }
 
 /** Last time the secret VALUE changed, which is when the token was minted. */
@@ -197,7 +211,7 @@ async function main() {
   if (!APPLY) {
     for (const secret of expired) {
       console.log(
-        `  DRY-RUN would delete ${secret.Name} (last written ${lastWrite(secret)?.toISOString()})`,
+        `  DRY-RUN would delete ${maskedSecretName(secret.Name)} (last written ${lastWrite(secret)?.toISOString()})`,
       )
     }
     console.log(
