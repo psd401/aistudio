@@ -200,6 +200,20 @@ may run *this* model") is a resource grant, independent of both.
    API-key callers have no UI session and no role-capability grants in the sense
    the UI expects; capability checks are for humans. Use `requireScope`.
 
+   **Documented exception — repository write tools (#1907).**
+   `repositories_create` and `repositories_add_item`
+   (`lib/mcp/repository-tool-handlers.ts`) check the scope first (catalog
+   `dispatch()`), then ALSO re-check the caller's live `knowledge-repositories`
+   capability. Reason: an OAuth access token's scopes come from the grant, not
+   from the holder's roles (`lib/api/auth-middleware.ts` reads `payload.scope`
+   verbatim, whereas session scopes and API-key scopes at creation are bounded
+   by `getScopesForRoles`), so a
+   student who authorized the first-party agent client would otherwise be able
+   to create repositories the UI never lets them create. The extra check only
+   narrows access; it never grants it. Removing it requires role-filtering
+   OAuth scopes at token issuance first. Do not copy this pattern to new
+   endpoints without the same justification.
+
 2. **Do not gate a UI feature with `requireScope()`.**
    Layout guards and server actions run in a cookie session
    (`scopes: ["*"]`), so a scope check would pass unconditionally and enforce

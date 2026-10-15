@@ -11,4 +11,10 @@ export const AISTUDIO_OPENCLAW_SCOPES = [
   "repositories:read",
   "repositories:search",
   "repositories:changes",
+  // Issue #1907 — the agent could read repositories but never file anything into
+  // one. These two must stay in step with the client's `allowed_scopes` column
+  // (migration 189): the OIDC provider rejects an authorization request asking
+  // for a scope the registered client does not allow.
+  "repositories:write",
+  "repositories:create",
 ] as const

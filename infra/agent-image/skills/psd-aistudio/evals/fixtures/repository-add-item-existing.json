@@ -1,0 +1,66 @@
+[
+  {
+    "route": "/api/agent/aistudio",
+    "method": "POST",
+    "request_body": {
+      "method": "tools/call",
+      "params": {
+        "name": "repositories_list",
+        "arguments": {"query": "EVAL-1907 Transportation SOPs"}
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "keySource": "oauth",
+        "payload": {
+          "jsonrpc": "2.0",
+          "id": "eval-1907-existing",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"repositories\":[{\"id\":1907,\"name\":\"EVAL-1907 Transportation SOPs\",\"visibility\":\"private\"}]}"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "route": "/api/agent/aistudio",
+    "method": "POST",
+    "request_body": {
+      "method": "tools/call",
+      "params": {
+        "name": "repositories_add_item",
+        "arguments": {
+          "repositoryId": 1907,
+          "name": "EVAL-1907 Bell Times",
+          "content": "First bell rings at 7:45 AM."
+        }
+      }
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "keySource": "oauth",
+        "payload": {
+          "jsonrpc": "2.0",
+          "id": "eval-1907-add",
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "{\"item\":{\"id\":9071,\"repositoryId\":1907,\"name\":\"EVAL-1907 Bell Times\",\"type\":\"text\",\"processingStatus\":\"pending\"},\"ingestion\":\"processing\",\"searchable\":\"no\",\"note\":\"Item accepted. It is NOT searchable yet.\"}"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+]

@@ -1,6 +1,6 @@
 ---
 name: psd-aistudio
-summary: Discover and act in AI Studio as the caller, including catalog-backed repository list, describe, search, source, and change operations. Uses a one-click delegated OAuth connection, with legacy per-user API keys retained only for compatibility.
+summary: Discover and act in AI Studio as the caller, including catalog-backed repository list, describe, search, source, change, create, and add-item operations. Uses a one-click delegated OAuth connection, with legacy per-user API keys retained only for compatibility.
 description: Use this to read AI Studio's live capability catalog and repository catalog, execute assistants, and work with decisions. Prefer the caller-bound OAuth connection; current scopes and repository/item/segment ACLs are enforced server-side on every request.
 allowed-tools: Bash(node:*)
 ---
@@ -81,6 +81,8 @@ key is minted). The relevant scopes:
 | `search-decisions` | `mcp:search_decisions` | staff + admin |
 | `get-decision-graph` | `mcp:get_decision_graph` | staff + admin |
 | `capture-decision` | `mcp:capture_decision` | **admin only** |
+| `repositories-create` | `repositories:create` | **staff + admin** |
+| `repositories-add-item` | `repositories:write` | **staff + admin** |
 
 - `execute_assistant` is **staff + admin** — MCP now matches REST for execution
   (a staff member can execute assistants with their own key).
@@ -244,6 +246,54 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-changes --user <email> \
 
 Scopes are deliberately granular: `repositories:list`, `repositories:read`,
 `repositories:search`, and `repositories:changes`.
+
+### Writing to repositories (#1907)
+
+```bash
+node /opt/psd-skills/psd-aistudio/run.js repositories-create --user <email> \
+  --name "Transportation SOPs" [--description "Routing and bell-time procedures"]
+node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
+  --repository-id 42 --name "2026-27 bell times" \
+  (--content "<text>" | --file /tmp/bell-times.md)
+```
+
+- `repositories-create` needs `repositories:create`; `repositories-add-item`
+  needs `repositories:write`. Both are **staff + admin**.
+- **Both also require the caller's `knowledge-repositories` capability**, checked
+  live against their roles on every call. A scope alone is never enough — the
+  rule is "agents do what people can", so a caller who cannot open Repository
+  Manager in the web UI cannot write through this skill either.
+- A repository created here is **private and owned by the caller**. Making it
+  public, or sharing it with roles/users, stays a human decision in the
+  Repository Manager UI.
+- `repositories-add-item` takes **UTF-8 text only**, up to 1 MiB, and only for a
+  repository the caller **owns or administers** — anything else comes back
+  `Repository not found` (the same id-masking the read side uses). Binary and
+  office documents go through the REST upload endpoints
+  (`/api/v1/repositories/{id}/items/uploads`), not this skill.
+- The item is ingested through the same version/generation/embedding pipeline as
+  an uploaded file, so it is normally **not searchable the instant the call
+  returns**. The response carries `processingStatus`, an `ingestion` state,
+  `searchable` and a `note` — surface the note rather than implying the content
+  is live. `searchable` is `"no"` while ingestion is `processing`; on the legacy
+  write path it is `"keyword"` with `ingestion: "completed"` (keyword search
+  finds it now, but only via `repositories-search` WITHOUT a repository filter —
+  a filtered search returns `REPOSITORY_NOT_READY` until the repository has a
+  canonical index; semantic search does not cover it on that deployment). No tool
+  reports a single item's status (`repositories-describe` is repository-level),
+  so confirm the item is live by finding it with `repositories-search` before
+  relying on it.
+  `ingestion: "failed"` means registration already failed and nothing is in
+  flight: **retry, do not poll.**
+- `--file` problems (missing path, not a regular file, over 1 MiB) exit **1**
+  (usage), the same as `create-assistant --file`.
+- **Use `--file`, not `--content`, for anything sensitive.** `--content` puts the
+  item text in argv, where it shows up in the process list and shell history.
+  Student work, IEP material, and anything else you would not paste into a
+  shared terminal go in a file.
+- **An OAuth connection made before #1907 does not carry the write scopes.** The
+  insufficient-scope hint says to `disconnect` and `connect` again; that is the
+  fix, not a platform fault.
 
 ## Failure modes (surfaced cleanly, never retried)
 

@@ -1,7 +1,7 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeTransaction as drizzleTransaction, executeQuery, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
+import { executeQuery, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
 import { eq, and, sql, desc } from "drizzle-orm"
 import {
   createRepositoryItem,
@@ -45,12 +45,12 @@ import {
   isRetryableLegacyItemFailure,
   isCanonicalUploadContentType,
   isRepositorySourceObjectKey,
-  registerCanonicalText,
   registerCanonicalTextIfEnabled,
   registerCanonicalUrlSnapshot,
   registerCanonicalUpload,
   registerCanonicalUploadIfEnabled,
   retryCanonicalRepositoryItem,
+  type RegisterCanonicalUploadInput,
 } from "@/lib/repositories/content-platform"
 import {
   getContentPlatformConfig,
@@ -60,6 +60,11 @@ import {
   beginRepositoryItemDeletion,
   finalizeRepositoryItemDeletion
 } from "@/lib/repositories/content-platform/deletion-service"
+import {
+  createRepositoryTextItem,
+  shadowWriteCanonical,
+  type CanonicalShadowWriteRegistrars,
+} from "@/lib/repositories/repository-write-service"
 
 // Runtime-validated processing-status union (REV-COR-068): actions are network
 // endpoints, so the TS parameter type is not enforced on the wire.
@@ -138,76 +143,19 @@ export interface AddDocumentWithPresignedUrlInput {
   }
 }
 
-async function shadowWriteCanonicalText(
-  input: {
-    itemId: number
-    repositoryId: number
-    userId: number
-    name: string
-    content: string
-    traceId: string
-  },
-  log: ReturnType<typeof createLogger>,
-  canonicalRequired = false
-): Promise<void> {
-  try {
-    const canonical = canonicalRequired
-      ? await registerCanonicalText(input)
-      : await registerCanonicalTextIfEnabled(input)
-    if (!canonical) return
-
-    log.info("Canonical inline text version registered", {
-      itemId: input.itemId,
-      versionId: canonical.version.id,
-      processingJobId: canonical.inspectJob.id,
-      created: canonical.created,
-    })
-    await updateRepositoryItemStatus(input.itemId, "pending", null)
-    try {
-      await dispatchContentProcessingJob({
-        jobId: canonical.inspectJob.id,
-        itemVersionId: canonical.version.id,
-      })
-    } catch (dispatchError) {
-      log.warn("Canonical inline text processing is pending scheduled dispatch", {
-        processingJobId: canonical.inspectJob.id,
-        error:
-          dispatchError instanceof Error
-            ? dispatchError.message
-            : "Unknown error",
-      })
-    }
-  } catch (error) {
-    await updateRepositoryItemStatus(
-      input.itemId,
-      "failed",
-      "Canonical content registration failed. Retry this item."
-    ).catch((statusError) => {
-      log.error("Failed to expose canonical inline text registration failure", {
-        itemId: input.itemId,
-        error: statusError instanceof Error ? statusError.message : "Unknown error",
-      })
-    })
-    log.error("Canonical inline text shadow write failed", {
-      itemId: input.itemId,
-      error: error instanceof Error ? error.message : "Unknown error",
-    })
-  }
+const UPLOAD_REGISTRARS: CanonicalShadowWriteRegistrars<RegisterCanonicalUploadInput> = {
+  register: registerCanonicalUpload,
+  registerIfEnabled: registerCanonicalUploadIfEnabled,
+  logNoun: "repository",
 }
 
 async function shadowWriteCanonicalUpload(
-  input: {
-    itemId: number
-    userId: number
-    objectKey: string
-    originalFileName: string
-    declaredContentType: string
-    byteSize: number
-    traceId: string
-  },
+  input: RegisterCanonicalUploadInput,
   log: ReturnType<typeof createLogger>,
   canonicalRequired = false
 ): Promise<void> {
+  // Upload-only pre-check: unsupported content types never reach canonical
+  // registration. After cutover that leaves no searchable copy, so mark failed.
   if (!isCanonicalUploadContentType(input.declaredContentType)) {
     if (canonicalRequired) {
       await updateRepositoryItemStatus(
@@ -218,49 +166,7 @@ async function shadowWriteCanonicalUpload(
     }
     return
   }
-  try {
-    const canonical = canonicalRequired
-      ? await registerCanonicalUpload(input)
-      : await registerCanonicalUploadIfEnabled(input)
-    if (!canonical) return
-
-    log.info("Canonical repository version registered", {
-      itemId: input.itemId,
-      versionId: canonical.version.id,
-      processingJobId: canonical.inspectJob.id,
-      created: canonical.created,
-    })
-    await updateRepositoryItemStatus(input.itemId, "pending", null)
-    try {
-      await dispatchContentProcessingJob({
-        jobId: canonical.inspectJob.id,
-        itemVersionId: canonical.version.id,
-      })
-    } catch (dispatchError) {
-      log.warn("Canonical processing is pending scheduled dispatch", {
-        processingJobId: canonical.inspectJob.id,
-        error:
-          dispatchError instanceof Error
-            ? dispatchError.message
-            : "Unknown error",
-      })
-    }
-  } catch (error) {
-    await updateRepositoryItemStatus(
-      input.itemId,
-      "failed",
-      "Canonical content registration failed. Retry this item."
-    ).catch((statusError) => {
-      log.error("Failed to expose canonical repository registration failure", {
-        itemId: input.itemId,
-        error: statusError instanceof Error ? statusError.message : "Unknown error",
-      })
-    })
-    log.error("Canonical repository shadow write failed", {
-      itemId: input.itemId,
-      error: error instanceof Error ? error.message : "Unknown error",
-    })
-  }
+  await shadowWriteCanonical(input, UPLOAD_REGISTRARS, log, canonicalRequired)
 }
 
 // Sanitize filename to prevent directory traversal and other security issues
@@ -989,81 +895,18 @@ export async function addTextItem(
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
 
-    const contentPlatformConfig = await getContentPlatformConfig()
-    const canonicalCutover = isCanonicalRepositoryUploadActive(
-      contentPlatformConfig
-    )
-
-    // During the shadow window retain the legacy chunk for rollback. After the
-    // independent Repository Manager cutover, create only the stable item and
-    // let the canonical version/generation own searchable content.
-    log.info("Creating text item with Drizzle transaction", {
+    // The transaction + canonical shadow-write is shared verbatim with the MCP
+    // `repositories_add_item` tool (#1907); it lives in the session-free
+    // repository write service so both surfaces ingest inline text identically.
+    const itemRaw = await createRepositoryTextItem({
       repositoryId: input.repository_id,
-      contentLength: input.content.length,
-      canonicalCutover,
+      userId,
+      name: input.name,
+      content: input.content,
+      traceId: requestId,
+      callerAction: "addTextItem",
     })
-
-    const itemId = await drizzleTransaction(
-      async (tx) => {
-        // Step 1: Insert the repository item
-        const [newItem] = await tx
-          .insert(repositoryItems)
-          .values({
-            repositoryId: input.repository_id,
-            type: 'text',
-            name: input.name,
-            source: input.content,
-            metadata: { length: input.content.length },
-            processingStatus: canonicalCutover ? 'pending' : 'completed',
-          })
-          .returning({ id: repositoryItems.id });
-
-        log.debug("Text item created", { itemId: newItem.id });
-
-        if (!canonicalCutover) {
-          await tx
-            .insert(repositoryItemChunks)
-            .values({
-              itemId: newItem.id,
-              content: input.content,
-              chunkIndex: 0,
-              metadata: {},
-            });
-          log.debug("Legacy text chunk added", {
-            itemId: newItem.id,
-            chunkIndex: 0,
-          });
-        }
-
-        return newItem.id;
-      },
-      'addTextItem'
-    )
-
-    // Inline text previously bypassed the canonical pipeline entirely. Keep
-    // the legacy row for rollback, but shadow-write a repository-scoped text
-    // object so Retrieval v2 receives an immutable version, generation,
-    // embeddings, and exact citation through the same worker as file uploads.
-    await shadowWriteCanonicalText(
-      {
-        itemId,
-        repositoryId: input.repository_id,
-        userId,
-        name: input.name,
-        content: input.content,
-        traceId: requestId,
-      },
-      log,
-      canonicalCutover
-    )
-
-    // Fetch the created item via Drizzle
-    log.debug("Fetching created text item", { itemId })
-    const itemRaw = await getRepositoryItemById(itemId)
-
-    if (!itemRaw) {
-      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
-    }
+    const itemId = itemRaw.id
 
     // Convert to action type
     const item: RepositoryItem = {

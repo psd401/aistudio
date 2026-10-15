@@ -45,18 +45,7 @@ import {
   type CapabilityCatalogSection,
 } from "@/lib/capabilities/capability-catalog"
 import type { ToolSurface } from "@/lib/tools/catalog/types"
-import {
-  describeRepository,
-  getRepositorySource,
-  listRepositoryCatalog,
-  listRepositoryChanges,
-  searchRepositoryCatalog,
-} from "@/lib/repositories/repository-catalog-service"
-import type {
-  RetrievalMode,
-  RetrievalModality,
-} from "@/lib/repositories/retrieval-v2/types"
-import { RepositoryReadinessError } from "@/lib/repositories/readiness-service"
+import { REPOSITORY_TOOL_HANDLERS } from "./repository-tool-handlers"
 
 // ============================================
 // Handler Map
@@ -72,11 +61,9 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   fork_assistant: handleForkAssistant,
   list_assistants: handleListAssistants,
   get_decision_graph: handleGetDecisionGraph,
-  repositories_list: handleRepositoriesList,
-  repositories_describe: handleRepositoriesDescribe,
-  repositories_search: handleRepositoriesSearch,
-  repositories_get_source: handleRepositoriesGetSource,
-  repositories_list_changes: handleRepositoriesListChanges,
+  // Repository catalog reads (#1266) + writes (#1907), in their own module the
+  // way the Atrium content tools are.
+  ...REPOSITORY_TOOL_HANDLERS,
   // Agent platform tools (#926): image gen, web fetch, document gen. Exposed on
   // the `internal` surface only (see lib/tools/catalog/manifest.ts) so they are
   // callable from the agentic Assistant Architect runtime but not the external
@@ -95,14 +82,6 @@ function positiveInteger(value: unknown): number | null {
     : null
 }
 
-function positiveIntegerArray(value: unknown): number[] {
-  return Array.isArray(value)
-    ? value
-        .map(positiveInteger)
-        .filter((item): item is number => item != null)
-    : []
-}
-
 function jsonResult(value: unknown): McpToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] }
 }
@@ -119,143 +98,6 @@ function assistantExecutionFailureMessage(error: unknown): string {
   }`
 }
 
-async function handleRepositoriesList(
-  args: Record<string, unknown>,
-  context: { cognitoSub: string }
-): Promise<McpToolResult> {
-  return jsonResult({
-    repositories: await listRepositoryCatalog(context.cognitoSub, {
-      query: typeof args.query === "string" ? args.query : undefined,
-      limit: typeof args.limit === "number" ? args.limit : undefined,
-    }),
-  })
-}
-
-async function handleRepositoriesDescribe(
-  args: Record<string, unknown>,
-  context: { cognitoSub: string }
-): Promise<McpToolResult> {
-  const repositoryId = positiveInteger(args.repositoryId)
-  if (!repositoryId) {
-    return {
-      content: [{ type: "text", text: "Invalid repositoryId" }],
-      isError: true,
-    }
-  }
-  const repository = await describeRepository(context.cognitoSub, repositoryId)
-  return repository
-    ? jsonResult({ repository })
-    : {
-        content: [{ type: "text", text: "Repository not found" }],
-        isError: true,
-      }
-}
-
-async function handleRepositoriesSearch(
-  args: Record<string, unknown>,
-  context: { cognitoSub: string }
-): Promise<McpToolResult> {
-  const query = typeof args.query === "string" ? args.query.trim() : ""
-  if (!query) {
-    return {
-      content: [{ type: "text", text: "query is required" }],
-      isError: true,
-    }
-  }
-  const allowedModes: RetrievalMode[] = ["keyword", "vector", "hybrid"]
-  const allowedModalities: RetrievalModality[] = [
-    "text",
-    "image",
-    "audio",
-    "video",
-    "table",
-  ]
-  const mode =
-    typeof args.mode === "string" &&
-    allowedModes.includes(args.mode as RetrievalMode)
-      ? (args.mode as RetrievalMode)
-      : undefined
-  const modalities = Array.isArray(args.modalities)
-    ? args.modalities.filter(
-        (value): value is RetrievalModality =>
-          typeof value === "string" &&
-          allowedModalities.includes(value as RetrievalModality)
-      )
-    : undefined
-  try {
-    return jsonResult(
-      await searchRepositoryCatalog({
-        cognitoSub: context.cognitoSub,
-        query,
-        repositoryIds: positiveIntegerArray(args.repositoryIds),
-        mode,
-        modalities,
-        limit: typeof args.limit === "number" ? args.limit : undefined,
-      })
-    )
-  } catch (error) {
-    if (!(error instanceof RepositoryReadinessError)) throw error
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({
-            error: error.code,
-            message: error.message,
-            repositories: error.repositories,
-          }),
-        },
-      ],
-      isError: true,
-    }
-  }
-}
-
-async function handleRepositoriesGetSource(
-  args: Record<string, unknown>,
-  context: { userId: number }
-): Promise<McpToolResult> {
-  const repositoryId = positiveInteger(args.repositoryId)
-  const itemId = positiveInteger(args.itemId)
-  if (!repositoryId || !itemId) {
-    return {
-      content: [
-        { type: "text", text: "Valid repositoryId and itemId are required" },
-      ],
-      isError: true,
-    }
-  }
-  return jsonResult({
-    segments: await getRepositorySource({
-      userId: context.userId,
-      repositoryId,
-      itemId,
-      chunkId: positiveInteger(args.chunkId) ?? undefined,
-      limit: typeof args.limit === "number" ? args.limit : undefined,
-    }),
-  })
-}
-
-async function handleRepositoriesListChanges(
-  args: Record<string, unknown>,
-  context: { userId: number }
-): Promise<McpToolResult> {
-  const repositoryIds = positiveIntegerArray(args.repositoryIds)
-  if (repositoryIds.length === 0) {
-    return {
-      content: [{ type: "text", text: "repositoryIds is required" }],
-      isError: true,
-    }
-  }
-  return jsonResult(
-    await listRepositoryChanges({
-      userId: context.userId,
-      repositoryIds,
-      cursor: typeof args.cursor === "string" ? args.cursor : undefined,
-      limit: typeof args.limit === "number" ? args.limit : undefined,
-    })
-  )
-}
 
 // ============================================
 // describe_capabilities (Issue #1100)

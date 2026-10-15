@@ -10,17 +10,14 @@
 import "server-only"
 
 import {
-  checkUserRole,
   getRepositoryById,
   getUserIdByCognitoSubAsNumber
 } from "@/lib/db/drizzle"
 import { hasRole } from "@/utils/roles"
 import { createError } from "@/lib/error-utils"
 import { ErrorLevel } from "@/types/actions-types"
-import { ErrorCode } from "@/types/error-types"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { knowledgeRepositories, repositoryAccess, userRoles } from "@/lib/db/schema"
-import { assertNotSystemManagedRepository } from "@/lib/repositories/repository-access-guard"
 import { and, eq, isNotNull, or } from "drizzle-orm"
 
 /**
@@ -41,40 +38,12 @@ export async function canModifyRepository(
 }
 
 /**
- * Check the complete Repository Manager write boundary without turning
- * infrastructure failures into a false "not found" result.
- *
- * The durable-repository guard deliberately uses DB_RECORD_NOT_FOUND to mask
- * absent, inactive, ephemeral, and system-managed repositories. Other failures
- * (for example a database outage) must remain observable to the API layer.
+ * The session-free write-boundary check now lives in `lib/repositories` so
+ * `lib/mcp` can use it without `lib` depending on `actions` (#1907). Re-exported
+ * here so this module's existing importers (the v1 upload routes, the Server
+ * Actions) keep working from one path.
  */
-export async function canModifyUserManagedDurableRepository(
-  repositoryId: number,
-  userId: number
-): Promise<boolean> {
-  try {
-    await assertNotSystemManagedRepository(repositoryId)
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === ErrorCode.DB_RECORD_NOT_FOUND
-    ) {
-      return false
-    }
-    throw error
-  }
-
-  const repository = await getRepositoryById(repositoryId)
-  if (!repository) return false
-  if (repository.ownerId === userId) return true
-
-  // API-key and bearer-JWT callers do not necessarily have a browser session.
-  // Check the authenticated API principal directly instead of using hasRole(),
-  // which resolves the current session cookie.
-  return checkUserRole(userId, "administrator")
-}
+export { canModifyUserManagedDurableRepository } from "@/lib/repositories/repository-permissions"
 
 /**
  * Check if a user can READ a repository. True if the repository is public, the

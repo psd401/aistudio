@@ -5,6 +5,9 @@ tasks:
   - ../../skills/chat-card/evals/ticket-confirmation.yaml
   - ../../skills/chat-card/evals/single-sentence-plain-text.yaml
   - ../../skills/psd-aistudio/evals/repository-list.yaml
+  - ../../skills/psd-aistudio/evals/repository-create.yaml
+  - ../../skills/psd-aistudio/evals/repository-add-item.yaml
+  - ../../skills/psd-aistudio/evals/repository-add-item-existing.yaml
   - ../../skills/psd-atrium/evals/find-private-drafts.yaml
   - ../../skills/psd-atrium/evals/list-artifact-data.yaml
   - ../../skills/psd-brand-guidelines/evals/exact-core-colors.yaml

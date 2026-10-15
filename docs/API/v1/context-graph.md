@@ -36,6 +36,7 @@ All `/api/v1/graph/*` endpoints require authentication. Two modes are supported:
 | `repositories:search` | Run retrieval v2 over currently authorized repositories |
 | `repositories:changes` | Poll the authorized repository item change feed |
 | `repositories:write` | Add uploaded items to repositories the principal can modify |
+| `repositories:create` | Create repositories owned by the principal (MCP only — no REST route) |
 
 API keys are created in **Settings > API Keys**. Administrators receive all scopes; staff receives `graph:read` by default.
 
@@ -598,6 +599,56 @@ Common errors are `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_TOKEN`,
 `403 INSUFFICIENT_SCOPE`, `404 NOT_FOUND`, `429 RATE_LIMIT_EXCEEDED`, and
 `500 INTERNAL_ERROR`. Every response retains the standard request-id and
 rate-limit headers described above.
+
+#### Repository writes — MCP only (Issue #1907)
+
+Two write operations exist on the **MCP** surface with no REST equivalent:
+
+| MCP tool | Scope | Effect |
+|---|---|---|
+| `repositories_create` | `repositories:create` | Creates a durable, **private** repository owned by the caller |
+| `repositories_add_item` | `repositories:write` | Adds one UTF-8 text item (max 1 MiB) to a repository the caller owns or administers |
+
+Both enforce authorization in two layers, and the scope is only the first:
+
+1. the caller's live `knowledge-repositories` **capability**, re-checked against
+   their roles on every call — an OAuth access token carries the scopes its
+   grant asked for, not the scopes the caller's roles allow, so without this a
+   student who authorized a first-party client could create repositories; and
+2. for `repositories_add_item`, owner-or-administrator rights over a durable,
+   user-managed repository — the same `canModifyUserManagedDurableRepository`
+   boundary the upload routes use. Absent, deleted, ephemeral, and
+   system-managed (Atrium index) repositories are all masked as
+   `Repository not found`.
+
+A created repository is never public: widening visibility stays a human action
+in Repository Manager. An added item is ingested asynchronously through the same
+version/generation/embedding pipeline as an upload, so the response carries
+`processingStatus`, an `ingestion` state (`processing`, `completed` or
+`failed`), a `searchable` state (`no` or `keyword`) and a `note`.
+
+On the canonical path the item is `processing` and `searchable: "no"` — no
+generation or embedding exists yet. On the legacy path (content dual-write off)
+the item is `completed` and `searchable: "keyword"`: the chunk's generated
+`search_vector` is matched at once by retrieval v2's legacy-compatibility
+candidates (on by default for `repositories_search`). Its `embedding` stays NULL —
+embedding-recovery and dense retrieval only cover canonical generations — so it
+is keyword-only until the repository moves to canonical ingestion — and reachable
+only by an untargeted `repositories_search`: with `repositoryIds`, the readiness
+gate classifies a repository with active items but no active generation as
+`failed` and returns `REPOSITORY_NOT_READY`. No MCP tool
+reports a single item's status afterwards; confirm with `repositories_search`.
+`ingestion: "failed"` means canonical registration
+already failed and nothing is in flight — the caller should retry the item, not
+poll for it.
+
+Name and description are bounded in UTF-8 **bytes** (500 / 2000), as inline
+content is (1 MiB), so a multi-byte name cannot carry several times the intended
+footprint into the unbounded `text` columns.
+
+**Binary and office documents** still use the two-step presigned upload under
+`POST /api/v1/repositories/{id}/items/uploads` (also `repositories:write`);
+`repositories_add_item` is text only, because MCP has no binary transport.
 
 #### `POST /api/v1/repositories/{id}/items/uploads`
 

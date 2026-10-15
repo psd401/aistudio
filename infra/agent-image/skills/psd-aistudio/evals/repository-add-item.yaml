@@ -1,0 +1,14 @@
+id: aistudio-repository-add-item
+skill: psd-aistudio
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-aistudio to add a text item named exactly EVAL-1907 Bell Times, with the content 'First bell rings at 7:45 AM.', to repository 1907. Then tell me whether that item can be searched for yet."
+trials: 3
+fixtures:
+  - fixtures/repository-add-item.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/aistudio","method":"POST","body":{"method":{"exact":"tools/call"},"params.name":{"exact":"repositories_add_item"},"params.arguments.repositoryId":{"exact":1907},"params.arguments.name":{"exact":"EVAL-1907 Bell Times"},"params.arguments.content":{"exact":"First bell rings at 7:45 AM."}}}
+  # The add succeeded but ingestion is asynchronous. An answer that claims the
+  # item is already searchable is the failure this eval exists to catch.
+  - {"type":"output_match","pattern":"(?i)not\\s+(yet\\s+)?searchable|still\\s+processing|not\\s+searchable\\s+yet"}

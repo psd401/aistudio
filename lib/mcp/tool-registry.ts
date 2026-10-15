@@ -669,6 +669,54 @@ Example:
       required: ["repositoryIds"],
     },
   },
+  // Repository write tools (Issue #1907). The read side above could already
+  // discover and search repositories; these two let the caller create a
+  // repository and file text into one. Authorization is the caller's live
+  // `knowledge-repositories` capability plus ownership/administrator rights on
+  // the target repository — the scope alone is never enough.
+  {
+    name: "repositories_create",
+    description:
+      "Create a new durable, private knowledge repository owned by the authenticated caller. Requires the knowledge-repositories capability; the caller becomes the owner and can then add items to it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Repository name (1-500 bytes, UTF-8).",
+        },
+        description: {
+          type: "string",
+          description: "Optional repository description (max 2000 bytes, UTF-8). An empty string is treated as absent.",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "repositories_add_item",
+    description:
+      "Add a text item to an existing repository the authenticated caller owns or administers. The result carries `processingStatus`, an `ingestion` state (`processing`, `completed` or `failed`) and `searchable` (`no` or `keyword`). Normally ingestion is ASYNCHRONOUS (`processing`, `searchable: \"no\"`); on deployments still on the legacy write path the item is stored `completed` and keyword-searchable at once — via repositories_search without repositoryIds only (a targeted search returns REPOSITORY_NOT_READY until the repository has a canonical index) — and not semantically searchable until the repository moves to canonical ingestion. `ingestion: \"failed\"` means registration already failed and nothing is in flight — retry rather than waiting. A repository the caller cannot modify — and one that is absent, deleted, or system-managed — is reported as 'Repository not found', which means 'not yours', not necessarily 'does not exist'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repositoryId: {
+          type: "number",
+          description: "Target repository numeric id.",
+        },
+        name: {
+          type: "string",
+          description: "Item name (1-500 bytes, UTF-8).",
+        },
+        content: {
+          type: "string",
+          description:
+            "Item text content (UTF-8, max 1 MiB). Binary and office documents are uploaded through the REST upload endpoints instead.",
+        },
+      },
+      required: ["repositoryId", "name", "content"],
+    },
+  },
   // Atrium content tools (Phase 5, Issue #1055) — listed so scoped callers
   // discover them via tools/list.
   ...CONTENT_MCP_TOOLS,

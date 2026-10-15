@@ -620,6 +620,181 @@ test('repository ids reject non-positive and non-integer values', async () => {
   expect(code).toBe(1);
 });
 
+// ── repository writes (#1907) ─────────────────────────────────────────────────
+
+test('repositories-create maps name and optional description', async () => {
+  await run(
+    'repositories-create',
+    '--user',
+    'a@b.co',
+    '--name',
+    'Transportation SOPs',
+    '--description',
+    'Routing and bell times'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_create',
+    toolArgs: {
+      name: 'Transportation SOPs',
+      description: 'Routing and bell times',
+    },
+    callerEmail: 'a@b.co',
+  });
+
+  await run('repositories-create', '--name', 'Notes');
+  expect(toolCalls[1].toolArgs).toEqual({ name: 'Notes' });
+});
+
+test('repositories-create requires --name (exit 1)', async () => {
+  let code;
+  try {
+    await run('repositories-create');
+  } catch (error) {
+    code = error.code;
+  }
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('repositories-add-item sends inline --content', async () => {
+  await run(
+    'repositories-add-item',
+    '--repository-id',
+    '42',
+    '--name',
+    'Bell times',
+    '--content',
+    '7:45 AM'
+  );
+  expect(toolCalls[0]).toEqual({
+    toolName: 'repositories_add_item',
+    toolArgs: { repositoryId: 42, name: 'Bell times', content: '7:45 AM' },
+    callerEmail: undefined,
+  });
+});
+
+test('repositories-add-item reads --file from disk', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-aistudio-item-'));
+  const file = path.join(dir, 'notes.md');
+  // Test-owned path created immediately above.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  fs.writeFileSync(file, '# Bell times\n7:45 AM\n');
+  try {
+    await run(
+      'repositories-add-item',
+      '--repository-id',
+      '42',
+      '--name',
+      'Bell times',
+      '--file',
+      file
+    );
+    expect(toolCalls[0].toolName).toBe('repositories_add_item');
+    expect(toolCalls[0].toolArgs.content).toBe('# Bell times\n7:45 AM\n');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('repositories-add-item rejects a file over the 1 MiB bound (exit 1)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'psd-aistudio-item-'));
+  const file = path.join(dir, 'big.txt');
+  // Test-owned path created immediately above.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename
+  fs.writeFileSync(file, 'x'.repeat(1024 * 1024 + 1));
+  let code;
+  try {
+    await run(
+      'repositories-add-item',
+      '--repository-id',
+      '42',
+      '--name',
+      'Big',
+      '--file',
+      file
+    );
+  } catch (err) {
+    code = err.code;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // A bad --file is a USAGE error, same as create-assistant's identical flow —
+  // not exit 2 ("internal/unexpected"), which would tell the agent to treat a
+  // typo'd path as a platform fault.
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('repositories-add-item reports a missing --file path as a usage error', async () => {
+  let code;
+  try {
+    await run(
+      'repositories-add-item',
+      '--repository-id',
+      '42',
+      '--name',
+      'Missing',
+      '--file',
+      path.join(os.tmpdir(), 'psd-aistudio-does-not-exist-1907.md')
+    );
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(1);
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('the shared read-only key gets an OAuth-only hint for repository write scopes', async () => {
+  toolResponder = () => ({
+    isError: false,
+    jsonrpcError: { message: 'Insufficient scope for tool: repositories_create' },
+    keySource: 'shared',
+  });
+  let code;
+  try {
+    await run('repositories-create', '--name', 'Notes');
+  } catch (err) {
+    code = err.code;
+  }
+  expect(code).toBe(12);
+  expect(emitted[0].status).toBe('mcp-error');
+  // The pre-#1907 repositories:* hint offered a "public repository" path, which
+  // cannot apply to a write — write authority never comes from the shared key.
+  expect(emitted[0].hint).toContain('repositories:create');
+  expect(emitted[0].hint).toContain('connect');
+  expect(emitted[0].hint).not.toContain('public repository');
+});
+
+test('repositories-add-item requires exactly one of --content/--file (exit 1)', async () => {
+  for (const extra of [[], ['--content', 'x', '--file', '/tmp/nope']]) {
+    let code;
+    try {
+      await run(
+        'repositories-add-item',
+        '--repository-id',
+        '42',
+        '--name',
+        'Bell times',
+        ...extra
+      );
+    } catch (error) {
+      code = error.code;
+    }
+    expect(code).toBe(1);
+  }
+  expect(toolCalls).toHaveLength(0);
+});
+
+test('repositories-add-item requires --repository-id (exit 1)', async () => {
+  let code;
+  try {
+    await run('repositories-add-item', '--name', 'n', '--content', 'c');
+  } catch (error) {
+    code = error.code;
+  }
+  expect(code).toBe(1);
+});
+
 // ── generic ────────────────────────────────────────────────────────────────────
 
 test('an action subcommand surfaces a tool-level isError (non-execute) as tool-error, exit 12', async () => {
