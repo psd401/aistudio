@@ -624,13 +624,17 @@ Both enforce authorization in two layers, and the scope is only the first:
 A created repository is never public: widening visibility stays a human action
 in Repository Manager. An added item is ingested asynchronously through the same
 version/generation/embedding pipeline as an upload, so the response carries
-`processingStatus`, an `ingestion` state (`processing` or `failed`), a
-`searchable` flag and a `note`.
+`processingStatus`, an `ingestion` state (`processing`, `completed` or
+`failed`), a `searchable` state (`no` or `keyword`) and a `note`.
 
-`searchable` is **always false** at that moment, on both paths: the canonical
-path has no generation or embedding yet, and the pre-cutover legacy path writes
-the chunk with a NULL `embedding` and no `index_generation_id`, which every
-retrieval query filters on. `ingestion: "failed"` means canonical registration
+On the canonical path the item is `processing` and `searchable: "no"` — no
+generation or embedding exists yet. On the legacy path (content dual-write off)
+the item is `completed` and `searchable: "keyword"`: the chunk's generated
+`search_vector` is matched at once by retrieval v2's legacy-compatibility
+candidates (on by default for `repositories_search`), while its NULL `embedding`
+waits for embedding-recovery, so semantic matches come later. No MCP tool
+reports a single item's status afterwards; confirm with `repositories_search`.
+`ingestion: "failed"` means canonical registration
 already failed and nothing is in flight — the caller should retry the item, not
 poll for it.
 

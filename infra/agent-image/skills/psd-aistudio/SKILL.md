@@ -272,10 +272,12 @@ node /opt/psd-skills/psd-aistudio/run.js repositories-add-item --user <email> \
   office documents go through the REST upload endpoints
   (`/api/v1/repositories/{id}/items/uploads`), not this skill.
 - The item is ingested through the same version/generation/embedding pipeline as
-  an uploaded file, so it is **not searchable the instant the call returns**.
-  The response carries `processingStatus`, an `ingestion` state, `searchable`
-  (always `false` at that moment, on both the canonical and the legacy path) and
-  a `note` — surface that rather than implying the content is live. No tool
+  an uploaded file, so it is normally **not searchable the instant the call
+  returns**. The response carries `processingStatus`, an `ingestion` state,
+  `searchable` and a `note` — surface the note rather than implying the content
+  is live. `searchable` is `"no"` while ingestion is `processing`; on the legacy
+  write path it is `"keyword"` with `ingestion: "completed"` (keyword search
+  finds it now, semantic matches arrive after the embedding backfill). No tool
   reports a single item's status (`repositories-describe` is repository-level),
   so confirm the item is live by finding it with `repositories-search` before
   relying on it.

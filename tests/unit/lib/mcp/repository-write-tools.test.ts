@@ -329,16 +329,16 @@ describe("MCP repositories_add_item (#1907)", () => {
     )
 
     expect(payload(result).ingestion).toBe("processing")
-    expect(payload(result).searchable).toBe(false)
+    expect(payload(result).searchable).toBe("no")
     expect(payload(result).note).toContain("NOT searchable yet")
   })
 
-  it("never claims a just-added item is searchable, even at status completed", async () => {
-    // `completed` at this point can only be the pre-cutover legacy path, which
-    // inserts the chunk with a NULL embedding and no index_generation_id. Every
-    // retrieval query filters on `chunk.embedding IS NOT NULL` (v2 also on the
-    // generation), so the item stays invisible until embedding-recovery runs —
-    // claiming otherwise is the exact overclaim this flag exists to prevent.
+  it("reports the legacy path as keyword-searchable, not processing", async () => {
+    // `completed` at this point can only be the legacy path (content dual-write
+    // off). Its chunk's `search_vector` is a GENERATED column and retrieval v2's
+    // legacy-compatibility candidates (on by default for repositories_search)
+    // match it by keyword at once; only the embedding is backfilled later. No
+    // background ingestion is in flight, so "processing" would be a misreport.
     mockCreateRepositoryTextItem.mockResolvedValue({
       ...item,
       processingStatus: "completed",
@@ -349,8 +349,9 @@ describe("MCP repositories_add_item (#1907)", () => {
       CONTEXT
     )
 
-    expect(payload(result).searchable).toBe(false)
-    expect(payload(result).ingestion).toBe("processing")
+    expect(payload(result).ingestion).toBe("completed")
+    expect(payload(result).searchable).toBe("keyword")
+    expect(payload(result).note).toContain("by keyword match")
   })
 
   it("tells the agent to RETRY, not poll, when ingestion already failed", async () => {
@@ -369,7 +370,7 @@ describe("MCP repositories_add_item (#1907)", () => {
     )
 
     expect(payload(result).ingestion).toBe("failed")
-    expect(payload(result).searchable).toBe(false)
+    expect(payload(result).searchable).toBe("no")
     expect(payload(result).note).toContain("Do NOT wait or poll")
     expect(payload(result).item.processingError).toContain("Retry this item")
   })

@@ -1,5 +1,5 @@
 ---
-title: A repository item is never searchable the moment the write call returns
+title: Item searchability after a write depends on the write path, not processingStatus
 category: logic
 tags: [repositories, embeddings, retrieval, async]
 severity: medium
@@ -16,27 +16,30 @@ immediately searchable based on `processingStatus`. Fixed in commit `999595c1a`
 
 ## Root Cause
 
-Neither write path makes an item searchable synchronously:
+The two write paths differ, and `processingStatus` describes neither correctly:
 - Canonical path (`lib/repositories/repository-write-service.ts`): status is set to
-  `pending`, with no generation/embedding yet.
-- Legacy (pre-cutover) path: status is set to `completed` immediately, but the chunk is
-  inserted with a NULL `embedding` and no `index_generation_id`.
+  `pending`, with no generation/embedding yet — not searchable at all.
+- Legacy path (content dual-write off): status is `completed` immediately and the chunk
+  is inserted with a NULL `embedding` and no `index_generation_id`. Retrieval v1
+  (`lib/repositories/search-service.ts`) filters on `chunk.embedding IS NOT NULL`, so it
+  cannot see it. But retrieval v2's `legacyCompatibilityCandidates`
+  (`lib/repositories/retrieval-v2/service.ts`) matches legacy chunks on the GENERATED
+  `search_vector` column with no embedding requirement, in every mode, and
+  `repositories_search` leaves `includeLegacyCompatibility` at its default (on). So the
+  item is keyword-searchable at once; semantic matches wait for embedding-recovery.
 
-Every retrieval query filters on `chunk.embedding IS NOT NULL`
-(`lib/repositories/search-service.ts`), and retrieval v2 additionally requires
-`chunk.index_generation_id = snapshot.generationId`
-(`lib/repositories/retrieval-v2/service.ts`). So `processingStatus === "completed"` is
-NOT a searchability signal on either path — it only means the legacy row and canonical
-shadow-write attempt finished, not that embeddings exist.
+A first fix reported `searchable: false` on both paths; Codex caught the legacy case
+(PR #1931). The shipped contract is `searchable: "no" | "keyword"` with
+`ingestion: "processing" | "completed" | "failed"`.
 
 ## Solution
 
-Do not surface "searchable now" to the caller based on write-call completion.
-Distinguish "written" from "indexed" explicitly, and treat embedding generation as
-async on both the canonical and legacy paths.
+Report searchability per path and per retrieval mode, from the retrieval queries'
+actual predicates. Distinguish "written", "keyword-matchable" and "semantically indexed".
 
 ## Prevention
 
 When adding any tool/action that reports repository item state after a write, check the
-retrieval query's actual WHERE clause (embedding + generation_id), not the item's
+retrieval queries' actual WHERE clauses (embedding, generation_id, AND any
+legacy-compatibility branch that skips them), not the item's
 `processingStatus` column, before claiming the item is searchable.

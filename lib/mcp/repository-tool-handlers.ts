@@ -344,16 +344,18 @@ async function handleRepositoriesAddItem(
   // "check back later" would poll forever, so it is reported distinctly from
   // an add that is genuinely still in the pipeline.
   //
-  // `searchable` is never true at this point, on either path, and saying
-  // otherwise is the misreport this field exists to prevent:
+  // `searchable` reports what `repositories_search` can do with the item right
+  // now, per path:
   //   - canonical path: status is `pending` and the generation/embedding the
-  //     retrieval queries select on does not exist yet;
-  //   - legacy path: status is `completed` immediately, but the chunk is
-  //     inserted with a NULL embedding and no index_generation_id, and every
-  //     retrieval query filters on `chunk.embedding IS NOT NULL` (and v2 on
-  //     `chunk.index_generation_id`), so it stays invisible until
-  //     embedding-recovery backfills it.
+  //     retrieval queries select on does not exist yet → "no";
+  //   - legacy path (content dual-write off): status is `completed`
+  //     immediately and the chunk's `search_vector` is a GENERATED column, so
+  //     retrieval v2's legacy-compatibility candidates (on by default for
+  //     `repositories_search`, every mode) match it by keyword at once. Its
+  //     embedding is NULL until embedding-recovery backfills it, so meaning-
+  //     based matches come later → "keyword".
   const failed = item.processingStatus === "failed"
+  const legacyCompleted = item.processingStatus === "completed"
   return ok({
     item: {
       id: item.id,
@@ -364,11 +366,13 @@ async function handleRepositoriesAddItem(
       processingError: item.processingError,
       createdAt: item.createdAt?.toISOString() ?? null,
     },
-    ingestion: failed ? "failed" : "processing",
-    searchable: false,
+    ingestion: failed ? "failed" : legacyCompleted ? "completed" : "processing",
+    searchable: legacyCompleted ? "keyword" : "no",
     note: failed
       ? "Ingestion FAILED — the item row exists but nothing is processing it. Do NOT wait or poll: retry the item from Repository Manager, or add it again."
-      : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.",
+      : legacyCompleted
+        ? "Item stored. repositories_search can already find it by keyword match; meaning-based (semantic) matches start once its embedding is backfilled in the background."
+        : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.",
   })
 }
 
