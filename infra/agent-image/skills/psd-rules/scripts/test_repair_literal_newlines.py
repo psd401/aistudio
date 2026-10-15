@@ -12,7 +12,10 @@ line. The old whole-file test ("2 or fewer real lines") called that ambiguous
 and left ~37 people's files broken between 2026-09-25 and 2026-10-11.
 """
 
+import codecs
+import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,12 +84,57 @@ COMMENT_PROSE = (
     "print(VALUE)\n"
 )
 
-# A long line carrying many escapes that all sit INSIDE a string literal, in a
-# file that does not parse for an unrelated reason (and has no stdlib parser
-# anyway). Genuinely unsure: exit 2, untouched.
-AMBIGUOUS_JS = (
-    'const MESSAGE = "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf";\n'
-    "function broken( {\n"
+# A long line carrying many escapes that all sit inside a string literal, in a
+# file that does NOT parse for an unrelated reason — so neither the quote
+# pairing nor a parse can vindicate it. Genuinely unsure: exit 2, untouched.
+AMBIGUOUS_PY = (
+    "import sys\n"
+    'MESSAGE = "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf"\n'
+    "def broken(\n"
+)
+
+# Healthy JS whose escapes are prose in a `//` comment. There is no JS parser
+# to veto a bad repair, so the scanner itself has to know about comments.
+HEALTHY_JS_LINE_COMMENT = (
+    "// Reads records separated by \\n\\n\\n markers and writes a summary "
+    "for staff each week\n"
+    'const fs = require("fs");\n'
+    'console.log("hello");\n'
+)
+
+# Healthy JS whose escape-rich lines sit inside a template literal and a
+# `/* */` block that both OPEN ON AN EARLIER LINE. A line-at-a-time scan sees
+# no quote on those lines and would call them collapsed.
+HEALTHY_JS_MULTILINE = (
+    "const TEMPLATE = `\n"
+    "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf\\nhotel\n"
+    "`;\n"
+    "/*\n"
+    " * Records are separated by \\n\\n\\n markers in the legacy export "
+    "format.\n"
+    " */\n"
+    "console.log(TEMPLATE);\n"
+)
+
+# Healthy JS whose escapes are inside regex literals, where a backslash is
+# ordinary. `.replace(/\n/g, ...)` must not read as a collapsed line.
+HEALTHY_JS_REGEX = (
+    "const squashed = text.replace(/\\n/g, \" \").replace(/\\n\\n/g, "
+    '"\\u00b6").trim();\n'
+)
+
+# A genuinely collapsed JS file: the escapes are in code position, where a
+# backslash cannot appear in working source.
+COLLAPSED_JS = (
+    'const fs = require("fs");\\nconst path = require("path");\\n'
+    'console.log(fs.existsSync(path.join(".", "x")));\\nprocess.exit(0);\\n'
+)
+
+# A collapsed file in a language this tool does not model. Reported, never
+# rewritten: `\n` in a `#` comment cannot be told from a collapsed break.
+COLLAPSED_SHELL = (
+    "#!/bin/bash\\nset -euo pipefail\\n"
+    'echo "building the report"\\nexit 0\\n'
 )
 
 
@@ -123,9 +171,9 @@ class Diagnose(unittest.TestCase):
         self.assertEqual(lines, [3])
 
     def test_escapes_inside_a_string_on_a_long_line_stay_ambiguous(self):
-        verdict, _real, _literal, lines = rln.diagnose(AMBIGUOUS_JS, "m.js")
+        verdict, _real, _literal, lines = rln.diagnose(AMBIGUOUS_PY, "m.py")
         self.assertEqual(verdict, "ambiguous")
-        self.assertEqual(lines, [1])
+        self.assertEqual(lines, [2])
 
     def test_a_collapsed_shebang_file_is_broken_even_though_it_parses(self):
         # It parses only because the collapsed line is one giant `#` comment.
@@ -141,6 +189,36 @@ class Diagnose(unittest.TestCase):
     def test_escapes_that_are_prose_in_a_comment_are_left_alone(self):
         # Repairing line 2 would turn working code into an IndentationError.
         self.assertEqual(rln.diagnose(COMMENT_PROSE, "ok.py")[0], "clean")
+
+    def test_a_js_line_comment_full_of_escapes_is_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_LINE_COMMENT, "notes.js")[0], "clean")
+
+    def test_js_lines_inside_a_template_or_block_comment_are_left_alone(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_MULTILINE, "t.ts")[0], "clean")
+
+    def test_js_escapes_inside_regex_literals_are_left_alone(self):
+        self.assertEqual(rln.diagnose(HEALTHY_JS_REGEX, "r.js")[0], "clean")
+
+    def test_collapsed_js_is_broken(self):
+        verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_a_js_file_ending_inside_a_template_cannot_be_scanned(self):
+        # The stream scan is unreliable, so it must not guess.
+        text = "const T = `\nalpha\\nbravo\\ncharlie\\ndelta\\necho\n"
+        self.assertEqual(rln.diagnose(text, "t.js")[0], "ambiguous")
+
+    def test_an_unsupported_extension_is_reported_not_repaired(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            COLLAPSED_SHELL, "build.sh")
+        self.assertEqual(verdict, "unsupported")
+        self.assertEqual(lines, [1])
+
+    def test_an_unsupported_extension_with_no_candidate_is_clean(self):
+        self.assertEqual(rln.diagnose('echo "a\\nb"\n', "x.sh")[0], "clean")
 
     def test_valid_json_is_clean_even_with_many_escapes(self):
         text = '{"note": "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot"}\n'
@@ -252,9 +330,9 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("clean", proc.stdout)
 
     def test_an_ambiguous_file_is_left_byte_identical_and_exits_2(self):
-        proc, content = self.run_on(AMBIGUOUS_JS, suffix=".js")
+        proc, content = self.run_on(AMBIGUOUS_PY)
         self.assertEqual(proc.returncode, 2)
-        self.assertEqual(content, AMBIGUOUS_JS)
+        self.assertEqual(content, AMBIGUOUS_PY)
         self.assertIn("ambiguous", proc.stderr)
 
     def test_the_output_says_which_lines_it_would_change(self):
@@ -265,8 +343,8 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(content, MIXED)
 
     def test_the_ambiguous_output_says_which_lines_it_declined(self):
-        proc, _content = self.run_on(AMBIGUOUS_JS, suffix=".js")
-        self.assertIn("line(s) 1", proc.stderr)
+        proc, _content = self.run_on(AMBIGUOUS_PY)
+        self.assertIn("line(s) 2", proc.stderr)
 
     def test_check_mode_reports_without_modifying(self):
         proc, content = self.run_on(COLLAPSED, "--check")
@@ -279,6 +357,162 @@ class EndToEnd(unittest.TestCase):
         again, _content = self.run_on(content)
         self.assertEqual(again.returncode, 0)
         self.assertIn("clean", again.stdout)
+
+
+class FileHandling(unittest.TestCase):
+    """The on-disk contract: never leave a file worse than it arrived."""
+
+    def write_temp(self, raw, suffix=".py"):
+        with tempfile.NamedTemporaryFile("wb", suffix=suffix,
+                                         delete=False) as fh:
+            fh.write(raw)
+            return fh.name
+
+    def run_on_path(self, path, *extra):
+        return subprocess.run([sys.executable, SCRIPT, path, *extra],
+                              capture_output=True, text=True)
+
+    def test_a_bom_does_not_disable_the_python_veto(self):
+        # Reading as plain utf-8 leaves U+FEFF in the text, which makes
+        # compile() fail, which silently switched off every Python
+        # protection — and this healthy file was rewritten.
+        raw = codecs.BOM_UTF8 + HEALTHY_DOCSTRING.encode("utf-8")
+        path = self.write_temp(raw)
+        try:
+            proc = self.run_on_path(path)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), raw)
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("clean", proc.stdout)
+        finally:
+            os.unlink(path)
+
+    def test_a_bom_is_preserved_when_the_file_is_repaired(self):
+        raw = codecs.BOM_UTF8 + COLLAPSED.encode("utf-8")
+        path = self.write_temp(raw)
+        try:
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 0)
+            with open(path, "rb") as handle:
+                fixed = handle.read()
+            self.assertTrue(fixed.startswith(codecs.BOM_UTF8))
+            compile(fixed.decode("utf-8-sig"), "<repaired>", "exec")
+        finally:
+            os.unlink(path)
+
+    def test_the_executable_bit_survives_a_repair(self):
+        path = self.write_temp(COLLAPSED_SHEBANG.encode("utf-8"))
+        try:
+            os.chmod(path, 0o755)
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o755)
+        finally:
+            os.unlink(path)
+
+    def test_a_repair_follows_a_symlink_instead_of_replacing_it(self):
+        directory = tempfile.mkdtemp()
+        try:
+            real = os.path.join(directory, "real.py")
+            link = os.path.join(directory, "link.py")
+            with open(real, "w", encoding="utf-8") as handle:
+                handle.write(COLLAPSED)
+            os.symlink(real, link)
+            proc = self.run_on_path(link)
+            self.assertEqual(proc.returncode, 0)
+            self.assertTrue(os.path.islink(link))
+            with open(real, encoding="utf-8") as handle:
+                compile(handle.read(), "<repaired>", "exec")
+        finally:
+            shutil.rmtree(directory)
+
+    def test_a_non_utf8_file_exits_2_and_is_left_identical(self):
+        raw = b"import sys\n# \xff\xfe not utf-8\nprint(1)\n"
+        path = self.write_temp(raw)
+        try:
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("unreadable", proc.stderr)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), raw)
+        finally:
+            os.unlink(path)
+
+    def test_a_missing_path_exits_2_without_a_traceback(self):
+        proc = self.run_on_path(os.path.join(tempfile.mkdtemp(), "nope.py"))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("unreadable", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_an_empty_file_is_clean(self):
+        path = self.write_temp(b"")
+        try:
+            proc = self.run_on_path(path)
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("clean", proc.stdout)
+        finally:
+            os.unlink(path)
+
+
+class Languages(unittest.TestCase):
+    """End-to-end per language, on the fixtures that used to be corrupted."""
+
+    def run_on(self, text, suffix, *extra):
+        with tempfile.NamedTemporaryFile("w", suffix=suffix,
+                                         delete=False) as fh:
+            fh.write(text)
+            path = fh.name
+        try:
+            proc = subprocess.run([sys.executable, SCRIPT, path, *extra],
+                                  capture_output=True, text=True)
+            with open(path) as handle:
+                return proc, handle.read()
+        finally:
+            os.unlink(path)
+
+    def test_a_healthy_js_comment_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_LINE_COMMENT, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_LINE_COMMENT)
+
+    def test_a_healthy_js_multiline_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_MULTILINE, ".ts")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_MULTILINE)
+
+    def test_a_healthy_js_regex_file_is_left_identical(self):
+        proc, content = self.run_on(HEALTHY_JS_REGEX, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, HEALTHY_JS_REGEX)
+
+    def test_a_collapsed_js_file_is_repaired(self):
+        proc, content = self.run_on(COLLAPSED_JS, ".js")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("repaired", proc.stdout)
+        self.assertIn('const fs = require("fs");\n', content)
+        self.assertNotIn("\\n", content)
+
+    def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
+        proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, COLLAPSED_SHELL)
+        self.assertIn("unsupported", proc.stderr)
+        self.assertIn("line(s) 1", proc.stderr)
+
+    def test_collapsed_json_is_repaired_into_valid_json(self):
+        collapsed = (
+            '{\\n  "name": "report",\\n  "rows": 12,\\n'
+            '  "owner": "someone"\\n}\\n'
+        )
+        proc, content = self.run_on(collapsed, ".json")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(json.loads(content)["name"], "report")
+
+    def test_valid_json_is_left_identical(self):
+        original = '{"note": "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfox"}\n'
+        proc, content = self.run_on(original, ".json")
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(content, original)
 
 
 if __name__ == "__main__":

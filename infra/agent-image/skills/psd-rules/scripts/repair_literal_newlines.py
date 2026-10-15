@@ -17,48 +17,65 @@ authoring nothing.
 
 Exit 0 and "repaired"  -> the file was broken and is now fixed; run it.
 Exit 0 and "clean"     -> nothing to do; the problem is elsewhere.
-Exit 2                 -> ambiguous, left untouched (see below).
+Exit 2                 -> not repaired: unsure, unsupported or unreadable.
 
 SAFETY — why this will not corrupt a healthy script
 
 A Python or JS file legitimately contains `\n` inside string literals
-(`print("a\nb")`). Rewriting those would break working code, so the repair
-fires on the SIGNATURE of the bug rather than on the sequence itself, and it
-tests that signature LINE BY LINE:
+(`print("a\nb")`) and in comment prose ("records are separated by \n"), so the
+repair fires on the SIGNATURE of the bug rather than on the sequence itself,
+and it tests that signature LINE BY LINE:
 
   * a line is a *collapse candidate* when it carries at least
     MIN_ESCAPES_PER_LINE literal `\n` escapes and is longer than
     MIN_COLLAPSED_LINE_LENGTH characters;
-  * it is repaired only when those escapes sit OUTSIDE string literals for the
-    file's language (Python, JavaScript/TypeScript or JSON, by extension);
-  * escapes inside string literals are never touched, even on a line that is
-    repaired for its other escapes.
+  * it is repaired only when at least that many of those escapes are
+    EVIDENCE — outside every string literal, comment and regex literal, where
+    a backslash cannot appear in working code;
+  * an escape that is not evidence is never touched, even on a line that is
+    repaired for its other escapes, so `SEP = "a\nb"` survives the repair of
+    the line it shares.
 
 Line-by-line matters because the real-world shape is usually PARTIAL collapse:
 a few correct header lines followed by a body collapsed onto one line. The
 previous whole-file test ("2 or fewer real lines") declared that file ambiguous
 and left it broken, which is the bug this script exists to end.
 
-A candidate line whose escapes all sit inside strings is reported ambiguous
-(exit 2) and left alone, because a broken-looking file that is actually fine is
-a worse outcome than no repair — unless the file still parses as valid source
-for its language, in which case it is simply clean: working code needs no
-repair, and that is what protects a healthy file whose strings contain `\n`.
+Only Python, JavaScript/TypeScript and JSON are repaired, by extension. Any
+other extension is diagnosed and reported but never rewritten: `\n` in a
+`.sh`, `.sql` or `.md` line cannot be told apart from prose without that
+language's comment and string rules, and a corrupted working file is a worse
+outcome than no repair. Rule 9a tells you to write a `.py` or `.js` file, so
+that is what this repairs.
 
-Parsing is NOT used as a short-circuit on the way in. A collapsed file that
-starts with `#!/usr/bin/env python3` is one enormous COMMENT, so it parses
-perfectly while being completely broken — and that is the single most common
-shape of this bug. Parsing is only allowed to VETO a repair, and only when it
-proves the repair would make things worse: the file parses now and would stop
-parsing afterwards (`x = 1  # see \n\n\n in the docs` is a working line whose
-escapes really are just prose).
+Each language earns its own evidence test, because only some can be verified:
+
+  * Python keeps a per-line scan, then has to clear a VETO (see _vetoed).
+    Parsing is deliberately not a short-circuit on the way in: a collapsed
+    file that starts with `#!/usr/bin/env python3` is one enormous COMMENT, so
+    it parses perfectly while being completely broken — and that is the single
+    most common shape of this bug.
+  * JSON keeps a per-line scan (it has no comments, and a JSON string cannot
+    contain a raw newline) plus a `json.loads` veto.
+  * JavaScript/TypeScript has no stdlib parser, so it gets no veto and must
+    not be judged a line at a time: a line inside a template literal or a
+    `/* */` block opened earlier carries no quote of its own and would look
+    exactly like a collapsed body. It is scanned as ONE STREAM across the
+    whole file (see _javascript_records), and if that scan ends mid-template
+    or mid-comment the file is reported ambiguous rather than guessed at.
+
+A candidate line without enough evidence is reported ambiguous (exit 2) and
+left byte-identical.
 """
 
 import argparse
+import codecs
 import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import tokenize
 
 # A collapsed line is long and carries several literal escapes where the line
@@ -67,30 +84,30 @@ import tokenize
 MIN_ESCAPES_PER_LINE = 3
 MIN_COLLAPSED_LINE_LENGTH = 60
 
-# Which characters open a string literal, per language. Comments are
-# deliberately NOT modelled: on a collapsed line the real newline that ended a
-# comment is itself one of the mangled escapes, so `#` does not run to the end
-# of the line and treating it that way would hide the shebang-first case that
-# is the most common shape of this bug.
-_QUOTE_CHARS = {
-    "python": "\"'",
-    "javascript": "\"'`",
-    "json": "\"",
-    "generic": "\"'",
-}
+PYTHON = "python"
+JAVASCRIPT = "javascript"
+JSON = "json"
 
 _EXTENSIONS = {
-    ".py": "python",
-    ".pyw": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".ts": "javascript",
-    ".tsx": "javascript",
-    ".mts": "javascript",
-    ".cts": "javascript",
-    ".json": "json",
+    ".py": PYTHON,
+    ".pyw": PYTHON,
+    ".js": JAVASCRIPT,
+    ".jsx": JAVASCRIPT,
+    ".mjs": JAVASCRIPT,
+    ".cjs": JAVASCRIPT,
+    ".ts": JAVASCRIPT,
+    ".tsx": JAVASCRIPT,
+    ".mts": JAVASCRIPT,
+    ".cts": JAVASCRIPT,
+    ".json": JSON,
+}
+
+# Which characters open a string literal, for the languages scanned a line at
+# a time. Python comments are deliberately NOT modelled here — see the module
+# docstring on the shebang case — and JSON has none.
+_QUOTE_CHARS = {
+    PYTHON: "\"'",
+    JSON: "\"",
 }
 
 # The escape sequences a collapsed write mangles, and what they should be.
@@ -104,23 +121,43 @@ _UNESCAPE = {
     "'": "'",
 }
 
+# A `/` that follows one of these is division, not the start of a regex.
+_NOT_BEFORE_REGEX = ")]}"
+
 
 def language_for(path):
-    """Language name from the file extension; 'generic' when unrecognised."""
+    """Language name from the file extension, or None when unsupported."""
     if not path:
-        return "generic"
-    return _EXTENSIONS.get(os.path.splitext(path)[1].lower(), "generic")
+        return None
+    return _EXTENSIONS.get(os.path.splitext(path)[1].lower())
 
 
-def _find_escapes(line, language):
-    """Locate every backslash escape on one line.
+def split_lines(text):
+    """Split on `\\n` only, keeping the ends.
 
-    Returns a list of ``[index, char_after, inside_string]``. A `\\\\` pair is
-    skipped entirely: that is a deliberate literal backslash in the source, not
-    a mangled line break.
+    `str.splitlines` also breaks on `\\r`, form feed and several Unicode
+    separators, which the Python tokeniser does not, so using it here would
+    misalign line numbers against `python_string_spans` on a file containing
+    any of those inside a string.
     """
-    quotes = _QUOTE_CHARS.get(language, _QUOTE_CHARS["generic"])
-    escapes = []
+    if not text:
+        return []
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _line_records(line, language):
+    """Escapes on one line: ``[[index, char_after, is_evidence]]``.
+
+    Evidence means the escape sits outside every string literal, which is
+    where a backslash cannot appear in working code. A `\\\\` pair is skipped
+    entirely: that is a deliberate literal backslash, not a mangled break.
+    """
+    quotes = _QUOTE_CHARS[language]
+    records = []
     quote = None
     quote_opened_at = -1
     index = 0
@@ -133,7 +170,7 @@ def _find_escapes(line, language):
             if nxt == "\\":
                 index += 2
                 continue
-            escapes.append([index, nxt, quote is not None])
+            records.append([index, nxt, quote is None])
             index += 2
             continue
         if quote is None:
@@ -149,26 +186,129 @@ def _find_escapes(line, language):
         # The line ends with an unterminated quote, so the "string" we were
         # tracking is not a valid literal and our pairing cannot be trusted
         # (one apostrophe in a collapsed comment would otherwise swallow the
-        # whole body). Treat everything from that quote on as outside a string.
-        for escape in escapes:
-            if escape[0] >= quote_opened_at:
-                escape[2] = False
+        # whole body). Treat everything from that quote on as evidence.
+        for record in records:
+            if record[0] >= quote_opened_at:
+                record[2] = True
 
-    return escapes
+    return records
 
 
-def repair(text, language="generic"):
-    r"""Un-escape the mangled sequences that sit outside string literals.
+def _javascript_records(text):
+    """Escapes in a whole JS/TS file, keyed by 1-based line number, or None.
+
+    One stream over the file, because the constructs that make a `\\n`
+    legitimate span lines: template literals and `/* */` blocks. Returns None
+    when the stream ends inside one of those, since the classification cannot
+    then be trusted.
+    """
+    records = {}
+    row = 1
+    column = 0
+    state = "code"
+    index = 0
+    length = len(text)
+    previous = ""
+
+    while index < length:
+        char = text[index]
+
+        if char == "\n":
+            if state in ("string", "regex", "line-comment"):
+                # None of these may span a real line break, so a newline ends
+                # them whatever happened on the way.
+                state = "code"
+            row += 1
+            column = 0
+            index += 1
+            previous = ""
+            continue
+
+        if char == "\\" and index + 1 < length and text[index + 1] != "\n":
+            nxt = text[index + 1]
+            if nxt == "\\":
+                index += 2
+                column += 2
+                previous = "\\"
+                continue
+            records.setdefault(row, []).append([column, nxt, state == "code"])
+            index += 2
+            column += 2
+            previous = nxt
+            continue
+
+        if state == "code":
+            if char in "\"'":
+                state, quote = "string", char
+            elif char == "`":
+                state, quote = "template", char
+            elif char == "/" and index + 1 < length and text[index + 1] == "/":
+                state = "line-comment"
+            elif char == "/" and index + 1 < length and text[index + 1] == "*":
+                state = "block-comment"
+            elif char == "/" and not (
+                previous.isalnum() or previous in "_$" + _NOT_BEFORE_REGEX
+            ):
+                state, quote = "regex", "/"
+        elif state in ("string", "template", "regex"):
+            if char == quote:
+                state = "code"
+        elif state == "block-comment":
+            if char == "*" and index + 1 < length and text[index + 1] == "/":
+                state = "code"
+                index += 2
+                column += 2
+                previous = "/"
+                continue
+
+        if not char.isspace():
+            previous = char
+        index += 1
+        column += 1
+
+    if state in ("template", "block-comment"):
+        return None
+    return records
+
+
+def escape_records(text, language):
+    """``{line_number: [[index, char_after, is_evidence]]}``, or None."""
+    if language == JAVASCRIPT:
+        return _javascript_records(text)
+    return {
+        number: _line_records(line, language)
+        for number, line in enumerate(split_lines(text), 1)
+    }
+
+
+def repair(text, language=PYTHON):
+    r"""Un-escape the mangled sequences that are evidence of a collapse.
 
     `\n` and `\t` become real whitespace; `\"` and `\'` lose their backslash.
-    Escapes inside a string literal are left exactly as they were, as is
-    `\\n` — an escaped backslash is a deliberate literal, not a broken break.
+    An escape inside a string, comment or regex literal is left exactly as it
+    was, as is `\\n`.
     """
+    records = escape_records(text, language)
+    if records is None:
+        return text
+    return apply_repair(text, records.keys(), language, records)
+
+
+def apply_repair(text, lines_to_change, language, records=None):
+    """Repair only the given 1-based lines, leaving every other byte alone."""
+    if records is None:
+        records = escape_records(text, language)
+        if records is None:
+            return text
+    targets = set(lines_to_change)
     out = []
-    for line in text.splitlines(keepends=True):
+    for number, line in enumerate(split_lines(text), 1):
+        if number not in targets:
+            out.append(line)
+            continue
         position = 0
-        for index, char, inside in _find_escapes(line, language):
-            if inside or char not in _UNESCAPE:
+        for index, char, evidence in records.get(number, []):
+            if not evidence or char not in _UNESCAPE:
                 continue
             out.append(line[position:index])
             out.append(_UNESCAPE[char])
@@ -180,16 +320,15 @@ def repair(text, language="generic"):
 def parses_cleanly(text, language):
     """True when the text is valid source for its language.
 
-    JavaScript/TypeScript has no stdlib parser, so those always return False
-    and rely on the line-by-line test alone.
+    JavaScript/TypeScript has no stdlib parser, so it always returns False.
     """
-    if language == "python":
+    if language == PYTHON:
         try:
             compile(text, "<diagnose>", "exec")
         except Exception:  # SyntaxError, ValueError (null bytes), ...
             return False
         return True
-    if language == "json":
+    if language == JSON:
         try:
             json.loads(text)
         except Exception:
@@ -199,22 +338,18 @@ def parses_cleanly(text, language):
 
 
 def python_string_spans(text):
-    """Authoritative string-literal regions of a PARSING Python file.
+    """String-literal regions of a parsing Python file, per the tokeniser.
 
-    ``{line_number: [(start_col, end_col), ...]}``, or None when the text
-    cannot be tokenised. Only the real tokeniser can see that a line sits
-    inside a triple-quoted string — the per-line scan cannot, because the
-    opening quote is on an earlier line, and a `\\n`-rich line inside a
-    docstring would otherwise look exactly like a collapsed body.
-
-    Comments are deliberately excluded: a collapsed file that starts with a
-    shebang is ONE comment, so trusting comments would call it healthy.
+    ``{line_number: [(start_col, end_col)]}``, or None when the text cannot be
+    tokenised. Only the tokeniser can see that a line sits inside a
+    triple-quoted string, because the opening quote is on an earlier line.
+    Comments are excluded on purpose (see _vetoed).
     """
-    lines = text.splitlines(keepends=True)
+    lines = split_lines(text)
     spans = {}
     try:
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except Exception:  # SyntaxError, TokenizeError, ...
+    except Exception:  # SyntaxError, TokenError, ...
         return None
     for token in tokens:
         name = tokenize.tok_name.get(token.type, "")
@@ -234,99 +369,147 @@ def _all_within_spans(escapes_by_line, spans):
     """True when every given escape sits inside a string-literal span."""
     for number, escapes in escapes_by_line.items():
         line_spans = spans.get(number, [])
-        for index, _char, _inside in escapes:
+        for index, _char, _evidence in escapes:
             if not any(start <= index < end for start, end in line_spans):
                 return False
     return True
 
 
-def _vetoed(text, language, broken_lines, escapes_per_line):
+def _vetoed(text, language, broken_lines, records):
     """True when repairing these lines would damage a file that works today.
 
     A file that does not parse cannot be damaged by this repair, so the veto
-    only applies to one that does, and only on the two proofs that the escapes
-    are legitimate:
+    only applies to one that does, and only on a proof that the escapes are
+    legitimate:
 
-    1. every escape sits inside a real string literal (the tokeniser's answer,
-       which is the only one that sees triple-quoted strings); or
-    2. the file would STOP parsing once repaired — the escapes are prose in a
+    1. JSON that parses has no escape outside a string at all;
+    2. every escape sits inside a real string literal, per the tokeniser,
+       which is the only thing that sees triple-quoted strings; or
+    3. the file would STOP parsing once repaired — the escapes are prose in a
        comment and the repair is what would break it.
 
-    A collapsed file that begins with a shebang parses as one big comment, so
-    neither proof holds for it and it is repaired, which is the whole point.
+    Comments cannot themselves be a proof, because a collapsed file beginning
+    with a shebang is one big comment; proof 3 is what separates it (parses
+    before AND after) from `x = 1  # see \\n\\n\\n` (parses only before).
     """
     if not parses_cleanly(text, language):
         return False
-    if language == "json":
-        # Valid JSON has no escapes outside strings at all.
+    if language == JSON:
         return True
-    if language == "python":
+    if language == PYTHON:
         spans = python_string_spans(text)
         if spans is not None:
             escapes = {
-                number: [e for e in escapes_per_line[number - 1] if e[1] == "n"]
+                number: [r for r in records.get(number, []) if r[1] == "n"]
                 for number in broken_lines
             }
             if _all_within_spans(escapes, spans):
                 return True
     return not parses_cleanly(
-        apply_repair(text, broken_lines, language), language
+        apply_repair(text, broken_lines, language, records), language
     )
 
 
-def diagnose(text, path=None):
-    """(verdict, real_lines, literal_escapes, lines_to_change).
+def diagnose(text, path):
+    """(verdict, real_lines, literal_escapes, lines).
 
-    verdict is clean / broken / ambiguous. ``lines_to_change`` holds the
-    1-based numbers of the collapsed lines that would be repaired.
+    verdict is clean / broken / ambiguous / unsupported. ``lines`` holds the
+    1-based numbers of the collapsed lines that would be repaired, or for the
+    other verdicts the ones it declined to touch.
     """
     language = language_for(path)
-    real_lines = text.count("\n")
-    lines = text.splitlines(keepends=True)
+    lines = split_lines(text)
+    real_lines = len(lines)
 
-    escapes_per_line = [_find_escapes(line, language) for line in lines]
+    records = escape_records(text, language or PYTHON)
+    if records is None:
+        # JS/TS whose stream scan ended mid-template or mid-comment.
+        return "ambiguous", real_lines, 0, []
+
     literal = sum(
         1
-        for escapes in escapes_per_line
-        for _index, char, _inside in escapes
+        for line_records in records.values()
+        for _index, char, _evidence in line_records
         if char == "n"
     )
-
     if literal == 0:
         return "clean", real_lines, literal, []
 
     broken_lines = []
     unsure_lines = []
-    for number, (line, escapes) in enumerate(zip(lines, escapes_per_line), 1):
-        newlines = [e for e in escapes if e[1] == "n"]
+    for number, line in enumerate(lines, 1):
+        newlines = [r for r in records.get(number, []) if r[1] == "n"]
         if len(newlines) < MIN_ESCAPES_PER_LINE:
             continue
         if len(line.rstrip("\r\n")) <= MIN_COLLAPSED_LINE_LENGTH:
             continue
-        outside = [e for e in newlines if not e[2]]
-        if len(outside) >= MIN_ESCAPES_PER_LINE:
+        if len([r for r in newlines if r[2]]) >= MIN_ESCAPES_PER_LINE:
             broken_lines.append(number)
         else:
             unsure_lines.append(number)
 
+    if language is None:
+        if broken_lines or unsure_lines:
+            return ("unsupported", real_lines, literal,
+                    sorted(broken_lines + unsure_lines))
+        return "clean", real_lines, literal, []
+
     if broken_lines:
-        if _vetoed(text, language, broken_lines, escapes_per_line):
+        if _vetoed(text, language, broken_lines, records):
             return "clean", real_lines, literal, []
         return "broken", real_lines, literal, broken_lines
     if unsure_lines:
-        if parses_cleanly(text, language):
+        # The candidate's escapes were not evidence. For JS/TS that is the
+        # stream scan's positive answer — they are string, comment or regex
+        # content — and the unreliable case already returned None above, so
+        # there is no "maybe" left to report. For the languages scanned a line
+        # at a time the quote pairing is only a heuristic, so it takes a
+        # successful parse to upgrade "unsure" to "clean".
+        if language == JAVASCRIPT or parses_cleanly(text, language):
             return "clean", real_lines, literal, []
         return "ambiguous", real_lines, literal, unsure_lines
     return "clean", real_lines, literal, []
 
 
-def apply_repair(text, lines_to_change, language):
-    """Repair only the given 1-based lines, leaving every other byte alone."""
-    targets = set(lines_to_change)
-    out = []
-    for number, line in enumerate(text.splitlines(keepends=True), 1):
-        out.append(repair(line, language) if number in targets else line)
-    return "".join(out)
+def read_source(path):
+    """(text, had_bom). Raises OSError or UnicodeDecodeError."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    had_bom = raw.startswith(codecs.BOM_UTF8)
+    # A leading BOM must come off before the text reaches `compile()`: the
+    # interpreter strips it from a file's bytes when running it, but compiling
+    # a str that still contains U+FEFF is a SyntaxError, which would make a
+    # working file look broken and disable the Python veto entirely.
+    return raw.decode("utf-8-sig" if had_bom else "utf-8"), had_bom
+
+
+def write_source(path, text, had_bom):
+    """Replace the file atomically, preserving its mode and any BOM.
+
+    `open(path, "w")` truncates before the new bytes land, so a process killed
+    mid-write would leave the user with a half-file and no original. The
+    contract here is that a file is never left worse than it arrived.
+    """
+    target = os.path.realpath(path)
+    directory = os.path.dirname(target) or "."
+    raw = text.encode("utf-8")
+    if had_bom:
+        raw = codecs.BOM_UTF8 + raw
+    handle, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".repair-literal-newlines-")
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.copymode(target, temporary)
+        os.replace(temporary, target)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _describe(numbers):
@@ -343,49 +526,86 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    with open(args.path, encoding="utf-8") as handle:
-        text = handle.read()
+    try:
+        text, had_bom = read_source(args.path)
+    except UnicodeDecodeError:
+        print(
+            f"unreadable: {args.path} is not UTF-8 text, so it was NOT "
+            "modified. This tool only repairs text files.",
+            file=sys.stderr,
+        )
+        return 2
+    except OSError as error:
+        print(f"unreadable: {args.path}: {error.strerror}", file=sys.stderr)
+        return 2
 
-    verdict, real_lines, literal, lines_to_change = diagnose(text, args.path)
+    verdict, real_lines, literal, lines = diagnose(text, args.path)
 
     if verdict == "clean":
         if literal:
             print(
                 f"clean: {args.path} has {literal} literal newline escapes, "
                 "but none of them is a collapsed line break — repairing them "
-                "would break working code, so nothing was changed. The "
-                "problem is elsewhere."
+                "would break working code, so nothing was changed. Look "
+                "elsewhere for the cause."
             )
         else:
             print(f"clean: {args.path} has no literal newline escapes")
         return 0
 
-    if verdict == "ambiguous":
+    if verdict == "unsupported":
         print(
-            f"ambiguous: {args.path} has {real_lines} real lines and {literal} "
-            f"literal escapes; line(s) {_describe(lines_to_change)} look "
-            "collapsed but every escape there sits inside a string literal, so "
-            "the file was NOT modified. If it really is broken, the escapes "
-            "are not the reason.",
+            f"unsupported: {args.path} has {literal} literal escapes and "
+            f"line(s) {_describe(lines)} look collapsed, but this tool only "
+            "repairs .py, .js/.ts and .json files — in any other language a "
+            "literal \\n cannot be told apart from comment prose, so the "
+            "file was NOT modified.",
             file=sys.stderr,
         )
         return 2
 
+    if verdict == "ambiguous":
+        if lines:
+            print(
+                f"ambiguous: {args.path} has {real_lines} real lines and "
+                f"{literal} literal escapes; line(s) {_describe(lines)} look "
+                f"collapsed but fewer than {MIN_ESCAPES_PER_LINE} of their "
+                "escapes sit outside a string, comment or regex literal, so "
+                "the file was NOT modified. Look elsewhere for the cause.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ambiguous: {args.path} could not be scanned reliably — it "
+                "ends inside a template literal or a /* */ comment, so the "
+                "file was NOT modified.",
+                file=sys.stderr,
+            )
+        return 2
+
     language = language_for(args.path)
+    records = escape_records(text, language)
+    changing = sum(
+        1
+        for number in lines
+        for _index, char, evidence in records.get(number, [])
+        if char == "n" and evidence
+    )
+
     if args.check:
         print(
             f"broken: {args.path} would be repaired on line(s) "
-            f"{_describe(lines_to_change)} ({literal} escapes)"
+            f"{_describe(lines)} ({changing} of {literal} escapes)"
         )
         return 0
 
-    fixed = apply_repair(text, lines_to_change, language)
-    with open(args.path, "w", encoding="utf-8") as handle:
-        handle.write(fixed)
+    fixed = apply_repair(text, lines, language, records)
+    write_source(args.path, fixed, had_bom)
     print(
-        f"repaired: {args.path} — line(s) {_describe(lines_to_change)} were "
-        f"collapsed; their literal escapes became real newlines "
-        f"({fixed.count(chr(10))} lines total). Run it now; do not rewrite it."
+        f"repaired: {args.path} — line(s) {_describe(lines)} were collapsed; "
+        f"{changing} literal escapes there became real newlines "
+        f"({len(split_lines(fixed))} lines total). Run it now; do not "
+        "rewrite it."
     )
     return 0
 

@@ -346,15 +346,24 @@ a differently-broken file, so the loop can repeat for many turns.
 
    It judges the file **line by line**, so a file whose header lines are fine
    and whose body collapsed onto one line is repaired — only the collapsed
-   lines are touched, and a `\n` inside a string literal is left as it is. It
-   also drops the stray backslashes from `\"` and `\'` on those lines.
+   lines are touched, and an escape inside a string, comment or regex literal
+   is left as it is. It also drops the stray backslashes from `\"` and `\'`
+   on the lines it repairs. It repairs `.py`, `.js`/`.ts` and `.json` only.
 
-   - `repaired` — it names the lines it changed; the file is now runnable.
-     **Run it. Do not rewrite it.**
-   - `clean` — no collapsed line, so the escapes are not your problem.
+   - `repaired` — it names the lines it changed. **Run it. Do not rewrite
+     it.** If it still fails, the escapes were not the only problem; debug
+     the error you now get.
+   - `clean` — no collapsed line. The escapes are legitimate, so stop
+     looking at them and debug the actual error.
    - `ambiguous` (exit 2) — it names the lines it would not touch: they look
-     collapsed but every escape there is inside a string literal, so the file
-     was left alone. The escapes are not the reason it is failing.
+     collapsed but too few of their escapes sit outside a string, comment or
+     regex literal to be sure. The file is untouched. Do not re-run it hoping
+     for a different answer and do not rewrite the file — debug the error, or
+     ask the user if you are stuck.
+   - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
+     The file is untouched; in those languages a literal `\n` cannot be told
+     apart from prose. Fix it by hand, or move the logic into a `.py` file.
+   - `unreadable` (exit 2) — the path is missing or not UTF-8 text.
 
    **Rewriting is the trap.** This step used to say "rewrite it as a file" —
    but it WAS a file, and `write` is what produced the literal `\n`. Rewriting
