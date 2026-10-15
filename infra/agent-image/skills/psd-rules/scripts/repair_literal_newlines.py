@@ -307,21 +307,32 @@ def _javascript_records(text):
     while index < length:
         char = text[index]
 
-        if char == "\\" and text[index + 1:index + 2] in ("\n", "\r"):
-            # A backslash immediately before a real newline continues a STRING
-            # across the line break, which is legal in JS, and ending the
-            # string there marked the next line's escapes as code and rewrote
-            # a valid file. `\r\n` counts: a CRLF file's continuation is the
-            # same construct. It continues nothing else — a backslash does not
-            # extend a `//` comment past the line terminator — so every other
-            # state ends at the newline as usual.
+        if (
+            char == "\\"
+            and text[index + 1:index + 2] in ("\n",) + tuple(
+                _JS_LINE_TERMINATORS)
+        ):
+            # A backslash before ANY JavaScript line terminator — LF, CR,
+            # CRLF, U+2028 or U+2029 — continues a STRING across it, which is
+            # legal, and ending the string there marked the next line's
+            # escapes as code and rewrote a valid file. It continues nothing
+            # else: a backslash does not extend a `//` comment past a
+            # terminator, whichever one it is.
+            terminator = text[index + 1]
             index += 2
-            if text[index - 1] == "\r" and text[index:index + 1] == "\n":
+            if terminator == "\r" and text[index:index + 1] == "\n":
                 index += 1
+                terminator = "\n"
             if state == "line-comment":
                 state = "code"
-            row += 1
-            column = 0
+            if terminator == "\n":
+                row += 1
+                column = 0
+            else:
+                # A bare CR or a Unicode terminator is NOT a line break for
+                # `split_lines`, so the row must not move or every record
+                # after it lands on a row that does not exist.
+                column += 2
             continue
 
         if char == "\n":
@@ -629,6 +640,21 @@ def _python_spans(text, wanted):
     return spans
 
 
+def python_lex_limit(text):
+    """The 1-based row where `text` stops lexing, or None if it all lexes.
+
+    Past that row nothing is known about the lexical structure — a resume
+    starts in whatever state the failure left behind, and one that restarts
+    inside an open string reads the string's data as code. Callers pass the
+    neutralised copy, so a limit here means a lexical fault that the collapsed
+    escapes do not explain, and the lines beyond it are refused rather than
+    guessed at.
+    """
+    lines = split_lines(text)
+    _tokens, failed_row = _tokenize_prefix(lines, 0)
+    return failed_row
+
+
 def python_string_spans(text):
     """String-literal regions of a Python file, per the tokeniser.
 
@@ -779,6 +805,18 @@ def diagnose(text, path):
                     sorted(broken_lines + unsure_lines))
         return "clean", real_lines, literal, []
 
+    beyond_lexing = []
+    if broken_lines and language == PYTHON:
+        # Even the neutralised copy can fail to lex, on a fault the collapsed
+        # escapes do not explain — an inconsistent indent, say. Everything
+        # past that point has no known lexical structure, and a resume that
+        # lands inside an open string reads the string's data as code, which
+        # rewrote a docstring's contents. Those lines are refused.
+        limit = python_lex_limit(neutralised(text))
+        if limit is not None:
+            beyond_lexing = [n for n in broken_lines if n > limit]
+            broken_lines = [n for n in broken_lines if n <= limit]
+
     # A candidate whose every escape is inside a comment is set aside LINE BY
     # LINE, never as a group: a comment holding `\n`-separated example code is
     # indistinguishable from a collapsed body — both are one comment token —
@@ -833,6 +871,9 @@ def diagnose(text, path):
         if _vetoed(text, language, comment_held, records):
             return "clean", real_lines, literal, []
         return "comment-ambiguous", real_lines, literal, comment_held
+
+    if beyond_lexing:
+        return "lex-limited", real_lines, literal, beyond_lexing
     if unsure_lines:
         # The candidate's escapes were not evidence. For JS/TS that is the
         # stream scan's positive answer — they are string, comment or regex
@@ -947,6 +988,18 @@ def main() -> int:
             "and repairing the wrong one would turn a comment into live "
             "statements. The file was NOT modified. If that line really is "
             "collapsed, split the comment off it by hand and run this again.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if verdict == "lex-limited":
+        print(
+            f"ambiguous: {args.path} line(s) {_describe(lines)} look "
+            "collapsed, but the file stops lexing before them for a reason "
+            "the escapes do not explain — an inconsistent indent, say — so "
+            "nothing is known about whether those escapes are code or the "
+            "contents of a string. The file was NOT modified. Fix that fault "
+            "first, then run this again.",
             file=sys.stderr,
         )
         return 2

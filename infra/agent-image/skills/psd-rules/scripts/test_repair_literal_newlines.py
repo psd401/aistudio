@@ -343,6 +343,32 @@ CR_COMMENT_THEN_COLLAPSE = (
     "\\nconsole.log(c);\\n"
 )
 
+# A file whose NEUTRALISED copy still will not lex — the indent is
+# inconsistent, which the collapsed escapes do not explain — followed by a
+# docstring body. Resuming past that fault restarts inside the open string
+# and read the string's data as code.
+UNLEXABLE_THEN_DOCSTRING = (
+    "def f():\n      return 1\n  DOC = \"\"\"\n"
+    "alpha\\nbravo\\ncharlie\\ndelta\\necho\\nfoxtrot\\ngolf"
+    "\\nhotel\\nindia\\njuliet\n"
+    '"""\n'
+)
+
+# A JS string continued with a backslash and a BARE CR, then a collapsed body
+# on the same `split_lines` line. Advancing the row there filed every later
+# record under a row that does not exist, so the file was reported clean.
+CR_CONTINUATION_THEN_COLLAPSE = (
+    'const s = "start \\\ralpha";\\nconst a = 1;\\nconst b = 2;'
+    "\\nconsole.log(a + b, s);\\n"
+)
+
+# A `//` comment ended by a backslash and U+2028, then a collapsed body. A
+# backslash does not extend a line comment across a Unicode terminator.
+U2028_CONTINUATION_AFTER_COMMENT = (
+    "// header \\\u2028const a = 1;\\nconst b = 2;\\nconst c = 3;"
+    "\\nconsole.log(c);\\n"
+)
+
 # A genuinely collapsed JS file: the escapes are in code position, where a
 # backslash cannot appear in working source.
 COLLAPSED_JS = (
@@ -577,6 +603,24 @@ class Diagnose(unittest.TestCase):
     def test_a_cr_ends_a_js_line_comment(self):
         verdict, _real, _literal, lines = rln.diagnose(
             CR_COMMENT_THEN_COLLAPSE, "m.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_lines_past_an_unlexable_fault_are_refused(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            UNLEXABLE_THEN_DOCSTRING, "u.py")
+        self.assertEqual(verdict, "lex-limited")
+        self.assertEqual(lines, [4])
+
+    def test_a_bare_cr_continuation_keeps_the_record_row(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            CR_CONTINUATION_THEN_COLLAPSE, "c.js")
+        self.assertEqual(verdict, "broken")
+        self.assertEqual(lines, [1])
+
+    def test_a_backslash_does_not_extend_a_comment_over_u2028(self):
+        verdict, _real, _literal, lines = rln.diagnose(
+            U2028_CONTINUATION_AFTER_COMMENT, "u.js")
         self.assertEqual(verdict, "broken")
         self.assertEqual(lines, [1])
 
@@ -1052,6 +1096,12 @@ class Languages(unittest.TestCase):
         proc, content = self.run_on(COLLAPSED_OPENING_A_DOCSTRING, ".py")
         self.assertIn(proc.returncode, (0, 2))
         self.assertIn("Lines split on \\n\\n\\n and", content)
+
+    def test_an_unlexable_file_keeps_its_docstring_data(self):
+        proc, content = self.run_on(UNLEXABLE_THEN_DOCSTRING, ".py")
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(content, UNLEXABLE_THEN_DOCSTRING)
+        self.assertIn("stops lexing", proc.stderr)
 
     def test_a_collapsed_shell_file_is_reported_but_not_touched(self):
         proc, content = self.run_on(COLLAPSED_SHELL, ".sh")
