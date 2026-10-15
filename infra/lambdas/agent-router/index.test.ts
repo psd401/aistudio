@@ -863,22 +863,22 @@ describe("deferred scheduled-run resolution", () => {
 
 // Codex P2 on PR #1925: a delivered post whose row cannot be settled must not
 // be left `deferred` — counted as a failure — with nothing to repair it.
-describe("deferred scheduled-run settlement durability", () => {
-  const queuedPost = {
-    kind: "agent-chat-delivery-v1" as const,
-    spaceName: "spaces/owner-dm",
-    text: "📋 Morning brief",
-    deliveryContext: {
-      isSharedSpace: false,
-      durableDelivery: false as const,
-      deliveryRequestId: "11111111-2222-4333-8444-555555555555",
-    },
-    scheduledRun: { fireKey: "sched-morning#2026-10-14T13:30:00Z" },
-  }
-  const firstReceive = {
-    attributes: { ApproximateReceiveCount: "1" },
-  } as never
+const queuedPost = {
+  kind: "agent-chat-delivery-v1" as const,
+  spaceName: "spaces/owner-dm",
+  text: "📋 Morning brief",
+  deliveryContext: {
+    isSharedSpace: false,
+    durableDelivery: false as const,
+    deliveryRequestId: "11111111-2222-4333-8444-555555555555",
+  },
+  scheduledRun: { fireKey: "sched-morning#2026-10-14T13:30:00Z" },
+}
+const firstReceive = {
+  attributes: { ApproximateReceiveCount: "1" },
+} as never
 
+describe("deferred scheduled-run settlement durability", () => {
   test("a delivered post whose settle fails is re-queued settle-only, not re-posted", async () => {
     // Codex P2 on PR #1925: the settle used to log and return, the record was
     // acknowledged, and the delivered run stayed `deferred` — counted as a
@@ -902,6 +902,47 @@ describe("deferred scheduled-run settlement durability", () => {
     expect(requeued).toEqual([queuedPost])
   })
 
+  test("a final failed delivery whose error settle fails is re-queued as an error", async () => {
+    // Codex P2 on PR #1925: this record dead-letters after the throw, so an
+    // ignored resolve() here left the row `deferred` forever.
+    const requeued: unknown[][] = []
+    const failingSend = (async () => {
+      throw new Error("503 from Chat")
+    }) as never
+    const finalReceive = {
+      attributes: { ApproximateReceiveCount: "3" },
+    } as never
+
+    await expect(
+      processDeferredChatDelivery(queuedPost as never, finalReceive, TEST_LOG, {
+        send: failingSend,
+        resolve: (async () => false) as never,
+        requeueSettlement: (async (...args: unknown[]) => {
+          requeued.push(args)
+        }) as never,
+      })
+    ).rejects.toThrow("503 from Chat")
+    expect(requeued).toHaveLength(1)
+    expect(requeued[0][0]).toEqual(queuedPost)
+    expect(requeued[0][2]).toEqual({
+      status: "error",
+      errorMessage: "Queued Chat delivery never succeeded: 503 from Chat",
+    })
+
+    // An earlier attempt settles nothing and queues nothing: SQS retries it.
+    requeued.length = 0
+    await expect(
+      processDeferredChatDelivery(queuedPost as never, firstReceive, TEST_LOG, {
+        send: failingSend,
+        resolve: (async () => false) as never,
+        requeueSettlement: (async (...args: unknown[]) => {
+          requeued.push(args)
+        }) as never,
+      })
+    ).rejects.toThrow("503 from Chat")
+    expect(requeued).toHaveLength(0)
+  })
+
   test("a settled post queues nothing", async () => {
     let requeues = 0
     await processDeferredChatDelivery(queuedPost as never, firstReceive, TEST_LOG, {
@@ -914,12 +955,16 @@ describe("deferred scheduled-run settlement durability", () => {
     expect(requeues).toBe(0)
   })
 
+})
+
+describe("scheduled-run settlement record", () => {
   test("the settlement record carries no text and retries until it settles", async () => {
     // A separate kind with nothing to post: a router predating it would drop
     // a "settle only" flag on the delivery envelope and post the brief again.
     const body = JSON.stringify({
       kind: "agent-scheduled-run-settlement-v1",
       scheduledRun: { fireKey: queuedPost.scheduledRun.fireKey },
+      status: "success",
     })
     const settlement = parseScheduledRunSettlementRecord(body)
     expect(settlement).toEqual(JSON.parse(body))
@@ -949,6 +994,27 @@ describe("deferred scheduled-run settlement durability", () => {
         }) as never
       )
     ).rejects.toThrow("Deferred scheduled-run settlement failed: pool exhausted")
+
+    // An error settlement records its outcome and message, not success.
+    const errorSettlement = parseScheduledRunSettlementRecord(
+      JSON.stringify({
+        kind: "agent-scheduled-run-settlement-v1",
+        scheduledRun: { fireKey: "k" },
+        status: "error",
+        errorMessage: "Queued Chat delivery never succeeded: 503",
+      })
+    )
+    settled.length = 0
+    await processScheduledRunSettlement(
+      errorSettlement as never,
+      TEST_LOG,
+      (async (...args: unknown[]) => {
+        settled.push(args.slice(0, 3))
+      }) as never
+    )
+    expect(settled).toEqual([
+      [{ fireKey: "k" }, "error", "Queued Chat delivery never succeeded: 503"],
+    ])
   })
 
   test("only the settlement kind parses, and a malformed one is redriven", () => {
@@ -956,14 +1022,18 @@ describe("deferred scheduled-run settlement durability", () => {
     expect(
       parseScheduledRunSettlementRecord(JSON.stringify(queuedPost))
     ).toBeNull()
+    const kind = "agent-scheduled-run-settlement-v1"
+    const ref = { fireKey: "ok" }
     for (const malformed of [
-      { kind: "agent-scheduled-run-settlement-v1" },
-      { kind: "agent-scheduled-run-settlement-v1", scheduledRun: { fireKey: "" } },
-      {
-        kind: "agent-scheduled-run-settlement-v1",
-        scheduledRun: { fireKey: "ok" },
-        text: "post me",
-      },
+      { kind, status: "success" },
+      { kind, scheduledRun: { fireKey: "" }, status: "success" },
+      { kind, scheduledRun: ref, status: "success", text: "post me" },
+      // The outcome must be explicit and coherent.
+      { kind, scheduledRun: ref },
+      { kind, scheduledRun: ref, status: "deferred" },
+      { kind, scheduledRun: ref, status: "error" },
+      { kind, scheduledRun: ref, status: "success", errorMessage: "x" },
+      { kind, scheduledRun: ref, status: "error", errorMessage: "x".repeat(4001) },
     ]) {
       expect(() =>
         parseScheduledRunSettlementRecord(JSON.stringify(malformed))
