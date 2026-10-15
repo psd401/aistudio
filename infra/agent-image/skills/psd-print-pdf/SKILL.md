@@ -10,14 +10,14 @@ allowed-tools: Bash(node:*)
 You have an HTML file. The user wants a PDF they can print.
 
 ```bash
-node /opt/psd-skills/psd-print-pdf/print.js --file /tmp/sign.html --out /tmp/sign.pdf
+node /opt/psd-skills/psd-print-pdf/print.js --file /home/node/.openclaw/work/sign.html --out /home/node/.openclaw/work/sign.pdf
 ```
 
 Returns JSON:
 
 ```json
 {
-  "file": "/tmp/sign.pdf",
+  "file": "/home/node/.openclaw/work/sign.pdf",
   "bytes": 20924,
   "pages": 1,
   "pageSize": "letter",
@@ -62,7 +62,7 @@ and not reachable by a link.
 - If the user wants a **link**, deliver it with `psd-publish-file`:
 
   ```bash
-  node /opt/psd-skills/psd-publish-file/publish.js --file /tmp/<name>.pdf
+  node /opt/psd-skills/psd-publish-file/publish.js --file /home/node/.openclaw/work/<name>.pdf
   ```
 
   With no `--to` flag the PDF is created in your agent's Drive and shared with

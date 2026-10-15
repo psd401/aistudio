@@ -10,8 +10,8 @@ Run with PyMuPDF through the repository-standard uv workflow:
     uv run --python 3.12 --no-project --with pymupdf python \
       infra/agent-image/skills/psd-observances/tools/nspra_markdown.py \
       --pdf /approved/operator-storage/calendar.pdf \
-      --out /tmp/nspra-calendar-markdown \
-      --report /tmp/nspra-calendar-verification.json
+      --out /home/node/.openclaw/work/nspra-calendar-markdown \
+      --report /home/node/.openclaw/work/nspra-calendar-verification.json
 """
 
 from __future__ import annotations

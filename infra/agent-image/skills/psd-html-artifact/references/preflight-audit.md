@@ -21,7 +21,7 @@ with **critical or serious** violations (exit 3, `a11y_violations`). You cannot 
 Run it yourself first:
 
 ```bash
-node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /tmp/<name>.html
+node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /home/node/.openclaw/work/<name>.html
 ```
 
 The axe gate runs over jsdom, so it covers **structure / ARIA / labels / lang / roles /

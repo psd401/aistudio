@@ -170,14 +170,14 @@ which has no escape syntax. So an inline `--params` **cannot express a Drive
 search at all**. Write the parameters to a file instead:
 
 ```bash
-# 1. write  →  /tmp/drive-query.json   (use the `write` TOOL)
+# 1. write  →  /home/node/.openclaw/work/drive-query.json   (use the `write` TOOL)
 #    {"q":"name contains 'Budget' and trashed = false","pageSize":50,
 #     "fields":"files(id,name,mimeType,modifiedTime)"}
 
 # 2. Reference it — --params-file REPLACES --params (never pass both)
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "drive files list --params-file /tmp/drive-query.json"
+  --command "drive files list --params-file /home/node/.openclaw/work/drive-query.json"
 ```
 
 Children of one folder use the same shape with
@@ -311,7 +311,7 @@ after repeated attempts to generate the payload through `python3` + heredoc and
 the batchUpdate was never sent at all.
 
 ```bash
-# 1. write  →  /tmp/doc-payload.json
+# 1. write  →  /home/node/.openclaw/work/doc-payload.json
 #    {"requests":[{"insertText":{"location":{"index":1},
 #     "text":"It's fine to use \"both\" quote kinds.\n\nNew paragraphs too."}}]}
 #    (use the `write` TOOL for this step — do not cat/heredoc it)
@@ -319,26 +319,26 @@ the batchUpdate was never sent at all.
 # 2. Reference it with --json-file (replaces --json)
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "docs documents batchUpdate --params '{\"documentId\":\"<id>\"}' --json-file /tmp/doc-payload.json"
+  --command "docs documents batchUpdate --params '{\"documentId\":\"<id>\"}' --json-file /home/node/.openclaw/work/doc-payload.json"
 
 # Slides and Sheets take the SAME shape — the rule is not Docs-specific.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "slides presentations batchUpdate --params '{\"presentationId\":\"<id>\"}' --json-file /tmp/slides-payload.json"
+  --command "slides presentations batchUpdate --params '{\"presentationId\":\"<id>\"}' --json-file /home/node/.openclaw/work/slides-payload.json"
 
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "sheets spreadsheets batchUpdate --params '{\"spreadsheetId\":\"<id>\"}' --json-file /tmp/sheet-payload.json"
+  --command "sheets spreadsheets batchUpdate --params '{\"spreadsheetId\":\"<id>\"}' --json-file /home/node/.openclaw/work/sheet-payload.json"
 
 # Query parameters whose values need quotes use --params-file (replaces --params)
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "drive files list --params-file /tmp/drive-query.json"
+  --command "drive files list --params-file /home/node/.openclaw/work/drive-query.json"
 
 # Plain-text bodies (e.g. +draft) use --body-file (replaces --body)
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /tmp/draft-body.txt"
+  --command "gmail +draft --to bill@psd401.net --subject 'Follow up' --body-file /home/node/.openclaw/work/draft-body.txt"
 
 # NO BINARY EMAIL ATTACHMENTS on a draft. `+draft` builds a single-part text
 # (or --html) message; it takes no attachment flag. gws's own attachment
@@ -371,7 +371,7 @@ node /opt/psd-skills/psd-workspace/run.js \
 # use the agent identity; the trusted broker rejects them on the human slot.
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net --scope agent \
-  --command "chat +send --space spaces/XXXX --text-file /tmp/chatmsg.txt"
+  --command "chat +send --space spaces/XXXX --text-file /home/node/.openclaw/work/chatmsg.txt"
 ```
 
 Rules: the path must be absolute; use the file form OR the inline flag, never

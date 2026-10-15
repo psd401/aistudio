@@ -12,10 +12,11 @@ Usage (exactly one input source):
     python3 convert.py --s3-key inbox/report.pdf          # workspace bucket
     python3 convert.py --path  /home/node/workspace/report.pdf
   optional:
-    --out /tmp/report.md         # default: /tmp/<stem>.md
+    --out WORK/report.md         # default: WORK/<stem>.md, where WORK is
+                                 # /home/node/.openclaw/work (see WORK_DIR)
     --pages "0,5-10"             # 0-based page selection
     --user name@psd401.net       # REQUIRED with --s3-key (scopes access to your own prefix)
-    --extract-images /tmp/imgs   # write embedded images as PNGs and KEEP their
+    --extract-images WORK/imgs   # write embedded images as PNGs and KEEP their
                                  # ![](path) references in the Markdown
 
 Output: a single JSON object on stdout. For small results the full Markdown is
@@ -51,6 +52,15 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Durable scratch directory (#1895). The default output used to be /tmp, which
+# is NOT part of the agent workspace: it is never synced and each turn may land
+# on a fresh container, so a conversion the agent planned to publish "next
+# turn" was already gone. Everything under /home/node/.openclaw/ round-trips
+# through workspace_sync, so a converted document written there survives.
+# PSD_WORK_DIR exists only so the suite can point this somewhere writable.
+WORK_DIR = Path(
+    os.environ.get("PSD_WORK_DIR") or "/home/node/.openclaw/work"
+)
 # Inline the full Markdown in the JSON result when it is at or below this size;
 # above it, return only a preview + the output_path so a large PDF cannot blow
 # up the agent's context in one shot.
@@ -421,7 +431,7 @@ def _rerun_command_with_rasterize(args) -> str:
         source = f'--path "{args.path}"'
     return (
         "python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py "
-        f"{source} --rasterize-pages /tmp/pdf-pages"
+        f"{source} --rasterize-pages {WORK_DIR / 'pdf-pages'}"
     )
 
 
@@ -499,7 +509,10 @@ def main():
     src.add_argument("--url", help="Public http(s) URL of the PDF")
     src.add_argument("--s3-key", dest="s3_key", help="Key in the workspace S3 bucket")
     src.add_argument("--path", help="Path to a PDF already in the container/workspace")
-    parser.add_argument("--out", help="Output .md path (default: /tmp/<stem>.md)")
+    parser.add_argument(
+        "--out",
+        help=f"Output .md path (default: {WORK_DIR}/<stem>.md)",
+    )
     parser.add_argument("--pages", help='0-based page selection, e.g. "0,5-10"')
     parser.add_argument("--user", help="Caller email; REQUIRED with --s3-key (scopes S3 access to your own public-images/<email>/ prefix)")
     parser.add_argument(
@@ -627,7 +640,9 @@ def main():
         if dropped:
             markdown = drop_image_references(markdown, dropped)
 
-    out_path = Path(args.out).expanduser() if args.out else Path("/tmp") / f"{stem}.md"
+    out_path = (
+        Path(args.out).expanduser() if args.out else WORK_DIR / f"{stem}.md"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(markdown, encoding="utf-8")
 

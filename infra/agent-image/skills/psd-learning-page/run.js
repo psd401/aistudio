@@ -18,7 +18,7 @@
  *   publish → psd-atrium            (create-artifact + publish --destination intranet)
  *
  * Usage (dry-run — assemble locally, no Atrium):
- *   node run.js --user <email> --source-file <md> --title "T" --dry-run --out /tmp/lp.html
+ *   node run.js --user <email> --source-file <md> --title "T" --dry-run --out /home/node/.openclaw/work/lp.html
  *
  * Usage (full pipeline — generate media + publish to Atrium):
  *   node run.js --user <email> --pdf-url <https> --title "T"

@@ -11,7 +11,7 @@ You generated a file. The user needs it. **Run the command with no `--to` flag
 and it goes to their Drive, privately. That is almost always what you want.**
 
 ```bash
-node /opt/psd-skills/psd-publish-file/publish.js --file /tmp/<name>.pptx
+node /opt/psd-skills/psd-publish-file/publish.js --file /home/node/.openclaw/work/<name>.pptx
 ```
 
 Returns JSON:
@@ -100,7 +100,7 @@ will tell you so if you try.
 ## The public link, if you use one
 
 ```bash
-node /opt/psd-skills/psd-publish-file/publish.js --file /tmp/flyer.pdf --to public
+node /opt/psd-skills/psd-publish-file/publish.js --file /home/node/.openclaw/work/flyer.pdf --to public
 ```
 
 Say this out loud in your reply when you use it, because both halves matter:

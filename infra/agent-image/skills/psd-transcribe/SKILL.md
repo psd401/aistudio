@@ -10,7 +10,7 @@ allowed-tools: Bash(node:*)
 Speech in a file, text out.
 
 ```bash
-node /opt/psd-skills/psd-transcribe/transcribe.js --file /tmp/recording.m4a
+node /opt/psd-skills/psd-transcribe/transcribe.js --file /home/node/.openclaw/work/recording.m4a
 ```
 
 Returns JSON with the transcript inline:
@@ -20,8 +20,9 @@ Returns JSON with the transcript inline:
   "truncated": false, "language": "en-US" }
 ```
 
-Add `--out /tmp/transcript.txt` to also write it to a file — useful when the
-next step is turning it into a document rather than reading it in chat.
+Add `--out /home/node/.openclaw/work/transcript.txt` to also write it to a file
+— useful when the next step is turning it into a document rather than reading it
+in chat.
 
 ## Accepted formats
 
@@ -30,8 +31,8 @@ next step is turning it into a document rather than reading it in chat.
 Anything else — `.aiff`, `.wma`, an odd container — convert first:
 
 ```bash
-node /opt/psd-skills/psd-media/media.js --convert --file /tmp/odd.aiff \
-  --out /tmp/audio.mp3 --preset audio-mp3
+node /opt/psd-skills/psd-media/media.js --convert --file /home/node/.openclaw/work/odd.aiff \
+  --out /home/node/.openclaw/work/audio.mp3 --preset audio-mp3
 ```
 
 Video works directly; there is no need to strip the audio yourself.

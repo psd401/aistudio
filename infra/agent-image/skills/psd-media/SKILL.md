@@ -11,11 +11,11 @@ Answer "will this video work?" and "convert it so it does".
 
 ```bash
 # What IS this file?
-node /opt/psd-skills/psd-media/media.js --probe --file /tmp/clip.mov
+node /opt/psd-skills/psd-media/media.js --probe --file /home/node/.openclaw/work/clip.mov
 
 # Make it work for Facebook / Instagram / YouTube
-node /opt/psd-skills/psd-media/media.js --convert --file /tmp/clip.mov \
-  --out /tmp/clip.mp4 --preset social-mp4
+node /opt/psd-skills/psd-media/media.js --convert --file /home/node/.openclaw/work/clip.mov \
+  --out /home/node/.openclaw/work/clip.mp4 --preset social-mp4
 ```
 
 ## Probe first when the question is "will this work"
@@ -27,7 +27,7 @@ whether an uploader will accept it.
 
 ```json
 {
-  "action": "probe", "file": "/tmp/clip.mov", "bytes": 3559763,
+  "action": "probe", "file": "/home/node/.openclaw/work/clip.mov", "bytes": 3559763,
   "durationSeconds": 2.0, "formatName": "mov,mp4,m4a",
   "video": { "codec": "prores", "width": 640, "height": 480, "fps": 30, "pixelFormat": "yuv422p10le" },
   "audio": { "codec": "pcm_s16le", "channels": 1, "sampleRate": 44100 }

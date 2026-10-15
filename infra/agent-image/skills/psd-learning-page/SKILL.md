@@ -30,7 +30,7 @@ complete + playable offline):
 
     node /opt/psd-skills/psd-learning-page/run.js \
       --user <email> --source-file <doc.md> --title "Student Technology" \
-      --dry-run --out /tmp/lp.html
+      --dry-run --out /home/node/.openclaw/work/lp.html
 
 Full pipeline (generate real media, then publish to Atrium `intranet`):
 

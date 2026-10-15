@@ -82,7 +82,7 @@ preserved:
 node /opt/psd-skills/psd-workflows/run.js call \
   --tool <submit-tool-name> \
   --user <caller-email> \
-  --json-file /tmp/workflow-payload.json
+  --json-file /home/node/.openclaw/work/workflow-payload.json
 ```
 
 The broker derives the verified caller from the signed invocation context and
