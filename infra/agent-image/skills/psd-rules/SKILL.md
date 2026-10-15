@@ -346,20 +346,21 @@ a differently-broken file, so the loop can repeat for many turns.
 
    It judges the file **line by line**, so a file whose header lines are fine
    and whose body collapsed onto one line is repaired — only the collapsed
-   lines are touched, and an escape inside a string, comment or regex literal
-   is left as it is. It also drops the stray backslashes from `\"` and `\'`
-   on the lines it repairs. It repairs `.py`, `.js`/`.ts` and `.json` only.
+   lines are touched, and an escape inside a string literal or a comment is
+   left as it is. It also drops the stray backslashes from `\"` and `\'` on
+   the lines it repairs. It repairs `.py`, `.js`/`.ts` and `.json` only.
 
    - `repaired` — it names the lines it changed. **Run it. Do not rewrite
      it.** If it still fails, the escapes were not the only problem; debug
      the error you now get.
    - `clean` — no collapsed line. The escapes are legitimate, so stop
      looking at them and debug the actual error.
-   - `ambiguous` (exit 2) — it names the lines it would not touch: they look
-     collapsed but too few of their escapes sit outside a string, comment or
-     regex literal to be sure. The file is untouched. Do not re-run it hoping
-     for a different answer and do not rewrite the file — debug the error, or
-     ask the user if you are stuck.
+   - `ambiguous` (exit 2) — not sure, so the file is untouched: either the
+     named lines' escapes sit inside string literals, or a `.js`/`.ts` file
+     uses a slash it cannot classify (a regex literal and a division look
+     alike without a real JS lexer). Do not re-run it hoping for a different
+     answer and do not rewrite the file — debug the error, or ask the user if
+     you are stuck.
    - `unsupported` (exit 2) — some other extension (`.sh`, `.sql`, `.md`).
      The file is untouched; in those languages a literal `\n` cannot be told
      apart from prose. Fix it by hand, or move the logic into a `.py` file.

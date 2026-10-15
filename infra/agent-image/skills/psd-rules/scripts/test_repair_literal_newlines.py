@@ -116,11 +116,13 @@ HEALTHY_JS_MULTILINE = (
     "console.log(TEMPLATE);\n"
 )
 
-# Healthy JS whose escapes are inside regex literals, where a backslash is
-# ordinary. `.replace(/\n/g, ...)` must not read as a collapsed line.
+# Healthy JS using regex literals. Telling a regex from a division needs a
+# real lexer — `/[/\n]/` ends its character class with the character that
+# would close the literal — and guessing got this exact file rewritten. The
+# scan now refuses instead, so the file must come back untouched.
 HEALTHY_JS_REGEX = (
-    "const squashed = text.replace(/\\n/g, \" \").replace(/\\n\\n/g, "
-    '"\\u00b6").trim();\n'
+    "const cls = /[/\\n]/.test(a) || /[/\\n]/.test(b) || "
+    "/[/\\n]/.test(c) || false;\n"
 )
 
 # A genuinely collapsed JS file: the escapes are in code position, where a
@@ -198,8 +200,9 @@ class Diagnose(unittest.TestCase):
         self.assertEqual(
             rln.diagnose(HEALTHY_JS_MULTILINE, "t.ts")[0], "clean")
 
-    def test_js_escapes_inside_regex_literals_are_left_alone(self):
-        self.assertEqual(rln.diagnose(HEALTHY_JS_REGEX, "r.js")[0], "clean")
+    def test_a_js_file_using_a_regex_literal_is_refused_not_guessed(self):
+        self.assertEqual(
+            rln.diagnose(HEALTHY_JS_REGEX, "r.js")[0], "ambiguous")
 
     def test_collapsed_js_is_broken(self):
         verdict, _real, _literal, lines = rln.diagnose(COLLAPSED_JS, "b.js")
@@ -482,8 +485,9 @@ class Languages(unittest.TestCase):
 
     def test_a_healthy_js_regex_file_is_left_identical(self):
         proc, content = self.run_on(HEALTHY_JS_REGEX, ".js")
-        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(proc.returncode, 2)
         self.assertEqual(content, HEALTHY_JS_REGEX)
+        self.assertIn("regex", proc.stderr)
 
     def test_a_collapsed_js_file_is_repaired(self):
         proc, content = self.run_on(COLLAPSED_JS, ".js")

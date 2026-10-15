@@ -30,8 +30,8 @@ and it tests that signature LINE BY LINE:
     MIN_ESCAPES_PER_LINE literal `\n` escapes and is longer than
     MIN_COLLAPSED_LINE_LENGTH characters;
   * it is repaired only when at least that many of those escapes are
-    EVIDENCE — outside every string literal, comment and regex literal, where
-    a backslash cannot appear in working code;
+    EVIDENCE — in code position, outside every string literal and comment,
+    where a backslash cannot appear in working code;
   * an escape that is not evidence is never touched, even on a line that is
     repaired for its other escapes, so `SEP = "a\nb"` survives the repair of
     the line it shares.
@@ -61,8 +61,9 @@ Each language earns its own evidence test, because only some can be verified:
     not be judged a line at a time: a line inside a template literal or a
     `/* */` block opened earlier carries no quote of its own and would look
     exactly like a collapsed body. It is scanned as ONE STREAM across the
-    whole file (see _javascript_records), and if that scan ends mid-template
-    or mid-comment the file is reported ambiguous rather than guessed at.
+    whole file (see _javascript_records), and if that scan cannot be trusted
+    — it ends mid-template, or meets a slash that may open a regex literal —
+    the file is reported ambiguous rather than guessed at.
 
 A candidate line without enough evidence is reported ambiguous (exit 2) and
 left byte-identical.
@@ -120,10 +121,6 @@ _UNESCAPE = {
     '"': '"',
     "'": "'",
 }
-
-# A `/` that follows one of these is division, not the start of a regex.
-_NOT_BEFORE_REGEX = ")]}"
-
 
 def language_for(path):
     """Language name from the file extension, or None when unsupported."""
@@ -198,43 +195,45 @@ def _javascript_records(text):
     """Escapes in a whole JS/TS file, keyed by 1-based line number, or None.
 
     One stream over the file, because the constructs that make a `\\n`
-    legitimate span lines: template literals and `/* */` blocks. Returns None
-    when the stream ends inside one of those, since the classification cannot
-    then be trusted.
+    legitimate span lines: template literals and `/* */` blocks. A line inside
+    one of those carries no quote of its own, so a line-at-a-time scan would
+    read it as a collapsed body.
+
+    Returns None — meaning "do not repair this file" — when the stream cannot
+    be trusted: it ends inside a template or a block comment, or it meets a
+    `/` in code position that is neither `//` nor `/*`. That slash may open a
+    regex literal, where a backslash is ordinary, and telling a regex from a
+    division needs a real JS lexer: `/[/\\n]/` closes its character class with
+    the very character that would end the literal, and `return /\\n/.test(s)`
+    is a regex straight after an identifier character. Guessing got a valid
+    file rewritten, so an unclassifiable slash ends the scan instead.
     """
     records = {}
     row = 1
     column = 0
     state = "code"
+    quote = ""
     index = 0
     length = len(text)
-    previous = ""
 
     while index < length:
         char = text[index]
 
         if char == "\n":
-            if state in ("string", "regex", "line-comment"):
-                # None of these may span a real line break, so a newline ends
-                # them whatever happened on the way.
+            if state in ("string", "line-comment"):
+                # Neither may span a real line break, so a newline ends them
+                # whatever happened on the way.
                 state = "code"
             row += 1
             column = 0
             index += 1
-            previous = ""
             continue
 
         if char == "\\" and index + 1 < length and text[index + 1] != "\n":
-            nxt = text[index + 1]
-            if nxt == "\\":
-                index += 2
-                column += 2
-                previous = "\\"
-                continue
-            records.setdefault(row, []).append([column, nxt, state == "code"])
+            records.setdefault(row, []).append(
+                [column, text[index + 1], state == "code"])
             index += 2
             column += 2
-            previous = nxt
             continue
 
         if state == "code":
@@ -242,15 +241,15 @@ def _javascript_records(text):
                 state, quote = "string", char
             elif char == "`":
                 state, quote = "template", char
-            elif char == "/" and index + 1 < length and text[index + 1] == "/":
-                state = "line-comment"
-            elif char == "/" and index + 1 < length and text[index + 1] == "*":
-                state = "block-comment"
-            elif char == "/" and not (
-                previous.isalnum() or previous in "_$" + _NOT_BEFORE_REGEX
-            ):
-                state, quote = "regex", "/"
-        elif state in ("string", "template", "regex"):
+            elif char == "/":
+                nxt = text[index + 1] if index + 1 < length else ""
+                if nxt == "/":
+                    state = "line-comment"
+                elif nxt == "*":
+                    state = "block-comment"
+                else:
+                    return None
+        elif state in ("string", "template"):
             if char == quote:
                 state = "code"
         elif state == "block-comment":
@@ -258,11 +257,8 @@ def _javascript_records(text):
                 state = "code"
                 index += 2
                 column += 2
-                previous = "/"
                 continue
 
-        if not char.isspace():
-            previous = char
         index += 1
         column += 1
 
@@ -285,8 +281,8 @@ def repair(text, language=PYTHON):
     r"""Un-escape the mangled sequences that are evidence of a collapse.
 
     `\n` and `\t` become real whitespace; `\"` and `\'` lose their backslash.
-    An escape inside a string, comment or regex literal is left exactly as it
-    was, as is `\\n`.
+    An escape inside a string literal or a comment is left exactly as it was,
+    as is `\\n`.
     """
     records = escape_records(text, language)
     if records is None:
@@ -570,15 +566,16 @@ def main() -> int:
                 f"ambiguous: {args.path} has {real_lines} real lines and "
                 f"{literal} literal escapes; line(s) {_describe(lines)} look "
                 f"collapsed but fewer than {MIN_ESCAPES_PER_LINE} of their "
-                "escapes sit outside a string, comment or regex literal, so "
-                "the file was NOT modified. Look elsewhere for the cause.",
+                "escapes sit outside a string literal, so the file was NOT "
+                "modified. Look elsewhere for the cause.",
                 file=sys.stderr,
             )
         else:
             print(
                 f"ambiguous: {args.path} could not be scanned reliably — it "
-                "ends inside a template literal or a /* */ comment, so the "
-                "file was NOT modified.",
+                "ends inside a template literal or a /* */ comment, or it "
+                "uses a slash that may open a regex literal, so the file was "
+                "NOT modified.",
                 file=sys.stderr,
             )
         return 2
