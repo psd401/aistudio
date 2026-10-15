@@ -337,7 +337,9 @@ describe("MCP repositories_add_item (#1907)", () => {
     // `completed` at this point can only be the legacy path (content dual-write
     // off). Its chunk's `search_vector` is a GENERATED column and retrieval v2's
     // legacy-compatibility candidates (on by default for repositories_search)
-    // match it by keyword at once; only the embedding is backfilled later. No
+    // match it by keyword at once. Nothing ever embeds it (no canonical
+    // generation for embedding-recovery or dense retrieval to reach), so it is
+    // keyword-only, and the note must not promise semantic search later. No
     // background ingestion is in flight, so "processing" would be a misreport.
     mockCreateRepositoryTextItem.mockResolvedValue({
       ...item,
@@ -351,7 +353,8 @@ describe("MCP repositories_add_item (#1907)", () => {
 
     expect(payload(result).ingestion).toBe("completed")
     expect(payload(result).searchable).toBe("keyword")
-    expect(payload(result).note).toContain("by keyword match")
+    expect(payload(result).note).toContain("by keyword match only")
+    expect(payload(result).note).not.toMatch(/backfill|start once/i)
   })
 
   it("tells the agent to RETRY, not poll, when ingestion already failed", async () => {

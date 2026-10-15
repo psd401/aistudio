@@ -26,7 +26,11 @@ The two write paths differ, and `processingStatus` describes neither correctly:
   (`lib/repositories/retrieval-v2/service.ts`) matches legacy chunks on the GENERATED
   `search_vector` column with no embedding requirement, in every mode, and
   `repositories_search` leaves `includeLegacyCompatibility` at its default (on). So the
-  item is keyword-searchable at once; semantic matches wait for embedding-recovery.
+  item is keyword-searchable at once. It is NOT semantically searchable later either:
+  embedding-recovery (`content-platform/embedding-recovery.ts`) only claims chunks of a
+  canonical generation and dense retrieval only reads active canonical generations, so
+  a legacy chunk stays keyword-only until canonical ingestion. (Codex caught both this
+  and the original "never searchable" claim on PR #1931.)
 
 A first fix reported `searchable: false` on both paths; Codex caught the legacy case
 (PR #1931). The shipped contract is `searchable: "no" | "keyword"` with

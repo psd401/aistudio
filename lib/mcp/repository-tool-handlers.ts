@@ -352,8 +352,11 @@ async function handleRepositoriesAddItem(
   //     immediately and the chunk's `search_vector` is a GENERATED column, so
   //     retrieval v2's legacy-compatibility candidates (on by default for
   //     `repositories_search`, every mode) match it by keyword at once. Its
-  //     embedding is NULL until embedding-recovery backfills it, so meaning-
-  //     based matches come later → "keyword".
+  //     embedding stays NULL: with no canonical version/generation, neither
+  //     embedding-recovery (claims generation chunks only) nor dense
+  //     retrieval (active canonical generations only) ever reaches it, so it
+  //     is keyword-only until the repository moves to canonical ingestion
+  //     → "keyword".
   const failed = item.processingStatus === "failed"
   const legacyCompleted = item.processingStatus === "completed"
   return ok({
@@ -371,7 +374,7 @@ async function handleRepositoriesAddItem(
     note: failed
       ? "Ingestion FAILED — the item row exists but nothing is processing it. Do NOT wait or poll: retry the item from Repository Manager, or add it again."
       : legacyCompleted
-        ? "Item stored. repositories_search can already find it by keyword match; meaning-based (semantic) matches start once its embedding is backfilled in the background."
+        ? "Item stored. repositories_search can find it by keyword match only; meaning-based (semantic) search does not cover it on this deployment until the repository moves to canonical ingestion."
         : "Item accepted. It is NOT searchable yet — ingestion and embedding run asynchronously, and no MCP tool reports a single item's processingStatus. Tell the user it is processing; confirm it is live by finding it with repositories_search (or in Repository Manager) before relying on it.",
   })
 }

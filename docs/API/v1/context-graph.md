@@ -631,8 +631,9 @@ On the canonical path the item is `processing` and `searchable: "no"` — no
 generation or embedding exists yet. On the legacy path (content dual-write off)
 the item is `completed` and `searchable: "keyword"`: the chunk's generated
 `search_vector` is matched at once by retrieval v2's legacy-compatibility
-candidates (on by default for `repositories_search`), while its NULL `embedding`
-waits for embedding-recovery, so semantic matches come later. No MCP tool
+candidates (on by default for `repositories_search`). Its `embedding` stays NULL —
+embedding-recovery and dense retrieval only cover canonical generations — so it
+is keyword-only until the repository moves to canonical ingestion. No MCP tool
 reports a single item's status afterwards; confirm with `repositories_search`.
 `ingestion: "failed"` means canonical registration
 already failed and nothing is in flight — the caller should retry the item, not
