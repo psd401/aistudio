@@ -13,6 +13,14 @@
  * secrets are kept deliberately (Kris, 2026-10-12): deleting one would force
  * a working user back through the consent link.
  *
+ * "Expired" is inferred from the secret's `LastChangedDate`, which holds only
+ * because an active user re-mirrors their token on every Node-side sign-in —
+ * and the 24h session max age (`DEFAULT_SESSION_MAX_AGE_SECONDS` in `auth.ts`)
+ * forces one daily. Edge middleware refreshes never mirror. If `SESSION_MAX_AGE`
+ * is ever raised past the pool's refresh validity, revisit this heuristic.
+ * Each secret's timestamp is also re-read right before its delete, so one
+ * rotated after the list was taken is kept.
+ *
  * Deletion uses `ForceDeleteWithoutRecovery: true` on purpose:
  *   - A secret sitting in a recovery window makes `CreateSecret` fail with
  *     `InvalidRequestException` ("The secret is scheduled for deletion"), which
@@ -38,6 +46,7 @@ import {
   SecretsManagerClient,
   ListSecretsCommand,
   DeleteSecretCommand,
+  DescribeSecretCommand,
   ResourceNotFoundException,
   type SecretListEntry,
 } from "@aws-sdk/client-secrets-manager"
@@ -67,9 +76,10 @@ const SUFFIX = "/cognito-refresh"
 
 /**
  * True for `psd-agent-creds/{ENV}/user/{email}/cognito-refresh` and nothing
- * else. The `name` ListSecrets filter is a prefix match, so the suffix and the
- * "exactly one path segment between" check are enforced here — otherwise a
- * future `.../user/{email}/sub/path/cognito-refresh` slot would be swept too.
+ * else. The `name` ListSecrets filter is not an anchored prefix match, so the
+ * prefix, the suffix and the "exactly one path segment between" check are all
+ * enforced here — otherwise a future `.../user/{email}/sub/path/cognito-refresh`
+ * slot (or any name merely containing the prefix) would be swept too.
  */
 function isUserCognitoRefreshSecret(name: string | undefined): name is string {
   if (!name) return false
@@ -79,7 +89,9 @@ function isUserCognitoRefreshSecret(name: string | undefined): name is string {
 }
 
 /** Last time the secret VALUE changed, which is when the token was minted. */
-function lastWrite(secret: SecretListEntry): Date | null {
+function lastWrite(
+  secret: Pick<SecretListEntry, "LastChangedDate" | "CreatedDate">,
+): Date | null {
   return secret.LastChangedDate ?? secret.CreatedDate ?? null
 }
 
@@ -102,6 +114,55 @@ async function listCandidates(
     nextToken = page.NextToken
   } while (nextToken)
   return out
+}
+
+type DeleteOutcome = "deleted" | "notFound" | "refreshed"
+
+/**
+ * Delete one secret, re-checking its timestamp first. The candidate list is a
+ * snapshot; a large run takes minutes, and a user who signs in or completes
+ * consent meanwhile rotates their secret. Re-reading right before the
+ * irreversible delete means a freshly written token is never destroyed on
+ * stale data.
+ */
+async function deleteIfStillExpired(
+  sm: SecretsManagerClient,
+  secretId: string | undefined,
+  cutoff: Date,
+): Promise<DeleteOutcome> {
+  try {
+    const current = await sm.send(new DescribeSecretCommand({ SecretId: secretId }))
+    const written = lastWrite(current)
+    if (!written || written >= cutoff) return "refreshed"
+    await sm.send(
+      new DeleteSecretCommand({ SecretId: secretId, ForceDeleteWithoutRecovery: true }),
+    )
+    return "deleted"
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) return "notFound"
+    throw err
+  }
+}
+
+async function deleteExpired(
+  sm: SecretsManagerClient,
+  expired: SecretListEntry[],
+  cutoff: Date,
+) {
+  const counts = { deleted: 0, notFound: 0, refreshed: 0, failed: 0 }
+  for (const [index, secret] of expired.entries()) {
+    try {
+      counts[await deleteIfStillExpired(sm, secret.ARN ?? secret.Name, cutoff)]++
+    } catch (err) {
+      counts.failed++
+      // Name is intentionally omitted in --apply mode; the ARN suffix is
+      // enough to find the row in CloudTrail without printing the email.
+      console.error(
+        `  FAILED to delete secret ${index + 1} of ${expired.length}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+  }
+  return counts
 }
 
 async function main() {
@@ -145,35 +206,14 @@ async function main() {
     return
   }
 
-  let deleted = 0
-  let notFound = 0
-  let failed = 0
-
-  for (const secret of expired) {
-    try {
-      await sm.send(
-        new DeleteSecretCommand({
-          SecretId: secret.ARN ?? secret.Name,
-          ForceDeleteWithoutRecovery: true,
-        }),
-      )
-      deleted++
-    } catch (err) {
-      if (err instanceof ResourceNotFoundException) {
-        notFound++
-      } else {
-        failed++
-        // Name is intentionally omitted in --apply mode; the ARN suffix is
-        // enough to find the row in CloudTrail without printing the email.
-        console.error(
-          `  FAILED to delete secret ${deleted + notFound + failed} of ${expired.length}: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
-  }
+  const { deleted, notFound, refreshed, failed } = await deleteExpired(
+    sm,
+    expired,
+    cutoff,
+  )
 
   console.log(
-    `[purge-cognito-refresh] done — deleted=${deleted} alreadyGone=${notFound} failed=${failed}`,
+    `[purge-cognito-refresh] done — deleted=${deleted} alreadyGone=${notFound} rewrittenSinceList=${refreshed} failed=${failed}`,
   )
   if (failed > 0) process.exitCode = 1
 }

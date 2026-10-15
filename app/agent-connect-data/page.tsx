@@ -78,8 +78,7 @@ async function processConsent(token: string | undefined, selfPath: string): Prom
   }
 
   // The session callback exposes the Cognito refresh token (auth.ts:323).
-  const sessionWithToken = session as typeof session & { refreshToken?: string }
-  const refreshToken = sessionWithToken.refreshToken
+  const refreshToken = session.refreshToken
   if (!refreshToken || typeof refreshToken !== "string") {
     return { status: "no-refresh-token", ownerEmail: payload.sub }
   }

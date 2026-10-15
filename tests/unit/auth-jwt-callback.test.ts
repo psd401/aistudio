@@ -62,6 +62,13 @@ function runJwt(input: Record<string, unknown>) {
   } as never)
 }
 
+/** The sign-in sync is fire-and-forget behind a dynamic import. */
+async function waitForSyncCall() {
+  for (let i = 0; i < 50 && syncCognitoRefreshMock.mock.calls.length === 0; i++) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
 describe("auth JWT lifecycle", () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -107,6 +114,10 @@ describe("auth JWT lifecycle", () => {
       expiresAt: expiresAt * 1000,
       tokenLifetimeMs: 3_600_000,
     })
+    // #1902: sign-in is update-only — it must never ask for the secret to be
+    // created. Exactly two args means no `{ createIfMissing }` options.
+    await waitForSyncCall()
+    expect(syncCognitoRefreshMock.mock.calls[0]).toEqual(["user@example.com", "refresh-1"])
   })
 
   it("refreshes an existing token while preserving its lifetime metadata", async () => {
@@ -136,6 +147,8 @@ describe("auth JWT lifecycle", () => {
       refreshToken: "refresh-2",
       tokenLifetimeMs: 3_600_000,
     })
+    await waitForSyncCall()
+    expect(syncCognitoRefreshMock.mock.calls[0]).toEqual(["user@example.com", "refresh-2"])
   })
 
   it("forces reauthentication when refresh is required but unavailable", async () => {

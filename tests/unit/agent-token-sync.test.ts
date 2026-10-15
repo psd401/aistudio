@@ -122,6 +122,35 @@ describe("syncCognitoRefreshForAgent", () => {
     ])
   })
 
+  it("falls back to PutSecretValue when a concurrent create wins the race", async () => {
+    let puts = 0
+    mockSecretsSend.mockImplementation((rawCommand: MockCommand) => {
+      if (rawCommand.command === "put") {
+        puts++
+        return puts === 1
+          ? Promise.reject(new MockResourceNotFoundException())
+          : Promise.resolve({ ARN })
+      }
+      const exists = new Error("A secret with this name already exists.")
+      exists.name = "ResourceExistsException"
+      return Promise.reject(exists)
+    })
+
+    await expect(
+      syncCognitoRefreshForAgent(OWNER_EMAIL, "refresh-token-4", {
+        createIfMissing: true,
+      }),
+    ).resolves.toBe(ARN)
+
+    expect(commandsOfType("create")).toHaveLength(1)
+    const retried = commandsOfType("put")
+    expect(retried).toHaveLength(2)
+    expect(retried[1].input.SecretId).toBe(cognitoRefreshSecretId(OWNER_EMAIL))
+    expect(JSON.parse(retried[1].input.SecretString ?? "{}")).toMatchObject({
+      refresh_token: "refresh-token-4",
+    })
+  })
+
   it("returns null and writes nothing when no refresh token is supplied", async () => {
     await expect(syncCognitoRefreshForAgent(OWNER_EMAIL, "")).resolves.toBeNull()
     expect(mockSecretsSend).not.toHaveBeenCalled()
