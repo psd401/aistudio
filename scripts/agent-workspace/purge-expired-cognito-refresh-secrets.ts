@@ -30,9 +30,9 @@
  *   - Restoring would only bring back an already-expired token.
  *
  * SAFETY: dry-run by default — prints the plan and touches nothing. Pass
- * `--apply` to actually delete. Neither mode prints an email or any part of
- * one: dry run lists each secret by a short SHA-256 of its email (compute
- * the same hash to check a specific user), `--apply` prints counts only.
+ * `--apply` to actually delete. Neither mode prints anything derived from a
+ * user's email: dry run lists each secret by the random 6-character suffix
+ * AWS appends to its ARN, `--apply` prints counts only.
  *
  * Run (Kris runs this himself — do NOT run it automatically; dev first):
  *   ENVIRONMENT=dev  AWS_REGION=us-east-1 bunx tsx scripts/agent-workspace/purge-expired-cognito-refresh-secrets.ts
@@ -44,7 +44,6 @@
  *                         validity + 1 day margin)
  */
 
-import { createHash } from "node:crypto"
 import {
   SecretsManagerClient,
   ListSecretsCommand,
@@ -92,15 +91,12 @@ function isUserCognitoRefreshSecret(name: string | undefined): name is string {
 }
 
 /**
- * Short, stable stand-in for a secret's email so a dry run against prod
- * prints no part of any address (a domain plus an initial can identify a
- * student). Check one user with:
- *   printf %s user@domain | shasum -a 256 | cut -c1-12
+ * The random suffix AWS appends to a secret's ARN (`...cognito-refresh-AbC123`).
+ * It is not derived from the email, so a dry run against prod prints nothing
+ * that links back to a user.
  */
-function secretLabel(name: string | undefined): string {
-  if (!name) return "(unnamed)"
-  const email = name.slice(PREFIX.length, name.length - SUFFIX.length)
-  return `user#${createHash("sha256").update(email).digest("hex").slice(0, 12)}`
+function secretLabel(arn: string | undefined): string {
+  return arn ? `secret …${arn.slice(-6)}` : "(no ARN)"
 }
 
 /** Last time the secret VALUE changed, which is when the token was minted. */
@@ -212,7 +208,7 @@ async function main() {
   if (!APPLY) {
     for (const secret of expired) {
       console.log(
-        `  DRY-RUN would delete ${secretLabel(secret.Name)} (last written ${lastWrite(secret)?.toISOString()})`,
+        `  DRY-RUN would delete ${secretLabel(secret.ARN)} (last written ${lastWrite(secret)?.toISOString()})`,
       )
     }
     console.log(
