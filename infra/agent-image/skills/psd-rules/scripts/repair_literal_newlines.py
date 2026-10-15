@@ -34,7 +34,16 @@ and it tests that signature LINE BY LINE:
     where a backslash cannot appear in working code;
   * an escape that is not evidence is never touched, even on a line that is
     repaired for its other escapes, so `SEP = "a\nb"` survives the repair of
-    the line it shares.
+    the line it shares;
+  * a candidate line that mixes evidence with escapes inside a `//` comment is
+    refused outright, because a line comment can only be read as running to
+    the end of the line: repairing the breaks before it would leave every
+    statement after it commented out.
+
+Double-escaping escapes the delimiters as well as the breaks, so a line may
+arrive as `SEP = \"alpha\nbravo\"`. When a line carries no bare quote at
+all those escaped quotes are the real delimiters: they move the string state,
+both ends are un-escaped, and the escapes between them are the string's data.
 
 Line-by-line matters because the real-world shape is usually PARTIAL collapse:
 a few correct header lines followed by a body collapsed onto one line. The
@@ -348,7 +357,10 @@ def _javascript_records(text):
 
 
 def escape_records(text, language):
-    """``{line_number: [[index, char_after, is_evidence]]}``, or None."""
+    """``{line_number: [[index, char, is_evidence, in_line_comment]]}``.
+
+    None when the file cannot be scanned reliably (JS/TS only).
+    """
     if language == JAVASCRIPT:
         return _javascript_records(text)
     return {
@@ -430,7 +442,7 @@ def parses_cleanly(text, language):
 
 
 def python_string_spans(text):
-    """String-literal regions of a parsing Python file, per the tokeniser.
+    """String-literal regions of a Python file, per the tokeniser.
 
     ``{line_number: [(start_col, end_col)]}``. Only the tokeniser can see that
     a line sits inside a triple-quoted string, because the opening quote is on
