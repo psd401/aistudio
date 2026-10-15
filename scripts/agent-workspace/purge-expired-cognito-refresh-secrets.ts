@@ -99,6 +99,15 @@ function secretLabel(arn: string | undefined): string {
   return arn ? `secret …${arn.slice(-6)}` : "(no ARN)"
 }
 
+/**
+ * Error text with any email removed. AWS messages (e.g. AccessDenied) quote
+ * the resource ARN, and these secret names embed the user's email.
+ */
+function errorText(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err)
+  return text.replace(/[^\s/:@]+@[^\s/:@]+/g, "<email>")
+}
+
 /** Last time the secret VALUE changed, which is when the token was minted. */
 function lastWrite(
   secret: Pick<SecretListEntry, "LastChangedDate" | "CreatedDate">,
@@ -166,10 +175,11 @@ async function deleteExpired(
       counts[await deleteIfStillExpired(sm, secret.ARN ?? secret.Name, cutoff)]++
     } catch (err) {
       counts.failed++
-      // Name is intentionally omitted in --apply mode; the ARN suffix is
-      // enough to find the row in CloudTrail without printing the email.
+      // The ARN suffix is enough to find the row in CloudTrail without
+      // printing the email; the AWS message is scrubbed because IAM errors
+      // echo the full resource ARN, which contains it.
       console.error(
-        `  FAILED to delete secret ${index + 1} of ${expired.length}: ${err instanceof Error ? err.message : String(err)}`,
+        `  FAILED to delete ${secretLabel(secret.ARN)} (${index + 1} of ${expired.length}): ${errorText(err)}`,
       )
     }
   }
@@ -232,7 +242,7 @@ async function main() {
 main().catch((err) => {
   console.error(
     "[purge-cognito-refresh] fatal:",
-    err instanceof Error ? err.message : String(err),
+    errorText(err),
   )
   process.exit(1)
 })
