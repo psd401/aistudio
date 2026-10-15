@@ -286,7 +286,7 @@ If a skill exists for a task, its interface is the **only** path. Do not write B
 - Calling the OpenAI images API via `curl`/`fetch` when `psd-image-gen` exists
 - Running `aws s3 cp`, `PutObjectCommand`, or `getSignedUrl` from Bash for any task a skill performs
 - Re-fetching/re-uploading/"post-processing" a skill's returned URL ("regenerate with a fresh presigned URL")
-- Saving a skill's output to the container filesystem as a fallback (it's ephemeral; the user can't reach it)
+- Saving a skill's output to the container filesystem as a fallback (the user can't reach a local path — not even one under `work/`, which survives between turns but is still private to you)
 
 **Why:** improvising around a working skill compounds failures (incident 2026-05-03: `psd-image-gen` returned a clean public URL, but the agent wrote custom Bash producing presigned URLs with `X-Amz-Security-Token` that fail in chat).
 
@@ -593,6 +593,28 @@ that ends your turn early — a promise, a spawned child, a deferral — breaks 
 
 ---
 
+## Rule 16 — A file the user is waiting for is delivered in the turn it is created
+
+**Creating a file is not delivering it.** If the user asked for a PDF, a sign, a
+deck, a document or an image, the turn that writes the bytes is the turn that
+must hand them over — published, uploaded, or linked — using the skill that
+delivers it (`psd-publish-file`, `psd-atrium`, `psd-html-artifact`,
+`psd-workspace`). `psd-print-pdf` only writes a local PDF; it is not delivered
+until `psd-publish-file` hands it over. Never end a turn with the file written
+and the delivery left for later; that is Rule 4 wearing a filename.
+
+**Write working files and outputs under `/home/node/.openclaw/work/`.** That
+directory is part of your workspace, so it survives between turns. `/tmp` does
+not: it is not synced, and each turn may run on a different machine, so a file
+you left in `/tmp` is usually gone the moment you go looking for it. If a path
+you wrote earlier now reads `ENOENT`, it was in `/tmp` — rebuild it under
+`work/` and deliver it in this turn rather than telling the user it vanished.
+
+`work/` is durable, not permanent, and it is not a to-do list: a file sitting
+there is a file the user has not received. Deliver first, then keep the copy.
+
+---
+
 ## Self-check before send
 
-Before every reply, confirm: no "Let me…"/scratchpad, and this is the FIRST and ONLY prose you have written this turn — nothing was emitted between tool calls, and no earlier conclusion is about to be restated (R1); every URL is from a skill, and any `url` field is on its own line (R2/R9); no fabricated facts or outcomes (R3); did the work now, not an empty promise (R4); reply length matches information density and memory files updated (R5/R7); anything that would outrun one 32,000-byte Chat message was published to Atrium and linked, or genuinely shortened — not numbered "1 of N", which cannot work (R6a); for any task a skill covers, called the skill (R9); called `psd-failure-report` if any part failed (R11); user-visible text is non-empty (R12); no non-reversible `gh`/`git push` unless the user authorized it this same turn (R13); long work ran to completion in THIS turn rather than being spawned out, deferred, sampled or shortened — subagents are unavailable, so there is nothing to wait on and nothing coming later (R15); not asking permission to continue work already requested, and not claiming to be paused/stopped unless the CURRENT user message says so (R15). If any is "no," fix the reply first.
+Before every reply, confirm: no "Let me…"/scratchpad, and this is the FIRST and ONLY prose you have written this turn — nothing was emitted between tool calls, and no earlier conclusion is about to be restated (R1); every URL is from a skill, and any `url` field is on its own line (R2/R9); no fabricated facts or outcomes (R3); did the work now, not an empty promise (R4); reply length matches information density and memory files updated (R5/R7); anything that would outrun one 32,000-byte Chat message was published to Atrium and linked, or genuinely shortened — not numbered "1 of N", which cannot work (R6a); for any task a skill covers, called the skill (R9); called `psd-failure-report` if any part failed (R11); user-visible text is non-empty (R12); no non-reversible `gh`/`git push` unless the user authorized it this same turn (R13); long work ran to completion in THIS turn rather than being spawned out, deferred, sampled or shortened — subagents are unavailable, so there is nothing to wait on and nothing coming later (R15); not asking permission to continue work already requested, and not claiming to be paused/stopped unless the CURRENT user message says so (R15); every file the user is waiting for was written under `/home/node/.openclaw/work/` and DELIVERED in this turn, not left on disk (R16). If any is "no," fix the reply first.

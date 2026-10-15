@@ -14,7 +14,8 @@ workspace broker; the model role has no S3 or Secrets Manager access.
 
 Usage (text from --text, --file, or stdin):
     python3 synthesize.py --user name@psd401.net --text "Hello there."
-    python3 synthesize.py --user name@psd401.net --file /tmp/briefing.txt --voice Matthew
+    python3 synthesize.py --user name@psd401.net --file /home/node/.openclaw/work/briefing.txt \
+        --voice Matthew
     printf '%s' "$LONG_TEXT" | python3 synthesize.py --user name@psd401.net
 
 Defaults: engine=generative, voice=Ruth, format=mp3. Text longer than one

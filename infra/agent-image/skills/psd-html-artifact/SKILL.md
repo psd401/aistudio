@@ -128,8 +128,12 @@ the agent.
 >   artifact tool descriptions name a different set of origins — or none — they are
 >   generated from the deployment's real value, so follow them and inline everything.
 
-**Write the file to `/tmp/`** with a short, descriptive, kebab-case filename, e.g.
-`/tmp/onboarding-plan.html`. `/tmp` is writable; the skills directory is read-only.
+**Write the file to `/home/node/.openclaw/work/`** with a short, descriptive,
+kebab-case filename, e.g. `/home/node/.openclaw/work/onboarding-plan.html`. That
+directory is part of your workspace, so the file is still there on the next turn.
+**Do not write it to `/tmp`** — `/tmp` is not synced and each turn may run on a
+different machine, so a page left there is gone before you can publish it. The
+skills directory is read-only.
 
 ### 7. Run the pre-flight self-audit gate (incl. the enforced WCAG 2.2 AA a11y gate)
 
@@ -145,7 +149,7 @@ automatically and **refuses to publish** any artifact with critical/serious viol
 Run it yourself before delivering and fix anything it flags:
 
 ```bash
-node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /tmp/<name>.html
+node /opt/psd-skills/psd-html-artifact/deliver.js --audit-only --file /home/node/.openclaw/work/<name>.html
 ```
 
 The gate (jsdom-based) covers structure / ARIA / labels / `lang` / names. **Contrast**
@@ -158,7 +162,7 @@ is a property of this shared generator that every artifact-producing skill inher
 Publish the finished file into Atrium and get its intranet reader URL:
 
 ```bash
-node /opt/psd-skills/psd-html-artifact/deliver.js --user <email> --file /tmp/<name>.html [--title "<title>"]
+node /opt/psd-skills/psd-html-artifact/deliver.js --user <email> --file /home/node/.openclaw/work/<name>.html [--title "<title>"]
 ```
 
 Returns JSON: `{ "url": "https://psd401.ai/c/<slug>", "artifactId": N, "slug": "...",

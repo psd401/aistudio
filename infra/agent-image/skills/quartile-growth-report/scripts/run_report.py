@@ -60,6 +60,9 @@ import layout  # noqa: E402
 HERE = pathlib.Path(__file__).resolve().parent
 PSD_DATA = "/opt/psd-skills/psd-data/run.js"
 WORKSPACE = "/opt/psd-skills/psd-workspace/run.js"
+# Single-sourced from gen_sql so the generated SQL and the run
+# checkpoints that consume it can never land in different roots.
+WORK_DIR = gen_sql.WORK_DIR
 
 # Course codes ARE the grade span. gen_sql.MEASURES keys grades 0-5 to
 # 'GR00K'..'GR005'; the roster query below asks which of those the school
@@ -685,7 +688,10 @@ def default_work_dir(slug, year, user):
     """
     who = re.sub(r"[^a-z0-9]+", "-", str(user).lower()).strip("-")
     stamp = datetime.date.today().isoformat()
-    return f"/tmp/qgr-{slug}-{year or 'latest'}-{who}-{stamp}"
+    # Under the workspace, not /tmp: checkpoints exist so an interrupted run
+    # resumes instead of restarting, and /tmp is wiped between turns — which
+    # is precisely when a resume is wanted (#1895).
+    return f"{WORK_DIR}/qgr-{slug}-{year or 'latest'}-{who}-{stamp}"
 
 
 def step(work_dir, name, produce, log):
@@ -767,7 +773,10 @@ def main() -> int:
         "works). Default: the most recent year that has STARTED — the newest "
         "row may not have begun yet, and a growth report needs both windows.")
     parser.add_argument("--grades", help="comma list; default the roster's own")
-    parser.add_argument("--work-dir", help="checkpoints; default /tmp/qgr-<school>")
+    parser.add_argument(
+        "--work-dir",
+        help=f"checkpoints; default {WORK_DIR}/qgr-<school>",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="resolve and plan only; touch no spreadsheet")
     parser.add_argument("--plan-only", action="store_true",
@@ -784,9 +793,15 @@ def main() -> int:
         slug, args.year, args.user))
     work_dir.mkdir(parents=True, exist_ok=True)
     # Aggregates now, not student rows — but the checkpoints still hold
-    # classroom-level cells for real children in a predictable /tmp path for
-    # as long as the container lives, and default mkdir permissions make that
-    # world-readable. Owner-only costs nothing.
+    # classroom-level cells for real children at a predictable path, and
+    # default mkdir permissions make that world-readable inside the container.
+    # Owner-only costs nothing.
+    #
+    # Since #1895 that path is under the SYNCED workspace rather than /tmp, so
+    # the checkpoints now outlive the container and reach the owner's own
+    # private S3 prefix. That is the same destination as the rest of the
+    # agent's memory and is scoped to one owner, but it is a longer life than
+    # the previous /tmp default — which is exactly what makes a resume work.
     try:
         work_dir.chmod(0o700)
     except OSError as exc:

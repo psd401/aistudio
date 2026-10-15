@@ -72,6 +72,27 @@ describe("image validated-fs allowed roots", () => {
     ).not.toThrow()
   })
 
+  it("allows the durable scratch directory the skills write into", () => {
+    // #1895: every skill's working files and finished outputs now go to
+    // <workspace>/work/ instead of /tmp, because /tmp is not synced between
+    // turns. If this guard ever refused that path, every skill that produces a
+    // file would fail at the write — so it is asserted explicitly rather than
+    // left as an implication of the workspace root above.
+    const work = path.join(workspace, "work")
+    fs.mkdirSync(work, { recursive: true })
+    const nested = path.join(work, "imgs")
+    expect(() =>
+      harness.validatedFs.mkdirSync(nested, { recursive: true })
+    ).not.toThrow()
+    const out = path.join(work, "onboarding-plan.html")
+    expect(() =>
+      harness.validatedFs.writeFileSync(out, "<!doctype html>")
+    ).not.toThrow()
+    expect(harness.validatedFs.readFileSync(out, "utf8")).toBe(
+      "<!doctype html>"
+    )
+  })
+
   it("still refuses absolute paths outside every root", () => {
     for (const target of ["/etc/hosts", "/root/.ssh/id_rsa", "/var/lib/secret"]) {
       expect(() => harness.validatedFs.readFileSync(target, "utf8")).toThrow(

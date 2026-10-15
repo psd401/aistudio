@@ -20,7 +20,9 @@ Skipped when PyMuPDF is unavailable locally; it is always present in the image
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -182,6 +184,8 @@ class ScannedPdfCliTests(unittest.TestCase):
             capture_output=True,
             text=True,
             check=False,
+            # Keep any default output inside this test's temp directory.
+            env={**os.environ, "PSD_WORK_DIR": str(self.root / "work")},
         )
         payload = None
         for line in reversed(result.stdout.strip().splitlines()):
@@ -201,6 +205,26 @@ class ScannedPdfCliTests(unittest.TestCase):
         # And the exact command that resolves it.
         self.assertIn("--rasterize-pages", payload["message"])
         self.assertIn(str(self.scan_pdf), payload["message"])
+
+    def test_the_suggested_command_still_works_for_the_next_scan(self):
+        # work/ survives between turns, so a fixed suggested directory would
+        # still hold the previous scan's pages and be refused as non-empty.
+        suggested = []
+        for _ in range(2):
+            code, payload = self.run_cli("--path", str(self.scan_pdf))
+            self.assertEqual(code, 1)
+            match = re.search(r"--rasterize-pages (\S+)", payload["message"])
+            self.assertIsNotNone(match)
+            suggested.append(match.group(1))
+            code, payload = self.run_cli(
+                "--path", str(self.scan_pdf), "--rasterize-pages", match.group(1)
+            )
+            self.assertEqual(code, 0, payload)
+        self.assertNotEqual(suggested[0], suggested[1])
+        for directory in suggested:
+            self.assertTrue(
+                Path(directory).is_relative_to(self.root / "work" / "pdf-pages")
+            )
 
     def test_a_scan_with_rasterize_succeeds_and_says_to_read_the_images(self):
         out = self.root / "pages"

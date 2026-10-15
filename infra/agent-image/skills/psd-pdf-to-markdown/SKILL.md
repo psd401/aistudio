@@ -41,7 +41,7 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `--out <path>` | Output `.md` path (default `/tmp/<stem>.md`) |
+| `--out <path>` | Output `.md` path (default `/home/node/.openclaw/work/<stem>.md`) |
 | `--pages "0,5-10"` | Convert specific **0-based** pages only |
 | `--extract-images <dir>` | Write embedded images into `<dir>` as PNGs and **keep** their `![](abs/path)` references in the Markdown. The directory must be empty. Capped at 50 images. |
 | `--rasterize-pages <dir>` | Render whole **pages** into `<dir>` as PNGs (150 DPI). The answer for a scanned PDF — read the images. Empty directory, different from `--extract-images`. Capped at 30 pages. |
@@ -51,7 +51,7 @@ Options:
 A single JSON object on stdout:
 
 ```json
-{ "status": "ok", "source": "...", "output_path": "/tmp/report.md", "chars": 8123, "markdown": "# Report\n..." }
+{ "status": "ok", "source": "...", "output_path": "/home/node/.openclaw/work/report.md", "chars": 8123, "markdown": "# Report\n..." }
 ```
 
 - For results **≤ 24,000 chars**, the full Markdown is inlined under `markdown` — use it directly.
@@ -78,8 +78,11 @@ images.** Render the pages and read them:
 
 ```bash
 python3 /opt/psd-skills/psd-pdf-to-markdown/scripts/convert.py \
-  --path /tmp/scan.pdf --rasterize-pages /tmp/pdf-pages
+  --path /home/node/.openclaw/work/scan.pdf --rasterize-pages /home/node/.openclaw/work/pdf-pages/scan
 ```
+
+The `--rasterize-pages` directory must be empty. `work/` survives between turns,
+so give every scan its own directory (`pdf-pages/<name>`) rather than reusing one.
 
 The result carries `pages_rendered` (absolute PNG paths, one per page, 150 DPI) plus
 `text_layer: "none"`. **Read those images and answer the question from them.** Do not

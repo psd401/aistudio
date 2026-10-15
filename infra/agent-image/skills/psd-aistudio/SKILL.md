@@ -165,7 +165,7 @@ created assistant is owned by the caller and starts in `pending_approval`.
 
 ```bash
 node /opt/psd-skills/psd-aistudio/run.js create-assistant --user <email> \
-  --file /tmp/assistant-export.json
+  --file /home/node/.openclaw/work/assistant-export.json
 ```
 
 For a small envelope, `--json '<ExportFormat JSON>'` may be used instead of
@@ -182,7 +182,7 @@ atomic and resets status to `pending_approval`.
 
 ```bash
 node /opt/psd-skills/psd-aistudio/run.js update-assistant --user <email> \
-  --id 17 --file /tmp/edited-assistant-export.json
+  --id 17 --file /home/node/.openclaw/work/edited-assistant-export.json
 ```
 
 ### `fork-assistant`

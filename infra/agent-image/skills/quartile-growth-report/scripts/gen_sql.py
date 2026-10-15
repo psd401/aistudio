@@ -7,11 +7,18 @@ Writes one file per query to the school's sql dir (agg/sql for Evergreen,
 agg/<slug>/sql otherwise). Each is pasted verbatim into psd-data query_data.
 All queries return aggregates only (PII protocol).
 """
+import os
 import pathlib
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+# Durable scratch root for generated SQL and run checkpoints (#1895). /tmp used
+# to be the default and is wiped between turns, so a report interrupted partway
+# restarted from nothing instead of resuming. Everything under
+# /home/node/.openclaw/ round-trips through workspace_sync. PSD_WORK_DIR exists
+# only so tests can redirect it.
+WORK_DIR = os.environ.get("PSD_WORK_DIR") or "/home/node/.openclaw/work"
 # Bundled with the skill — see norms_fragment().
 NORMS_DIR = ROOT.parent / "references" / "norms"
 
@@ -586,7 +593,7 @@ def specs(school):
 
 def main() -> int:
     key = sys.argv[1] if len(sys.argv) > 1 else "evergreen"
-    out = sys.argv[2] if len(sys.argv) > 2 else f"/tmp/qgr-sql-{key}"
+    out = sys.argv[2] if len(sys.argv) > 2 else f"{WORK_DIR}/qgr-sql-{key}"
     if key not in SCHOOLS:
         print(f"unknown school {key!r}; known: {', '.join(SCHOOLS)}",
               file=sys.stderr)

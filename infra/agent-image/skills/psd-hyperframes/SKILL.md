@@ -106,11 +106,11 @@ its path with `--file`. Small scenes can be passed inline with `--html`.
 > ```bash
 > # 1. Start it — returns immediately with a handle.
 > node /opt/psd-skills/psd-hyperframes/render.js --file scene.html --duration 3 \
->   > /tmp/hyperframes-out.json 2>/tmp/hyperframes-err.log &
+>   > /home/node/.openclaw/work/hyperframes-out.json 2>/home/node/.openclaw/work/hyperframes-err.log &
 >
 > # 2. Poll every ~30s until the JSON lands. Budget 3-7 minutes.
 > #    Tell the user it is rendering BEFORE you start waiting.
-> cat /tmp/hyperframes-out.json
+> cat /home/node/.openclaw/work/hyperframes-out.json
 > ```
 >
 > Say "this takes a few minutes, I'll post the link when it's done" in the turn

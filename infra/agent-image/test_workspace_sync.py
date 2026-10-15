@@ -3373,6 +3373,434 @@ class BrokerUploadCapTests(unittest.TestCase):
         )
 
 
+class DurableScratchDirectoryTests(unittest.TestCase):
+    """work/ survives between turns, which /tmp never did (#1895).
+
+    Thirteen skills told the agent to write its finished outputs under /tmp.
+    /tmp is outside the workspace and each turn may land on a fresh container,
+    so PDFs and signs "sitting unpublished in /tmp" were never delivered. The
+    round-trip below is the property that fixes it; the size test is the
+    bounded-growth concession that must NOT turn into a failed push.
+    """
+
+    def setUp(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, ignore_errors=True)
+        self.root = (Path(td) / "workspace")
+        self.root.mkdir()
+        self.root = self.root.resolve()
+        workspace_sync._uploaded_state.clear()
+        self.addCleanup(workspace_sync._uploaded_state.clear)
+        workspace_sync._force_exact_workspace_restores.clear()
+        self.addCleanup(
+            workspace_sync._force_exact_workspace_restores.clear
+        )
+
+    def _patch_workspace(self):
+        return mock.patch.object(workspace_sync, "WORKSPACE_DIR", self.root)
+
+    def _restore(self, keys, contents, last_modified=None):
+        """Simulate turn 2: a fresh container restoring the same prefix."""
+        bodies = {}
+        listing = {"paths": keys}
+        if last_modified is not None:
+            listing["entries"] = [
+                {
+                    "path": key,
+                    "size": len(contents[key]),
+                    "lastModified": last_modified[key],
+                    "eTag": f'"{key}"',
+                }
+                for key in keys
+            ]
+
+        def fake_download_spec(relative):
+            body = contents[relative]
+            url = f"https://download.invalid/{relative}"
+            bodies[url] = body
+            return url, len(body), {"Range": f"bytes=0-{len(body) - 1}"}
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value=listing,
+        ), mock.patch.object(
+            workspace_sync, "_download_spec", side_effect=fake_download_spec
+        ), mock.patch.object(
+            workspace_sync.urllib.request,
+            "urlopen",
+            side_effect=lambda request, **_kwargs: _FakeResponse(
+                bodies[request.full_url]
+            ),
+        ):
+            return workspace_sync.pull_workspace("owner")
+
+    def test_scratch_paths_are_checkpoint_managed_and_not_skipped(self):
+        for rel in ("work", "work/draft.pdf", "work/imgs/panel.png"):
+            self.assertTrue(
+                workspace_sync._is_work_relative(rel),
+                f"should be a scratch path: {rel}",
+            )
+            self.assertFalse(
+                workspace_sync._should_skip_relative(rel),
+                f"scratch must be synced, not skipped: {rel}",
+            )
+            self.assertTrue(
+                workspace_sync._is_checkpoint_managed_relative(rel),
+                f"scratch must be checkpoint-managed: {rel}",
+            )
+        # Lookalikes outside the directory are NOT scratch.
+        for rel in ("workspace/notes.md", "memory/work.md", "worktree/x"):
+            self.assertFalse(
+                workspace_sync._is_work_relative(rel),
+                f"not a scratch path: {rel}",
+            )
+        # Regenerable trees inside it are still excluded by policy.
+        self.assertTrue(
+            workspace_sync._should_skip_relative("work/site/node_modules/x.js")
+        )
+
+    def test_ensure_creates_the_directory_the_restore_cannot_return(self):
+        with self._patch_workspace():
+            workspace_sync.ensure_work_directory()
+            # Idempotent: every turn calls it.
+            workspace_sync.ensure_work_directory()
+        created = self.root / "work"
+        self.assertTrue(created.is_dir())
+        self.assertEqual(created.stat().st_mode & 0o777, 0o700)
+
+    def test_ensure_replaces_a_symlink_planted_at_the_scratch_name(self):
+        # A model-created symlink here would redirect every skill's output
+        # back out of the synced tree — the exact failure work/ exists to end.
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        (self.root / "work").symlink_to(outside, target_is_directory=True)
+        with self._patch_workspace():
+            workspace_sync.ensure_work_directory()
+        self.assertFalse((self.root / "work").is_symlink())
+        self.assertTrue((self.root / "work").is_dir())
+        self.assertTrue(outside.is_dir())
+
+    def test_a_file_written_in_turn_one_is_restored_in_turn_two(self):
+        # Turn 1: a skill writes its finished output into the scratch dir.
+        (self.root / "work").mkdir()
+        (self.root / "work" / "sign.pdf").write_bytes(b"%PDF-1.7 sign")
+        uploaded = []
+
+        def fake_upload_spec(relative, *_rest, **_kwargs):
+            uploaded.append(relative)
+            return (
+                "https://upload.invalid/x",
+                "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+                {"Content-Length": "13"},
+            )
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=fake_upload_spec
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value={"key": "owner/work/sign.pdf"},
+        ):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 1)
+        self.assertEqual(uploaded, ["work/sign.pdf"])
+
+        # Turn 2: a fresh container restores the same prefix.
+        shutil.rmtree(self.root / "work")
+        restored = self._restore(
+            ["work/sign.pdf"],
+            {"work/sign.pdf": b"%PDF-1.7 sign"},
+        )
+        self.assertEqual(restored, 1)
+        self.assertEqual(
+            (self.root / "work" / "sign.pdf").read_bytes(),
+            b"%PDF-1.7 sign",
+        )
+
+    def test_an_oversized_scratch_file_is_excluded_not_fatal(self):
+        # The turn's memory writes must still commit. Failing the push over one
+        # oversized render would lose them, which is strictly worse than not
+        # persisting a file the user already received in this same turn.
+        (self.root / "work").mkdir()
+        (self.root / "work" / "render.mp4").write_bytes(b"x")
+        (self.root / "memory").mkdir()
+        (self.root / "memory" / "note.md").write_bytes(b"remembered")
+        inflated = workspace_sync.MAX_WORK_FILE_SYNC_BYTES + 1
+        original_open = workspace_sync._open_regular_no_follow
+
+        def open_no_follow(relative):
+            source, metadata = original_open(relative)
+            if relative != "work/render.mp4":
+                return source, metadata
+
+            class _Inflated:
+                st_size = inflated
+                st_mode = metadata.st_mode
+                st_mtime_ns = metadata.st_mtime_ns
+                st_ctime_ns = metadata.st_ctime_ns
+                st_uid = metadata.st_uid
+                st_gid = metadata.st_gid
+
+            return source, _Inflated()
+
+        uploaded = []
+
+        def fake_upload_spec(relative, *_rest, **_kwargs):
+            uploaded.append(relative)
+            return (
+                "https://upload.invalid/x",
+                "36bb0456-1c51-4fb8-97d1-4e87d02765ce",
+                {"Content-Length": "10"},
+            )
+
+        with self.assertLogs(
+            "workspace_sync", level="WARNING"
+        ) as logs, self._patch_workspace(), mock.patch.object(
+            workspace_sync,
+            "_open_regular_no_follow",
+            side_effect=open_no_follow,
+        ), mock.patch.object(
+            workspace_sync, "_upload_spec", side_effect=fake_upload_spec
+        ), mock.patch.object(
+            workspace_sync, "_stream_upload"
+        ), mock.patch.object(
+            workspace_sync,
+            "_broker_request",
+            return_value={"key": "owner/memory/note.md"},
+        ):
+            self.assertEqual(workspace_sync.push_workspace("owner"), 1)
+
+        self.assertEqual(uploaded, ["memory/note.md"])
+        warning = "\n".join(logs.output)
+        self.assertIn("work/render.mp4", warning)
+        self.assertIn(str(inflated), warning)
+        self.assertIn("sync limit", warning)
+
+    def test_the_scratch_ceiling_stays_under_the_broker_cap(self):
+        # A value at or above the broker's cap would make this exclusion
+        # unreachable and hand oversized scratch back to the fatal path.
+        self.assertLess(
+            workspace_sync.MAX_WORK_FILE_SYNC_BYTES,
+            workspace_sync.BROKER_PRIVATE_UPLOAD_MAX_BYTES,
+        )
+        self.assertEqual(workspace_sync.WORK_DIR_RELATIVE, "work")
+
+    def test_an_oversized_scratch_file_drops_its_stale_committed_copy(self):
+        # Excluded from upload means absent from the checkpoint. Keeping an
+        # earlier, smaller committed copy would restore a stale version on the
+        # next cold boot with nothing to tell the model it is stale.
+        (self.root / "work").mkdir()
+        (self.root / "work" / "render.mp4").write_bytes(b"x")
+        generation = workspace_sync._generation_for_entries({
+            "work/render.mp4": (1, '"old"'),
+        })
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        before = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("work/render.mp4",),
+            sizes={"work/render.mp4": 1},
+            e_tags={"work/render.mp4": '"old"'},
+            generation=generation,
+        )
+        original_open = workspace_sync._open_regular_no_follow
+
+        def open_no_follow(relative):
+            source, metadata = original_open(relative)
+
+            class _Inflated:
+                st_size = workspace_sync.MAX_WORK_FILE_SYNC_BYTES + 1
+                st_mode = metadata.st_mode
+                st_mtime_ns = metadata.st_mtime_ns
+                st_ctime_ns = metadata.st_ctime_ns
+                st_uid = metadata.st_uid
+                st_gid = metadata.st_gid
+
+            return source, _Inflated()
+
+        class _Stop(Exception):
+            pass
+
+        seen = []
+        real = workspace_sync._remote_mutable_paths_to_delete
+
+        def record_then_stop(*args):
+            # Capture what the deletion pass would remove, then stop the push
+            # before it reaches the broker.
+            seen.append(real(*args))
+            raise _Stop()
+
+        spy_mock = mock.Mock(side_effect=record_then_stop)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync,
+            "_open_regular_no_follow",
+            side_effect=open_no_follow,
+        ), mock.patch.object(
+            workspace_sync, "_ensure_workspace_checkpoint"
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=before,
+        ), mock.patch.object(
+            workspace_sync, "_remote_mutable_paths_to_delete", spy_mock
+        ):
+            with self.assertRaises(_Stop):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+        self.assertEqual(seen, [["work/render.mp4"]])
+
+    def test_prune_keeps_the_newest_scratch_files_within_the_ceilings(self):
+        work = self.root / "work"
+        work.mkdir()
+        for index in range(5):
+            path = work / f"f{index}.pdf"
+            path.write_bytes(b"x" * 10)
+            # f0 is the oldest, f4 the newest.
+            os.utime(path, ns=(index * 10**9, index * 10**9))
+        (self.root / "memory").mkdir()
+        (self.root / "memory" / "note.md").write_bytes(b"x" * 100)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_BYTES", 30
+        ), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 500
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 2)
+        self.assertEqual(
+            sorted(p.name for p in work.iterdir()),
+            ["f2.pdf", "f3.pdf", "f4.pdf"],
+        )
+        # Outside work/ is never touched, whatever its size.
+        self.assertTrue((self.root / "memory" / "note.md").exists())
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 1
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 2)
+        self.assertEqual([p.name for p in work.iterdir()], ["f4.pdf"])
+
+    def test_prune_after_a_cold_boot_evicts_by_committed_age(self):
+        # A restore stamps every file with its download time. Without the
+        # committed LastModified, the prune would evict in download order —
+        # possibly the newest file — and carry that deletion into S3.
+        keys = ["work/newest.pdf", "work/oldest.pdf", "work/middle.pdf"]
+        contents = {key: b"x" * 10 for key in keys}
+        contents["memory/note.md"] = b"note"
+        ages = {
+            "work/oldest.pdf": 1_700_000_000,
+            "work/middle.pdf": 1_700_000_100,
+            "work/newest.pdf": 1_700_000_200,
+            "memory/note.md": 1_700_000_000,
+        }
+        self._restore([*keys, "memory/note.md"], contents, ages)
+        for key in keys:
+            self.assertEqual(
+                (self.root / key).stat().st_mtime_ns,
+                ages[key] * 1_000_000_000,
+            )
+        # Only scratch files are re-dated.
+        self.assertNotEqual(
+            (self.root / "memory" / "note.md").stat().st_mtime_ns,
+            ages["memory/note.md"] * 1_000_000_000,
+        )
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 2
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            self.assertEqual(workspace_sync._prune_work_directory(), 1)
+        self.assertEqual(
+            sorted(p.name for p in (self.root / "work").iterdir()),
+            ["middle.pdf", "newest.pdf"],
+        )
+
+    def test_prune_is_a_no_op_under_the_ceilings(self):
+        (self.root / "work").mkdir()
+        (self.root / "work" / "a.pdf").write_bytes(b"x")
+        with self._patch_workspace():
+            self.assertEqual(workspace_sync._prune_work_directory(), 0)
+        self.assertTrue((self.root / "work" / "a.pdf").exists())
+
+    def test_a_pruned_file_is_deleted_from_the_checkpoint_too(self):
+        # push_workspace prunes BEFORE it walks the tree, so the deletion pass
+        # sees the evicted file as locally absent and removes it remotely.
+        work = self.root / "work"
+        work.mkdir()
+        for index, name in enumerate(("old.pdf", "new.pdf")):
+            (work / name).write_bytes(b"x" * 10)
+            os.utime(work / name, ns=(index * 10**9, index * 10**9))
+        generation = workspace_sync._generation_for_entries({
+            "work/old.pdf": (10, '"old"'),
+        })
+        workspace_sync._committed_workspace_generations["owner"] = generation
+        before = workspace_sync._RemoteWorkspaceSnapshot(
+            paths=("work/old.pdf",),
+            sizes={"work/old.pdf": 10},
+            e_tags={"work/old.pdf": '"old"'},
+            generation=generation,
+        )
+
+        class _Stop(Exception):
+            pass
+
+        seen = []
+        real = workspace_sync._remote_mutable_paths_to_delete
+
+        def record_then_stop(*args):
+            # Capture what the deletion pass would remove, then stop the push
+            # before it reaches the broker.
+            seen.append(real(*args))
+            raise _Stop()
+
+        spy_mock = mock.Mock(side_effect=record_then_stop)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync, "MAX_WORK_DIR_SYNC_FILES", 1
+        ), mock.patch.object(
+            workspace_sync, "_ensure_workspace_checkpoint"
+        ), mock.patch.object(
+            workspace_sync,
+            "_list_remote_workspace_snapshot",
+            return_value=before,
+        ), mock.patch.object(
+            workspace_sync, "_remote_mutable_paths_to_delete", spy_mock
+        ), self.assertLogs("workspace_sync", level="WARNING"):
+            with self.assertRaises(_Stop):
+                workspace_sync.push_workspace(
+                    "owner",
+                    expected_generation=generation,
+                    require_generation=True,
+                )
+        self.assertFalse((work / "old.pdf").exists())
+        self.assertEqual(seen, [["work/old.pdf"]])
+
+    def test_ensure_repairs_the_mode_of_an_existing_directory(self):
+        # A wrong-owner or wrong-mode work/ must not persist for every later
+        # turn just because the directory already existed.
+        (self.root / "work").mkdir(mode=0o755)
+        os.chmod(self.root / "work", 0o755)
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync.os, "fchown"
+        ) as fchown:
+            workspace_sync.ensure_work_directory()
+        fchown.assert_called_once()
+        self.assertEqual(
+            (self.root / "work").stat().st_mode & 0o777, 0o700
+        )
+
+    def test_ensure_tolerates_the_directory_appearing_mid_call(self):
+        real_mkdir = os.mkdir
+
+        def racing_mkdir(path, *args, **kwargs):
+            real_mkdir(path, *args, **kwargs)
+            raise FileExistsError(path)
+
+        with self._patch_workspace(), mock.patch.object(
+            workspace_sync.os, "mkdir", side_effect=racing_mkdir
+        ):
+            workspace_sync.ensure_work_directory()
+        self.assertTrue((self.root / "work").is_dir())
+
+
 class StagedReservationReleaseTests(unittest.TestCase):
     """An aborted batch gives its siblings' reservations back immediately."""
 

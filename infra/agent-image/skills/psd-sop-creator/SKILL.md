@@ -72,7 +72,7 @@ headings, lists, bold, and links all work.
 ### 4. Validate while you draft
 
 ```bash
-node /opt/psd-skills/psd-sop-creator/run.js validate --body-file /tmp/sop.md
+node /opt/psd-skills/psd-sop-creator/run.js validate --body-file /home/node/.openclaw/work/sop.md
 ```
 
 Free and offline. **Exit 3** returns a structured `violations` list, each with a
@@ -82,11 +82,11 @@ Free and offline. **Exit 3** returns a structured `violations` list, each with a
 
 ```bash
 node /opt/psd-skills/psd-sop-creator/run.js create \
-  --body-file /tmp/sop.md \
+  --body-file /home/node/.openclaw/work/sop.md \
   --owner "Director of Technology" \
   --department "Technology" \
   --effective-date 2026-08-01 \
-  --image-base /tmp/sop-images
+  --image-base /home/node/.openclaw/work/sop-images
 ```
 
 Then give the user the returned URL **as a bare URL on its own line**, and tell
@@ -103,7 +103,7 @@ handled:
 
 | In your body | What happens |
 |--------------|--------------|
-| `![alt](/tmp/imgs/panel.png)` | Uploaded to the new document as an asset |
+| `![alt](/home/node/.openclaw/work/imgs/panel.png)` | Uploaded to the new document as an asset |
 | `![alt](relative/panel.png)` | Same, resolved against `--image-base` |
 | `![alt](https://…/x.png)` | Kept as-is; already hosted |
 | `::atrium-asset{id="…" alt="…"}` | Copied from `--source-id`'s object (see below) |

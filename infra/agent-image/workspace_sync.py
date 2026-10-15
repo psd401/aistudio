@@ -49,7 +49,7 @@ import urllib.error
 import urllib.request
 import uuid
 from contextlib import closing
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
 from typing import Optional
 
@@ -82,6 +82,9 @@ class _RemoteWorkspaceSnapshot:
     sizes: dict[str, int]
     e_tags: dict[str, str]
     generation: Optional[str]
+    # S3 LastModified, epoch seconds. Used only to give a restored work/ file
+    # a durable mtime — see _download_one in pull_workspace.
+    last_modified: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -217,6 +220,64 @@ MAX_SYNC_TOTAL_BYTES = 64 * 1024 * 1024 * 1024
 # window. Lowering works in the other order: a stale, smaller value here is
 # merely conservative and rejects early with a clear message.
 BROKER_PRIVATE_UPLOAD_MAX_BYTES = 512 * 1024 * 1024
+# ---------------------------------------------------------------------------
+# Durable scratch directory (#1895)
+# ---------------------------------------------------------------------------
+# Thirteen skills used to tell the agent to write its working files AND its
+# finished outputs under /tmp. /tmp is not part of the workspace — this module
+# only round-trips /home/node/.openclaw — and each turn may land on a fresh
+# microVM, so anything left in /tmp between turns is simply gone. In a read of
+# 375 staff members' agent use (Aug–Oct 2026) that cost real deliveries: PDFs
+# and signs that "sat unpublished in /tmp" were never sent (a first-day teacher
+# left with nothing), a case manager's bulk build was set back by the wipes,
+# and a deputy principal's proposal source came back ENOENT and had to be
+# rebuilt.
+#
+# `work/` is an ordinary checkpoint-MANAGED subdirectory of the workspace, so
+# it needs no new sync machinery: it is listed, pulled, pushed and
+# generation-fenced exactly like `memory/`. It inherits the policy exclusions
+# in lib/agent-workspace/workspace-policy.json, which is what keeps a
+# `work/node_modules` or `work/.venv` out of the checkpoint
+# (_is_regenerable_segment matches those segments at any depth).
+#
+# What it does need is its own per-file ceiling — see
+# MAX_WORK_FILE_SYNC_BYTES.
+WORK_DIR_RELATIVE = "work"
+# Per-file sync ceiling that applies to `work/` ONLY, deliberately far below
+# BROKER_PRIVATE_UPLOAD_MAX_BYTES (512 MiB).
+#
+# Scratch is where the media, print and render skills land their output, and
+# the whole workspace is restored on every cold boot: a single 300 MB render
+# that rode along would be re-downloaded for the rest of the owner's life on
+# this prefix. Over this size the file is EXCLUDED with a logged warning and
+# the push still SUCCEEDS — see push_workspace(). That asymmetry is the point:
+# failing the push instead would also throw away the turn's memory writes, and
+# the oversized file is still on local disk for the remainder of the turn, so
+# same-turn delivery (psd-rules Rule 16) is unaffected. Large media belongs in
+# `.media-scratch/` — checkpoint-excluded, transport-only — via
+# skills/_shared/media-relay.js.
+#
+# Any EARLIER committed copy of an excluded file is deleted from the checkpoint
+# rather than kept. Keeping it would hand the model, on its next cold boot, an
+# older version of a file it last saw larger — silently, with nothing in its
+# context to say so. A missing file is the honest outcome: psd-rules Rule 16
+# already tells the model an ENOENT under work/ means rebuild and deliver.
+MAX_WORK_FILE_SYNC_BYTES = 64 * 1024 * 1024
+# Aggregate ceilings for `work/` as a whole, enforced at every push by
+# _prune_work_directory(). The per-file ceiling above does not bound growth:
+# an owner who renders a 20 MB PDF every week keeps every one of them, and
+# every cold boot restores the lot. Restore time scales with object count —
+# ~5,000 objects already took 161.7 s on 2026-07-27 — so without a ceiling the
+# scratch directory alone could eventually push a restore past its deadline,
+# and a restore that times out cannot push, so it could never shrink again.
+#
+# Over either limit the OLDEST files (by mtime) are deleted locally, which the
+# push's deletion pass then carries into the checkpoint. That is safe because
+# of what work/ is for: Rule 16 requires every file to be delivered in the
+# turn that wrote it, so an old file there is a working copy, not the only
+# copy.
+MAX_WORK_DIR_SYNC_BYTES = 256 * 1024 * 1024
+MAX_WORK_DIR_SYNC_FILES = 500
 # Raised from 1,000 (#1353) after that cap silently destroyed a user's agent
 # memory on 2026-07-27. Real workspaces already exceed it: two of the 38 live
 # prefixes hold ~5,000 objects each. The cap is a runaway-traversal backstop,
@@ -855,6 +916,138 @@ def _should_skip_relative(relative: str) -> bool:
     if any(_is_regenerable_segment(seg) for seg in rel.split("/")):
         return True
     return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
+
+
+def _is_work_relative(relative: str) -> bool:
+    """True for a path inside the durable scratch directory (#1895)."""
+    rel = relative.lstrip("/")
+    return rel == WORK_DIR_RELATIVE or rel.startswith(
+        f"{WORK_DIR_RELATIVE}/"
+    )
+
+
+def ensure_work_directory() -> None:
+    """Create the durable scratch directory before the model's first tool call.
+
+    S3 has no directories, so an EMPTY `work/` is never an object and never
+    comes back from a restore; a forced exact restore also prunes it as an
+    uncommitted local extra. Recreating it after every restore is the only
+    reason a skill can name the path unconditionally instead of teaching the
+    model to mkdir first — which is exactly the step that got skipped when the
+    skills said /tmp.
+
+    Ownership follows the workspace root rather than the caller: the restore
+    runs as root in the wrapper while OpenClaw is dropped to `node`, so a
+    root-owned 0700 directory here would be unwritable by every skill. This
+    mirrors _prepare_committed_remote_parents(). Ownership and mode are reset
+    on an EXISTING directory too, so a wrong-owner `work/` is repaired rather
+    than left unwritable for every later turn.
+    """
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    workspace_metadata = WORKSPACE_DIR.stat()
+    workspace_fd = os.open(
+        WORKSPACE_DIR,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        try:
+            metadata = os.stat(
+                WORK_DIR_RELATIVE,
+                dir_fd=workspace_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            metadata = None
+        if metadata is not None and not stat.S_ISDIR(metadata.st_mode):
+            # A symlink or regular file at this name would silently redirect
+            # every skill's output out of the synced tree — the precise
+            # failure this directory exists to end. Replace it.
+            logger.warning(
+                "workspace scratch path %s was not a directory; replacing",
+                WORK_DIR_RELATIVE,
+            )
+            os.unlink(WORK_DIR_RELATIVE, dir_fd=workspace_fd)
+            metadata = None
+        if metadata is None:
+            try:
+                os.mkdir(WORK_DIR_RELATIVE, mode=0o700, dir_fd=workspace_fd)
+            except FileExistsError:
+                # Created between the stat and here. The no-follow open below
+                # decides whether what now sits at the name is usable.
+                pass
+        work_fd = os.open(
+            WORK_DIR_RELATIVE,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=workspace_fd,
+        )
+        try:
+            os.fchown(
+                work_fd,
+                workspace_metadata.st_uid,
+                workspace_metadata.st_gid,
+            )
+            os.fchmod(work_fd, 0o700)
+        finally:
+            os.close(work_fd)
+    finally:
+        os.close(workspace_fd)
+
+
+def _prune_work_directory(deadline_monotonic: float | None = None) -> int:
+    """Delete the oldest scratch files once work/ outgrows its ceilings.
+
+    See MAX_WORK_DIR_SYNC_BYTES. Files are kept newest-first until either
+    ceiling would be exceeded; that file and everything older is deleted.
+    Only files that would actually sync are counted — an oversized file is
+    excluded from the checkpoint anyway (MAX_WORK_FILE_SYNC_BYTES), so it
+    costs a restore nothing. Returns the number of files deleted.
+    """
+    candidates: list[tuple[int, int, str]] = []
+    for relative in _iter_workspace_files(deadline_monotonic):
+        if not _is_work_relative(relative):
+            continue
+        try:
+            source, metadata = _open_regular_no_follow(relative)
+        except OSError:
+            continue
+        source.close()
+        if metadata.st_size > MAX_WORK_FILE_SYNC_BYTES:
+            continue
+        candidates.append((metadata.st_mtime_ns, metadata.st_size, relative))
+    candidates.sort(reverse=True)
+    kept_bytes = 0
+    deleted = 0
+    over_limit = False
+    for index, (_mtime_ns, size, relative) in enumerate(candidates):
+        over_limit = over_limit or (
+            index >= MAX_WORK_DIR_SYNC_FILES
+            or kept_bytes + size > MAX_WORK_DIR_SYNC_BYTES
+        )
+        if not over_limit:
+            kept_bytes += size
+            continue
+        try:
+            _unlink_workspace_regular_no_follow(relative)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(
+                "workspace scratch prune could not delete %s: %s",
+                relative,
+                exc,
+            )
+            continue
+        deleted += 1
+    if deleted:
+        logger.warning(
+            "workspace scratch prune deleted %d oldest file(s) from %s/ "
+            "(limits: %d files, %d bytes)",
+            deleted,
+            WORK_DIR_RELATIVE,
+            MAX_WORK_DIR_SYNC_FILES,
+            MAX_WORK_DIR_SYNC_BYTES,
+        )
+    return deleted
 
 
 def _is_checkpoint_managed_relative(relative: str) -> bool:
@@ -2093,6 +2286,7 @@ def _list_remote_workspace_snapshot(
     seen_paths: set[str] = set()
     listed_sizes: dict[str, int] = {}
     listed_e_tags: dict[str, str] = {}
+    listed_last_modified: dict[str, int] = {}
     metadata_trusted = True
     continuation: str | None = None
     seen_continuations: set[str] = set()
@@ -2173,6 +2367,7 @@ def _list_remote_workspace_snapshot(
                     metadata_trusted = False
                     continue
                 page_metadata[entry_path] = (entry_size, e_tag)
+                listed_last_modified[entry_path] = last_modified
             if set(page_metadata) != set(page_paths):
                 metadata_trusted = False
 
@@ -2208,6 +2403,7 @@ def _list_remote_workspace_snapshot(
         sizes=listed_sizes,
         e_tags=listed_e_tags,
         generation=generation,
+        last_modified=listed_last_modified,
     )
 
 
@@ -2262,6 +2458,7 @@ def pull_workspace(
     # set has passed the same contract as the web checkpoint.
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     listed_sizes = snapshot.sizes
+    listed_last_modified = snapshot.last_modified
     skipped = 0
     exact_restore_paths = set(listed_paths)
     if prefix in _force_exact_workspace_restores:
@@ -2308,7 +2505,20 @@ def pull_workspace(
                 )
             try:
                 restored, metadata = _open_regular_no_follow(relative)
-                restored.close()
+                with restored:
+                    last_modified = listed_last_modified.get(relative)
+                    if _is_work_relative(relative) and last_modified is not None:
+                        # A download stamps the file with the restore time, so
+                        # after a cold boot every scratch file would look
+                        # equally new and _prune_work_directory would evict in
+                        # arbitrary order. The S3 LastModified is the time the
+                        # turn that wrote it pushed it — a durable age. Set via
+                        # the open descriptor, never by path.
+                        modified_ns = last_modified * 1_000_000_000
+                        os.utime(
+                            restored.fileno(), ns=(modified_ns, modified_ns)
+                        )
+                        metadata = os.fstat(restored.fileno())
                 return None, (
                     metadata.st_size,
                     metadata.st_mtime_ns,
@@ -2425,6 +2635,10 @@ def pull_workspace(
     _pending_atomic_workspace_finalizations.pop(prefix, None)
     _force_exact_workspace_restores.discard(prefix)
 
+    # After the tree is exact, never before: a forced exact restore prunes
+    # uncommitted local extras, and an empty scratch directory is one.
+    ensure_work_directory()
+
     logger.info(
         "workspace pull: prefix=%s files=%d skipped=%d migrated=%s "
         "generation=%s elapsed_s=%.1f",
@@ -2478,6 +2692,9 @@ def refresh_workspace(prefix: str) -> int:
         and cached.generation == snapshot.generation
     ):
         _committed_workspace_generations[prefix] = checkpoint.generation
+        # A warm, unchanged workspace skips pull_workspace entirely, so this
+        # is the only place the scratch directory gets recreated on that path.
+        ensure_work_directory()
         logger.info(
             "workspace refresh: prefix=%s generation=%s unchanged",
             prefix,
@@ -3386,6 +3603,9 @@ def push_workspace(
     """Upload current /home/node/.openclaw/ contents to s3://bucket/prefix/."""
     if not prefix:
         return 0
+    # Before the traversal below, so the files it deletes are simply absent
+    # locally and the ordinary deletion pass removes them from the checkpoint.
+    _prune_work_directory(deadline_monotonic)
     # Parallelized for the same reason as pull: 10k+ files over a serial
     # upload blocks both the turn-final push and the best-effort shutdown
     # flush. Completed-turn durability comes from the normal pre-response
@@ -3417,6 +3637,25 @@ def push_workspace(
         except OSError as exc:
             logger.warning("workspace push skip unsafe file %s: %s", relative, exc)
             preparation_errors.append(f"{relative}: {exc}")
+            continue
+        if (
+            _is_work_relative(relative)
+            and metadata.st_size > MAX_WORK_FILE_SYNC_BYTES
+        ):
+            source.close()
+            # EXCLUDED, not an error — see MAX_WORK_FILE_SYNC_BYTES. Dropped
+            # from local_mutable_paths so the deletion pass below also removes
+            # any earlier, smaller committed copy: restoring that would hand
+            # the model a stale version with no sign it is stale.
+            local_mutable_paths.discard(relative)
+            logger.warning(
+                "workspace push exclude oversized scratch file %s "
+                "(%d bytes exceeds the %d-byte %s/ sync limit)",
+                relative,
+                metadata.st_size,
+                MAX_WORK_FILE_SYNC_BYTES,
+                WORK_DIR_RELATIVE,
+            )
             continue
         if metadata.st_size > BROKER_PRIVATE_UPLOAD_MAX_BYTES:
             source.close()

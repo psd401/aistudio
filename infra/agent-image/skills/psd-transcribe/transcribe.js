@@ -85,7 +85,7 @@ async function main() {
       `${extension || '(no extension)'} cannot be transcribed. Accepted: ` +
         `${TRANSCRIBABLE.join(', ')}. Convert it first:\n` +
         `  node /opt/psd-skills/psd-media/media.js --convert --file ${file} ` +
-        '--out /tmp/audio.mp3 --preset audio-mp3',
+        '--out /home/node/.openclaw/work/audio.mp3 --preset audio-mp3',
       'bad_args',
     );
   }

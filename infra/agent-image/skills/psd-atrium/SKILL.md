@@ -150,13 +150,13 @@ the asset must be `ready` before a version may reference it.
 ```bash
 # 1. create the document (or use an existing one)
 # 2. attach the image — reserves, uploads, and completes in one command
-node run.js upload-asset --id <objectId> --file /tmp/panel.png --alt "Printer control panel"
+node run.js upload-asset --id <objectId> --file /home/node/.openclaw/work/panel.png --alt "Printer control panel"
 # 3. put the returned `directive` on its OWN LINE in the body, then:
 node run.js edit --id <objectId> --body "<full markdown incl. the directive>"
 
 # List what is already attached, or copy an image OUT of an object.
 node run.js list-assets --id <objectId>
-node run.js get-asset --id <objectId> --asset-id <assetId> --out /tmp/copy.png
+node run.js get-asset --id <objectId> --asset-id <assetId> --out /home/node/.openclaw/work/copy.png
 ```
 
 - **PNG, JPEG, and WebP only**, 20 MiB max. The type is detected from the file's
@@ -276,7 +276,7 @@ dashboard see different numbers, which is the point.
 
 ```bash
 node run.js create-artifact --title "Enrollment dashboard" \
-  --code-file /tmp/dashboard.html --body-format html --data-access query
+  --code-file /home/node/.openclaw/work/dashboard.html --body-format html --data-access query
 ```
 
 ```js
@@ -551,7 +551,7 @@ relay that the widen is **pending approval**, not that the object is public.
 
 ```bash
 node run.js edit --id <id> --body "new full text"                 # replace (default)
-node run.js edit --id <id> --body-file /tmp/new-body.md           # same, from a file
+node run.js edit --id <id> --body-file /home/node/.openclaw/work/new-body.md           # same, from a file
 node run.js edit --id <id> --body "extra paragraph" --mode append # append to saved body
 ```
 

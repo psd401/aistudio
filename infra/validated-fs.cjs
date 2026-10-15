@@ -73,6 +73,13 @@ function validatePath(candidate, access) {
   // This widens the guard by exactly the directory the agent already owns and
   // is expected to persist its memory in; everything outside workspace, cwd,
   // temp and /opt stays refused.
+  //
+  // The workspace root is also what admits the durable scratch directory
+  // `<workspace>/work/` (#1895) — the one place skills may write working files
+  // and finished outputs, because unlike the temp root it survives between
+  // turns. Narrowing this root to specific subdirectories would refuse every
+  // skill's output again, so it stays the whole workspace. Guarded by
+  // tests/unit/agent-image-validated-fs-roots.test.ts.
   const workspace = process.env.OPENCLAW_HOME || "/home/node/.openclaw";
   const roots = [
     resolve(process.cwd()),
