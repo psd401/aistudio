@@ -165,6 +165,16 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # Nexus generated-document markdown (Bun, #1898). lib/ai/markdown-blocks.ts
+    # and lib/ai/document-docx-builder.ts import pure-ESM `marked`, which
+    # next/jest cannot transform, so the jest suites mock both modules and own
+    # only the orchestration. Without this step the markdown -> Word/slides
+    # mapping — the whole point of the issue — would run in no gate at all.
+    - name: Run Nexus document markdown smoke (Bun)
+      run: bun run test:smoke:nexus-document-markdown
+      env:
+        CI: true
+
     # psd-credentials skill gate (Bun, #1887). These tests sat beside the skill
     # with no `test` script and no CI step, so the credential-broker client —
     # including the new one-time entry-link command, the only sanctioned way to

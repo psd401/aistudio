@@ -78,7 +78,7 @@ export function formatBytes(bytes: number | undefined): string {
  * trusted URL source would turn a corrupted or tampered message part into an
  * off-site (or `javascript:`) link rendered inside the user's conversation.
  */
-function safeDownloadHref(downloadUrl: string | undefined): string | null {
+export function safeDownloadHref(downloadUrl: string | undefined): string | null {
   if (typeof downloadUrl !== 'string') return null
   if (!downloadUrl.startsWith(NEXUS_DOCUMENT_DOWNLOAD_PREFIX)) return null
   // A second slash-pair or a backslash could re-point the browser at another
@@ -119,7 +119,7 @@ function DocumentFailed({ reason }: { reason: string }) {
   )
 }
 
-function DocumentCard({
+export function DocumentDownloadCard({
   href,
   filename,
   format,
@@ -144,7 +144,10 @@ function DocumentCard({
         <div className="truncate text-sm font-medium text-foreground">
           {filename}
         </div>
-        <div className="text-xs text-muted-foreground">
+        <div
+          className="text-xs text-muted-foreground"
+          data-testid="nexus-document-meta"
+        >
           {formatLabel(format)}
           {size ? ` · ${size}` : ''}
         </div>
@@ -212,7 +215,7 @@ const DocumentDownloadRenderer = ({
   if (state.kind === 'failed') return <DocumentFailed reason={state.reason} />
 
   return (
-    <DocumentCard
+    <DocumentDownloadCard
       href={state.href}
       filename={state.filename}
       format={format}

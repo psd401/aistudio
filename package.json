@@ -18,6 +18,7 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "jest",
+    "test:smoke:nexus-document-markdown": "bun run tests/smoke/nexus-document-markdown.smoke.ts",
     "test:smoke:atrium-render": "bun run tests/smoke/atrium-markdown-render.smoke.ts",
     "test:smoke:atrium-collab": "bun run tests/smoke/atrium-collab-bridge.smoke.ts",
     "test:smoke:atrium-collab-token": "bun run tests/smoke/atrium-collab-token.smoke.ts",
