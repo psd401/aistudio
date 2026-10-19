@@ -24,6 +24,7 @@
 
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { BaseProviderAdapter, type StreamDeadline } from '../provider-adapters/base-adapter';
+import type { StreamConfig } from '../types';
 import { createLogger } from '@/lib/logger';
 
 /** Minimal concrete adapter exposing the protected budget builder. */
@@ -43,6 +44,10 @@ class TestAdapter extends BaseProviderAdapter {
   }
   build(timeoutMs: number | undefined, maxSteps?: number): StreamDeadline {
     return this.buildStreamDeadline(timeoutMs, maxSteps, createLogger({ module: 'test' }));
+  }
+  /** Exposes the protected config enhancement for the #1899 regression below. */
+  enhance(config: StreamConfig): StreamConfig {
+    return this.enhanceStreamConfig(config);
   }
 }
 
@@ -341,7 +346,6 @@ describe('buildAbortAwareResponse', () => {
     expect(last.type).toBe('error');
     expect(last.errorText).toContain('empty response');
   });
-
 });
 
 describe('buildAbortAwareResponse — answer-less turns (#1899)', () => {
@@ -513,5 +517,42 @@ describe('buildAbortAwareResponse — answer-less turns (#1899)', () => {
     // Everything the model produced still arrives, in order, ahead of the notice.
     expect(chunks.slice(0, 3).map(c => c.type)).toEqual(['start', 'text-delta', 'finish']);
     expect(chunks).toHaveLength(4);
+  });
+});
+
+/**
+ * #1899 regression — the empty-turn policy keys off `config.source`, and
+ * `enhanceStreamConfig` opts every field in BY HAND. When `source` was left out
+ * of that list, every Nexus run silently fell back to the non-Nexus rule and the
+ * whole fix was inert — a failure that is invisible, because the only symptom is
+ * a notice that never appears. (Codex review of PR #1945.)
+ */
+describe('enhanceStreamConfig preserves the calling surface', () => {
+  const base = {
+    model: 'test-model' as unknown as StreamConfig['model'],
+    messages: [],
+  };
+
+  it('carries `source` through enhancement', () => {
+    expect(adapter.enhance({ ...base, source: 'nexus' }).source).toBe('nexus');
+    expect(adapter.enhance({ ...base, source: 'compare' }).source).toBe('compare');
+  });
+
+  it('leaves it undefined when the caller set none', () => {
+    expect(adapter.enhance(base).source).toBeUndefined();
+  });
+
+  it('still carries the other run-shaping fields', () => {
+    // Same class of bug: each of these was added to the opt-in list after a
+    // silent loss (#926 for timeout and the cost cap).
+    const enhanced = adapter.enhance({
+      ...base,
+      maxSteps: 7,
+      timeout: 1234,
+      costCapCents: 50,
+    });
+    expect(enhanced.maxSteps).toBe(7);
+    expect(enhanced.timeout).toBe(1234);
+    expect(enhanced.costCapCents).toBe(50);
   });
 });

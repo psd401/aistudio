@@ -15,7 +15,7 @@ import {
   classifyEmptyTurn,
   emptyTurnNotice,
 } from '../empty-turn-notice';
-import { sanitizeStreamErrorMessage } from '../stream-error-message';
+import { classifyStreamError, sanitizeStreamErrorMessage } from '../stream-error-message';
 import { isDirectRenderTool } from '@/lib/tools/direct-render-tools';
 import type {
   ProviderAdapter,
@@ -495,7 +495,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       
       const buildResponse = this.buildResponseFactory(
         result,
-        enhancedConfig,
+        // The ORIGINAL config, not the enhanced one: `enhanceStreamConfig` has
+        // to opt every field in by hand, and a field dropped there fails open
+        // (the notice simply never fires). Read the policy from the source.
+        { source: config.source, maxSteps: enhancedConfig.maxSteps },
         deadline,
         () => streamAborted
       );
@@ -533,6 +536,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       system: config.system,
       maxTokens: config.maxTokens,
       maxSteps: config.maxSteps,
+      // Preserve the calling surface (#1899): the answer-less-turn policy is
+      // Nexus-only, and dropping `source` here silently reverted every Nexus
+      // run to the non-Nexus rule, making the whole fix inert. (Codex review.)
+      source: config.source,
       // Preserve the cost-cap inputs (#926) so the agentic loop's stop condition
       // survives provider-specific config enhancement.
       costCapCents: config.costCapCents,
@@ -619,6 +626,36 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
+   * The response builder every adapter returns, with the empty-turn policy for
+   * this run already resolved.
+   *
+   * Shared so the base and OpenAI Responses-API paths cannot drift: only a
+   * `source: 'nexus'` run requires a text part (its Thread draws nothing for
+   * reasoning or file parts),
+   * and the step budget lets the notice distinguish "spent every tool step
+   * without answering" from "stopped after one call". (#1899)
+   */
+  protected buildResponseFactory(
+    result: Parameters<BaseProviderAdapter['buildAbortAwareResponse']>[0],
+    config: Pick<StreamConfig, 'source' | 'maxSteps'>,
+    deadline: StreamDeadline,
+    wasAborted: () => boolean
+  ): (options?: { headers?: Record<string, string> }) => Response {
+    const emptyTurn = {
+      requireTextPart: config.source === 'nexus',
+      maxSteps: config.maxSteps,
+    };
+    return options =>
+      this.buildAbortAwareResponse(
+        result,
+        () => wasAborted() || deadline.timedOut(),
+        () => deadline.timedOut(),
+        options,
+        emptyTurn
+      );
+  }
+
+  /**
    * Build the HTTP response, appending a terminal `error` chunk when the run was
    * cut short or ended with nothing for the user to read.
    *
@@ -645,8 +682,8 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * Two guards keep that from firing on a turn that DID answer:
    *  - a direct-render tool (`lib/tools/direct-render-tools.ts`) means the chart
    *    or generated document IS the answer, so nothing is said; and
-   *  - `emptyTurn.requireTextPart` is set only for Nexus. The same method serves
-   *    Assistant Architect execution, decision-chat and the programmatic
+   *  - `emptyTurn.requireTextPart` is set only for `source: 'nexus'`. The same
+   *    method serves Assistant Architect execution and the programmatic
    *    `/api/v1/assistants` path, where a run ending on a structured tool call
    *    is an ordinary success — and an injected `error` chunk makes an AI SDK
    *    client throw. Those keep the narrower pre-#1899 rule.
@@ -655,35 +692,6 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * a turn this method calls blank is also the turn that route persists as a
    * notice row, so the notice survives a reload instead of vanishing.
    */
-  /**
-   * The response builder every adapter returns, with the empty-turn policy for
-   * this run already resolved.
-   *
-   * Shared so the base and OpenAI Responses-API paths cannot drift: only Nexus
-   * requires a text part (its Thread draws nothing for reasoning/file parts),
-   * and the step budget lets the notice distinguish "spent every tool step
-   * without answering" from "stopped after one call". (#1899)
-   */
-  protected buildResponseFactory(
-    result: Parameters<BaseProviderAdapter['buildAbortAwareResponse']>[0],
-    config: Pick<StreamConfig, 'source' | 'maxSteps'>,
-    deadline: StreamDeadline,
-    wasAborted: () => boolean
-  ): (options?: { headers?: Record<string, string> }) => Response {
-    const emptyTurn = {
-      requireTextPart: config.source === 'nexus',
-      maxSteps: config.maxSteps,
-    };
-    return options =>
-      this.buildAbortAwareResponse(
-        result,
-        () => wasAborted() || deadline.timedOut(),
-        () => deadline.timedOut(),
-        options,
-        emptyTurn
-      );
-  }
-
   protected buildAbortAwareResponse(
     result: {
       toUIMessageStream?: (options?: { onError?: (error: unknown) => string }) => ReadableStream<UIMessageChunk>;
@@ -725,7 +733,14 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         // the user sees for every mid-stream failure (#1899, case 3). The raw
         // provider message is never passed through — it can carry request ids
         // and prompt fragments — only an allow-listed explanation.
-        onError: (error: unknown) => sanitizeStreamErrorMessage(error),
+        onError: (error: unknown) => {
+          // Keep the failure observable: the browser only ever sees the
+          // sanitized text, so without this the kind is recorded nowhere.
+          log.warn('Stream error surfaced to the client', {
+            kind: classifyStreamError(error),
+          });
+          return sanitizeStreamErrorMessage(error);
+        },
       })
       .pipeThrough(
         new TransformStream<UIMessageChunk, UIMessageChunk>({
@@ -735,9 +750,16 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
               seen.completedSteps += 1;
             }
             switch (classifyChunkVisibility(type)) {
-              case 'text':
-                seen.sawText = true;
+              case 'text': {
+                // Trimmed, to match `incompleteTurnReason`: a whitespace-only
+                // answer renders as a blank bubble, so it must not suppress the
+                // notice that the persisted row will carry. (Review nit 2.)
+                const delta = (chunk as { delta?: unknown }).delta;
+                if (typeof delta !== 'string' || delta.trim().length > 0) {
+                  seen.sawText = true;
+                }
                 break;
+              }
               case 'reasoning':
                 seen.sawReasoning = true;
                 break;

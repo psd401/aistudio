@@ -440,7 +440,10 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       
       const buildResponse = this.buildResponseFactory(
         result,
-        enhancedConfig,
+        // The ORIGINAL config, not the enhanced one: `enhanceStreamConfig` has
+        // to opt every field in by hand, and a field dropped there fails open
+        // (the notice simply never fires). Read the policy from the source.
+        { source: config.source, maxSteps: enhancedConfig.maxSteps },
         deadline,
         () => streamAborted
       );

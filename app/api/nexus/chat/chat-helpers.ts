@@ -13,6 +13,7 @@ import {
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
 import { ASSISTANT_SAVE_FAILED_NOTICE } from "@/lib/streaming/empty-turn-notice";
+import { isDirectRenderTool } from "@/lib/tools/direct-render-tools";
 import { repositoryAttachmentLabels } from "@/lib/nexus/repository-attachment-messages";
 import {
   buildTemporaryAttachmentMarker,
@@ -971,6 +972,37 @@ export function incompleteTurnReason(input: {
     ) ??
       false);
   return hasText || hasToolHistory ? null : "no_content";
+}
+
+/**
+ * Does this finished turn still owe the user a written explanation? (#1899)
+ *
+ * A turn with tool calls and no prose persists its tool rows (they are the
+ * history worth keeping), but on reload that is tool cards and nothing else —
+ * the live notice the stream appended is transient. So the tool rows are
+ * followed by a notice row, except when a direct-render tool ran: a chart or a
+ * generated document IS the answer, and a notice under it would contradict it.
+ *
+ * Mirrors `classifyEmptyTurn`'s rule on the stream side, from what `onFinish`
+ * can see (final text + step/tool history) rather than from chunk types.
+ */
+export function turnNeedsEmptyNotice(input: {
+  text: string;
+  steps?: StepData[];
+  toolCalls?: ToolCallData[];
+}): boolean {
+  if (input.text.trim().length > 0) return false;
+
+  const toolNames = [
+    ...(input.toolCalls ?? []).map((call) => call.toolName),
+    ...(input.steps ?? []).flatMap((step) =>
+      step.toolCalls.map((call) => call.toolName),
+    ),
+  ];
+  if (toolNames.some(isDirectRenderTool)) return false;
+
+  // Any step that wrote prose already answered, even if the LAST one did not.
+  return !(input.steps ?? []).some((step) => step.text.trim().length > 0);
 }
 
 /** What `persistAssistantTurn` managed to write. */

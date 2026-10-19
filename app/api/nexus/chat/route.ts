@@ -83,6 +83,7 @@ import {
   type StepData,
   incompleteTurnReason,
   persistAssistantTurn,
+  turnNeedsEmptyNotice,
 } from './chat-helpers';
 import { EMPTY_TURN_PERSIST_NOTICE } from '@/lib/streaming/empty-turn-notice';
 import { sanitizeStreamErrorMessage } from '@/lib/streaming/stream-error-message';
@@ -186,6 +187,35 @@ async function closeMcpClients(
   await Promise.allSettled(pending.map(r => r.close()));
 }
 
+/**
+ * Write the durable empty-turn notice row (#1899).
+ *
+ * Reached from two places — a turn that produced nothing at all, and a turn
+ * whose tool rows were saved but which never wrote prose — so the row shape and
+ * the log line stay in one place.
+ */
+async function saveEmptyTurnNotice(params: {
+  conversationId: string;
+  dbModelId: number;
+  finishReason?: string;
+  routingMetadata: NexusRoutingMetadata;
+  log: ReturnType<typeof createLogger>;
+  reason: string;
+}): Promise<void> {
+  params.log.warn('Persisting empty-turn notice', {
+    conversationId: params.conversationId,
+    finishReason: params.finishReason,
+    reason: params.reason,
+  });
+  await persistAssistantTurn({
+    conversationId: params.conversationId,
+    text: EMPTY_TURN_PERSIST_NOTICE,
+    dbModelId: params.dbModelId,
+    finishReason: params.finishReason || 'no_content',
+    metadata: { routing: params.routingMetadata, emptyTurn: true },
+  });
+}
+
 function createOnFinishCallback(params: {
   conversationId: string;
   userId: number;
@@ -261,16 +291,13 @@ function createOnFinishCallback(params: {
       // which is what drove people to resend the same message two to six times.
       // Persist the notice instead, as a plain text row that replays safely
       // (no tool_use block without its result).
-      log.warn('Persisting empty-turn notice — turn produced no answer', {
+      await saveEmptyTurnNotice({
         conversationId,
-        finishReason,
-      });
-      await persistAssistantTurn({
-        conversationId,
-        text: EMPTY_TURN_PERSIST_NOTICE,
         dbModelId,
-        finishReason: finishReason || 'no_content',
-        metadata: { routing: routingMetadata, emptyTurn: true },
+        finishReason,
+        routingMetadata,
+        log,
+        reason: 'turn produced no answer',
       });
       await closeMcpClients(connectorToolResults, log, 'onFinish');
       timer({ status: 'success', conversationId, tokensUsed: usage?.totalTokens });
@@ -289,6 +316,25 @@ function createOnFinishCallback(params: {
       dbModelId,
       metadata: { routing: routingMetadata },
     });
+
+    // #1899 case 2: the tool rows above are the history worth keeping, but on
+    // reload they are tool cards and nothing else — the notice the stream
+    // appended is transient. Follow them with the durable notice, AFTER the
+    // tool rows so it reads last. Skipped when a direct-render tool ran: the
+    // chart or document IS the answer.
+    if (
+      assistantMessagePersisted &&
+      turnNeedsEmptyNotice({ text, steps, toolCalls })
+    ) {
+      await saveEmptyTurnNotice({
+        conversationId,
+        dbModelId,
+        finishReason,
+        routingMetadata,
+        log,
+        reason: 'text-free tool turn',
+      });
+    }
 
     if (assistantMessagePersisted) {
       // Deliberately fire-and-forget after persistence. Automatic memory must
@@ -1077,7 +1123,6 @@ function formatDeepResearchReport(
   }
   return body;
 }
-
 
 /**
  * Keep a failed Deep Research turn readable after a reload (#1899, case 4).

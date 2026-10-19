@@ -16,7 +16,6 @@ interface ToolGroupProps {
   endIndex: number;
 }
 
-
 /**
  * Detect group type based on tool contents and connector context.
  */

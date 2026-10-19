@@ -78,13 +78,18 @@ export interface EmptyTurnObservation {
   /**
    * Whether a turn needs a TEXT part to count as answered.
    *
-   * True only for Nexus, whose Thread is the surface whose missing Reasoning and
-   * File renderers make these turns blank. `buildAbortAwareResponse` is shared
-   * with Assistant Architect execution, decision-chat and the programmatic
+   * True for `source: 'nexus'` runs, whose Thread is the surface whose missing
+   * Reasoning and File renderers make these turns blank. `buildAbortAwareResponse`
+   * is shared with Assistant Architect execution and the programmatic
    * `/api/v1/assistants` path, where a run that ends on a structured tool call
    * is an ordinary success and an injected `error` chunk would make the caller's
-   * AI SDK client throw. Those callers keep the narrower #1686 rule: only a run
-   * that emitted nothing whatsoever is called empty.
+   * AI SDK client throw. Those keep the narrower #1686 rule: only a run that
+   * emitted nothing whatsoever is called empty.
+   *
+   * Note that decision-chat (`app/api/nexus/decision-chat/route.ts`) declares
+   * `source: 'nexus'` and so is held to the stricter rule. That is safe because
+   * its terminal tools (`propose_decision`, `commit_decision`) are direct-render
+   * — the card is the answer, and `sawDeliverableTool` suppresses the notice.
    */
   requireTextPart: boolean;
 }
