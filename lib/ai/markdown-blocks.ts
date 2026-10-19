@@ -366,6 +366,38 @@ const MAX_SLIDES = 100;
 const MAX_BULLETS_PER_SLIDE = 12;
 
 /**
+ * Make a lone `---` delimiter line parse as a thematic break.
+ *
+ * `documents.create` has always documented "slides separated by a line
+ * containing only `---`", and that is written WITHOUT a blank line before the
+ * delimiter — which in markdown makes it a *setext heading underline* for the
+ * preceding paragraph, not a horizontal rule. Left alone, the long-advertised
+ * delimiter would silently stop splitting slides: "Slide one\nbody\n---\nSlide
+ * two" would collapse into a single slide titled "Slide one body".
+ *
+ * Inserting a blank line restores the intent. Only applied on the slide path:
+ * in a DOCX a setext heading really is a heading and must stay one.
+ *
+ * Exported for unit testing.
+ */
+export function normalizeSlideDelimiters(markdown: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const out: string[] = [];
+  for (const line of lines) {
+    const previous = out[out.length - 1];
+    if (
+      /^\s*-{3,}\s*$/.test(line) &&
+      previous !== undefined &&
+      previous.trim() !== ""
+    ) {
+      out.push("");
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/**
  * Turn markdown into slides.
  *
  * ONE rule covers both conventions the tool documents, because in markdown they
@@ -375,7 +407,7 @@ const MAX_BULLETS_PER_SLIDE = 12;
  * written as plain `---`-separated chunks keeps the old behaviour.
  */
 export function markdownToSlides(markdown: string): SlideSpec[] {
-  const blocks = parseMarkdownBlocks(markdown);
+  const blocks = parseMarkdownBlocks(normalizeSlideDelimiters(markdown));
   const slides: SlideSpec[] = [];
   let current: SlideSpec | null = null;
 
@@ -396,10 +428,15 @@ export function markdownToSlides(markdown: string): SlideSpec[] {
     return current;
   };
 
+  // One bullet per LINE. A markdown paragraph keeps its soft line breaks in a
+  // single token, and the `---`-delimited convention writes a slide as several
+  // consecutive lines, so a multi-line paragraph is several bullets rather than
+  // one bullet containing newlines.
   const addBullet = (text: string) => {
-    const trimmed = text.trim();
-    if (trimmed === "") return;
-    ensure().bullets.push(trimmed);
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed !== "") ensure().bullets.push(trimmed);
+    }
   };
 
   for (const block of blocks) {
