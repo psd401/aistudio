@@ -236,7 +236,7 @@ export async function POST(request: NextRequest) {
         requestId,
         ownerEmail: context.ownerEmail,
         scope: body.scope,
-        operation: body.argv.slice(0, 4),
+        operation: workspaceOperation(body.argv),
         ...(outbound
           ? {
               outboundSpace: outbound.space,
