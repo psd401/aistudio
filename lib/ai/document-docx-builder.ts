@@ -12,6 +12,7 @@ import {
   BorderStyle,
   Document,
   HeadingLevel,
+  type ILevelsOptions,
   LevelFormat,
   Packer,
   Paragraph,
@@ -28,8 +29,21 @@ import {
   type TableCellRuns,
 } from "@/lib/ai/markdown-blocks";
 
-/** Numbering reference for ordered lists, declared on the Document. */
+/** Numbering reference for ordered lists that start at 1, declared on the Document. */
 const ORDERED_LIST_REFERENCE = "psd-ordered-list";
+
+/**
+ * The numbering reference an ordered list uses. A list that starts at a number
+ * other than 1 needs its own definition: `docx` copies the definition's
+ * first-level `start` into the `startOverride` of every instance it creates
+ * (`createConcreteNumberingInstance`) and exposes no per-instance override, so
+ * "start at 5" can only be said once per definition.
+ */
+function orderedListReference(start: number | undefined): string {
+  return start === undefined
+    ? ORDERED_LIST_REFERENCE
+    : `${ORDERED_LIST_REFERENCE}-from-${start}`;
+}
 
 /** Monospace face for inline code runs. */
 const CODE_FONT = "Consolas";
@@ -79,36 +93,73 @@ const ORDERED_LIST_LEVELS = [
   { format: LevelFormat.LOWER_LETTER, text: "%5." },
 ] as const;
 
+/**
+ * Explicit first number per TOP-LEVEL ordered list, keyed by `listId`. Only a
+ * list that does not start at 1 is present (`5. Fifth` → 5).
+ *
+ * A nested list's own start is not honoured: Word restarts a nested level from
+ * the definition's value under EVERY parent item, so one nested list asking
+ * for `3.` would renumber its siblings as well. Nested lists keep the default
+ * and start at a. / i.
+ */
+function orderedListStarts(blocks: MarkdownBlock[]): Map<number, number> {
+  const starts = new Map<number, number>();
+  for (const block of blocks) {
+    if (block.kind !== "listItem" || !block.ordered || block.level !== 0) continue;
+    if (block.start === undefined || starts.has(block.listId)) continue;
+    starts.set(block.listId, block.start);
+  }
+  return starts;
+}
+
+/** One ordered-list numbering definition per distinct start value in use. */
+function orderedListNumberingConfig(
+  starts: Map<number, number>
+): { reference: string; levels: ILevelsOptions[] }[] {
+  const distinct: (number | undefined)[] = [
+    undefined,
+    ...new Set(starts.values()),
+  ];
+  return distinct.map((start) => ({
+    reference: orderedListReference(start),
+    levels: ORDERED_LIST_LEVELS.map((level, index) => ({
+      level: index,
+      format: level.format,
+      text: level.text,
+      alignment: AlignmentType.START,
+      ...(index === 0 && start !== undefined ? { start } : {}),
+      style: {
+        paragraph: { indent: { left: 720 * (index + 1), hanging: 360 } },
+      },
+    })),
+  }));
+}
+
 export function buildDocxDocument(
   title: string | undefined,
   markdown: string
 ): Document {
-  const children = buildDocxChildren(title, markdown);
+  const blocks = parseMarkdownBlocks(markdown);
+  const starts = orderedListStarts(blocks);
   return new Document({
-    numbering: {
-      config: [
-        {
-          reference: ORDERED_LIST_REFERENCE,
-          levels: ORDERED_LIST_LEVELS.map((level, index) => ({
-            level: index,
-            format: level.format,
-            text: level.text,
-            alignment: AlignmentType.START,
-            style: {
-              paragraph: { indent: { left: 720 * (index + 1), hanging: 360 } },
-            },
-          })),
-        },
-      ],
-    },
-    sections: [{ children }],
+    numbering: { config: orderedListNumberingConfig(starts) },
+    sections: [{ children: renderBlocks(title, blocks, starts) }],
   });
 }
 
-/** Render the IR to a Word body. Exported for unit tests. */
+/** Render markdown to a Word body. Exported for unit tests. */
 export function buildDocxChildren(
   title: string | undefined,
   markdown: string
+): (Paragraph | Table)[] {
+  const blocks = parseMarkdownBlocks(markdown);
+  return renderBlocks(title, blocks, orderedListStarts(blocks));
+}
+
+function renderBlocks(
+  title: string | undefined,
+  blocks: MarkdownBlock[],
+  starts: Map<number, number>
 ): (Paragraph | Table)[] {
   const children: (Paragraph | Table)[] = [];
   if (title && title.trim() !== "") {
@@ -116,15 +167,19 @@ export function buildDocxChildren(
       new Paragraph({ text: title.trim(), heading: HeadingLevel.TITLE })
     );
   }
-  for (const block of parseMarkdownBlocks(markdown)) {
-    pushBlock(block, children);
+  for (const block of blocks) {
+    pushBlock(block, children, starts);
   }
   // Word rejects a section with no body content.
   if (children.length === 0) children.push(new Paragraph({ text: "" }));
   return children;
 }
 
-function pushBlock(block: MarkdownBlock, out: (Paragraph | Table)[]): void {
+function pushBlock(
+  block: MarkdownBlock,
+  out: (Paragraph | Table)[],
+  starts: Map<number, number>
+): void {
   switch (block.kind) {
     case "heading":
       out.push(
@@ -164,7 +219,7 @@ function pushBlock(block: MarkdownBlock, out: (Paragraph | Table)[]): void {
           ...(block.ordered
             ? {
                 numbering: {
-                  reference: ORDERED_LIST_REFERENCE,
+                  reference: orderedListReference(starts.get(block.listId)),
                   level: Math.min(block.level, ORDERED_LIST_LEVELS.length - 1),
                   // One concrete numbering instance PER markdown list. Sharing
                   // the reference without an instance makes Word run a single

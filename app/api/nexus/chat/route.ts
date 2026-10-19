@@ -2506,9 +2506,10 @@ async function prepareChatRequest(params: {
       projectBinding,
       attachmentPreflight: preflight.preflight,
       safePersistenceMessages: prepared.messages as ChatMessages,
-      // #1791 finding 7: drop superseded artifact/document sources from what the
-      // MODEL sees. `safePersistenceMessages` above keeps them, so the thread
-      // still reloads byte-for-byte; only the re-sent history shrinks.
+      // #1791 finding 7: drop superseded artifact/document sources — and, since
+      // #1898, the bodies of earlier generated documents — from what the MODEL
+      // sees. `safePersistenceMessages` above keeps them, so the thread still
+      // reloads byte-for-byte; only the re-sent history shrinks.
       safeModelMessages: pruneStaleWorkspaceToolPayloads(
         prepared.modelMessages as UIMessage[]
       ) as ChatMessages,

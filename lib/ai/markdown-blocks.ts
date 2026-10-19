@@ -38,7 +38,10 @@ export type MarkdownBlock =
    * the item came from — the IR is a flat block stream, so without it a
    * renderer cannot tell two adjacent ordered lists apart and would continue
    * one counter across both ("3. 4." instead of a fresh "1. 2."). `checked` is
-   * present only for a GFM task-list item (`- [x]` / `- [ ]`).
+   * present only for a GFM task-list item (`- [x]` / `- [ ]`). `start` is
+   * present only for an ordered list whose first number is not 1 (`5. Fifth`
+   * → 5): `marked` reports it as `List.start`, and a renderer that drops it
+   * silently renumbers the user's "5, 6" as "1, 2".
    */
   | {
       kind: "listItem";
@@ -46,6 +49,7 @@ export type MarkdownBlock =
       level: number;
       listId: number;
       checked?: boolean;
+      start?: number;
       runs: InlineRun[];
     }
   | { kind: "table"; header: TableCellRuns[]; rows: TableCellRuns[][] }
@@ -210,11 +214,18 @@ export function runsToPlainText(runs: InlineRun[]): string {
   return runs.map((run) => run.text).join("");
 }
 
+/** What every item of one markdown list shares. */
+interface ListContext {
+  ordered: boolean;
+  level: number;
+  listId: number;
+  /** Explicit first number of an ordered list, when it is not 1. */
+  start: number | undefined;
+}
+
 function pushListItems(
   item: Tokens.ListItem,
-  ordered: boolean,
-  level: number,
-  listId: number,
+  list: ListContext,
   out: MarkdownBlock[]
 ): void {
   // An item's own text and its nested lists arrive as siblings in `tokens`.
@@ -244,16 +255,17 @@ function pushListItems(
   if (runs.length > 0 || nestedLists.length === 0) {
     out.push({
       kind: "listItem",
-      ordered,
-      level,
-      listId,
+      ordered: list.ordered,
+      level: list.level,
+      listId: list.listId,
       ...(item.task === true ? { checked: item.checked === true } : {}),
+      ...(list.start !== undefined ? { start: list.start } : {}),
       runs,
     });
   }
 
   for (const nested of nestedLists) {
-    pushList(nested, Math.min(level + 1, MAX_LIST_LEVEL), listId, out);
+    pushList(nested, Math.min(list.level + 1, MAX_LIST_LEVEL), list.listId, out);
   }
   for (const block of nestedBlocks) {
     // A quote or table nested inside a list item renders at top level: the IR
@@ -270,8 +282,16 @@ function pushList(
   out: MarkdownBlock[]
 ): void {
   const ordered = list.ordered === true;
+  // `marked` sets `start` to the first item's number for an ordered list and
+  // to "" for a bulleted one. Only a start other than the default 1 is carried
+  // (mirroring `checked`): an absent field means "nothing to restore".
+  const start =
+    ordered && typeof list.start === "number" && list.start !== 1
+      ? list.start
+      : undefined;
+  const context: ListContext = { ordered, level, listId, start };
   for (const item of list.items ?? []) {
-    pushListItems(item, ordered, level, listId, out);
+    pushListItems(item, context, out);
   }
 }
 

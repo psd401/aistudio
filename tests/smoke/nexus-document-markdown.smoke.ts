@@ -85,6 +85,19 @@ function hasRunText(xml: string, text: string): boolean {
   );
 }
 
+/**
+ * The level-0 start Word applies to one concrete numbering instance. `docx`
+ * writes it as a `startOverride` on the `<w:num>` (copied from the abstract
+ * definition's first level), and the override is what Word honours.
+ */
+function level0Start(numberingXml: string, numId: string): string | undefined {
+  const open = numberingXml.indexOf(`<w:num w:numId="${numId}"`);
+  if (open < 0) return undefined;
+  const close = numberingXml.indexOf("</w:num>", open);
+  const num = numberingXml.slice(open, close < 0 ? undefined : close);
+  return num.match(/<w:startOverride w:val="(\d+)"\/>/)?.[1];
+}
+
 /** The body only — excludes the `<?xml ... ?>` declaration and the namespaces. */
 function bodyOf(xml: string): string {
   const start = xml.indexOf("<w:body>");
@@ -231,6 +244,22 @@ await check("gives each top-level list its own id, shared by its nested items", 
   assert.equal(ids[0], ids[1], "items of one list share an id");
   assert.notEqual(ids[1], ids[2], "a separate list gets a new id");
   assert.equal(ids[2], ids[3], "a nested list shares its parent's id");
+});
+
+await check("keeps an explicit ordered-list start and omits the default", () => {
+  const blocks = parseMarkdownBlocks(
+    "5. Fifth\n6. Sixth\n\nText.\n\n1. One\n2. Two\n\n- Dash"
+  );
+  const items = blocks.filter(
+    (b): b is Extract<MarkdownBlock, { kind: "listItem" }> =>
+      b.kind === "listItem"
+  );
+  assert.deepEqual(
+    items.map((i) => i.start),
+    [5, 5, undefined, undefined, undefined],
+    "start carried on every item of the `5.` list and nowhere else"
+  );
+  assert.ok(!("start" in items[2]), "a list that starts at 1 has no start field");
 });
 
 await check("keeps strikethrough text, image alt text and escapes", () => {
@@ -392,6 +421,19 @@ await check("DOCX restarts numbering for a SECOND ordered list", async () => {
     numIds[2],
     "the second list gets its OWN numbering instance, so Word restarts it at 1 instead of continuing 3., 4."
   );
+});
+
+await check("DOCX starts a numbered list at its explicit first number", async () => {
+  const markdown = "5. Fifth\n6. Sixth\n\nBetween.\n\n1. One\n2. Two";
+  const xml = await documentXml(undefined, markdown);
+  const numbering = await docxPart(undefined, markdown, "word/numbering.xml");
+  const numIds = [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map((m) => m[1]);
+  assert.equal(numIds.length, 4, "four numbered items");
+  assert.notEqual(numIds[0], numIds[2], "the two lists use different instances");
+  assert.equal(level0Start(numbering, numIds[0]), "5", "the `5.` list starts at 5");
+  assert.equal(level0Start(numbering, numIds[2]), "1", "the `1.` list still starts at 1");
+  assert.ok(hasRunText(xml, "Fifth"), "item text present");
+  assert.ok(!hasRunText(xml, "5. Fifth"), "digits not printed as text");
 });
 
 await check("DOCX marks a task list done vs not-done", async () => {
