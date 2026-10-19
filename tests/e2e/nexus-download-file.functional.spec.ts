@@ -221,12 +221,20 @@ test.describe("Nexus returns a downloadable file (#1898)", () => {
         );
         const before = await clickAndDownload(page);
 
-        // Full document navigation, not a client-side re-render: this is the
+        // Reopen the conversation the way a user does from the sidebar:
+        // `/nexus?id=<uuid>`. Nexus keeps the new conversation's id in React
+        // state (`applyConversationHeader` -> `onConversationIdChange`) rather
+        // than pushing it into the URL, so re-visiting `page.url()` would start
+        // a BLANK conversation and this test would pass for the wrong reason.
+        // The id is embedded in the download key itself.
+        const conversationId = before.url.split("/")[6];
+        expect(conversationId).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        );
+        // A full document load, not a client-side re-render: this is the
         // criterion a one-hour presigned URL in a persisted message could not
         // meet.
-        const conversationUrl = page.url();
-        await page.goto(conversationUrl);
-        await page.reload();
+        await page.goto(`/nexus?id=${conversationId}`);
 
         const after = await clickAndDownload(page);
         expect(after.url).toBe(before.url);
