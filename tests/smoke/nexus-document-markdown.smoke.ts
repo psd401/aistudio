@@ -262,6 +262,20 @@ await check("keeps an explicit ordered-list start and omits the default", () => 
   assert.ok(!("start" in items[2]), "a list that starts at 1 has no start field");
 });
 
+await check("keeps a loose item's paragraphs apart and in source order", () => {
+  const textOf = (b: MarkdownBlock) => ("runs" in b ? runsToPlainText(b.runs) : "");
+  const two = parseMarkdownBlocks("- First paragraph\n\n  Second paragraph\n- Next");
+  assert.deepEqual(kinds(two), ["listItem", "paragraph", "listItem"]);
+  assert.deepEqual(two.map(textOf), ["First paragraph", "Second paragraph", "Next"]);
+
+  // A paragraph AFTER a nested list stays after it.
+  const around = parseMarkdownBlocks(
+    "- First\n\n  - nested\n\n  After nested\n- Next"
+  );
+  assert.deepEqual(kinds(around), ["listItem", "listItem", "paragraph", "listItem"]);
+  assert.deepEqual(around.map(textOf), ["First", "nested", "After nested", "Next"]);
+});
+
 await check("keeps strikethrough text, image alt text and escapes", () => {
   assert.equal(
     runsToPlainText(
@@ -436,6 +450,21 @@ await check("DOCX starts a numbered list at its explicit first number", async ()
   assert.ok(!hasRunText(xml, "5. Fifth"), "digits not printed as text");
 });
 
+await check("DOCX gives a loose item's second paragraph its own paragraph", async () => {
+  const xml = await documentXml(undefined, "- First paragraph\n\n  Second paragraph\n- Next");
+  assert.ok(hasRunText(xml, "First paragraph"), "first paragraph is its own run");
+  assert.ok(hasRunText(xml, "Second paragraph"), "second paragraph is its own run");
+  assert.ok(
+    !xml.includes("First paragraphSecond paragraph"),
+    "the two paragraphs are not glued together"
+  );
+  assert.equal(
+    [...bodyOf(xml).matchAll(/<w:numPr>/g)].length,
+    2,
+    "only the two list items carry list numbering"
+  );
+});
+
 await check("DOCX marks a task list done vs not-done", async () => {
   const xml = await documentXml(undefined, "- [x] Done thing\n- [ ] Not done");
   assert.ok(hasRunText(xml, "\u2612 "), "checked ballot glyph present");
@@ -537,6 +566,11 @@ await check("a sub-heading under a title-less slide becomes that slide's title",
 await check("slides show task state as [x] / [ ]", () => {
   const slides = markdownToSlides("## Checklist\n\n- [x] Done\n- [ ] Pending");
   assert.deepEqual(slides[0].bullets, ["[x] Done", "[ ] Pending"]);
+});
+
+await check("a loose item's second paragraph becomes its own bullet", () => {
+  const [slide] = markdownToSlides("## Agenda\n\n- First paragraph\n\n  Second paragraph\n- Next");
+  assert.deepEqual(slide.bullets, ["First paragraph", "Second paragraph", "Next"]);
 });
 
 await check("table rows and code lines become bullets rather than being dropped", () => {

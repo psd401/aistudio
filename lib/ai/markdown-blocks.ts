@@ -228,31 +228,41 @@ function pushListItems(
   list: ListContext,
   out: MarkdownBlock[]
 ): void {
-  // An item's own text and its nested lists arrive as siblings in `tokens`.
+  // An item's own text comes first in `tokens`; everything after it — a nested
+  // list, the SECOND paragraph of a loose item, a quote or a table — arrives as
+  // a sibling token. Only the text before the first boundary is the item's own:
+  // a `space` token is the blank line between two paragraphs, so a later
+  // paragraph must not be folded into the first (the runs would be glued
+  // together with no separator: "First paragraphSecond paragraph").
   const ownInline: Token[] = [];
-  const nestedLists: Tokens.List[] = [];
-  const nestedBlocks: Token[] = [];
+  const trailing: Token[] = [];
+  let ownTextDone = false;
   for (const child of item.tokens ?? []) {
-    if (child.type === "list") {
-      nestedLists.push(child as Tokens.List);
-    } else if (child.type === "text" || child.type === "paragraph") {
-      ownInline.push(child);
-    } else if (child.type === "checkbox") {
+    if (child.type === "checkbox") {
       // `marked` injects a `checkbox` token for a GFM task item — as a sibling
       // in a tight list, or spliced into the paragraph's inline tokens in a
       // loose one. It carries no `text`, so every path that looks for one drops
       // it silently. The state is read from `item.task`/`item.checked` below
       // instead, which `marked` sets in BOTH cases.
       continue;
-    } else {
-      nestedBlocks.push(child);
     }
+    if (child.type === "space") {
+      ownTextDone = true;
+      continue;
+    }
+    if (!ownTextDone && (child.type === "text" || child.type === "paragraph")) {
+      ownInline.push(child);
+      continue;
+    }
+    ownTextDone = true;
+    trailing.push(child);
   }
 
   const runs = trimRuns(collectInlineRuns(ownInline));
+  const nestedListCount = trailing.filter((t) => t.type === "list").length;
   // An item whose only content is a nested list still needs a marker emitted,
   // otherwise the nesting level the children sit under has no visible parent.
-  if (runs.length > 0 || nestedLists.length === 0) {
+  if (runs.length > 0 || nestedListCount === 0) {
     out.push({
       kind: "listItem",
       ordered: list.ordered,
@@ -264,14 +274,22 @@ function pushListItems(
     });
   }
 
-  for (const nested of nestedLists) {
-    pushList(nested, Math.min(list.level + 1, MAX_LIST_LEVEL), list.listId, out);
-  }
-  for (const block of nestedBlocks) {
-    // A quote or table nested inside a list item renders at top level: the IR
-    // carries no indent for non-list blocks. Content is preserved; only the
-    // indentation of this rare shape is lost.
-    pushBlock(block, out);
+  // Emitted in source order, so a paragraph written after a nested list stays
+  // after it.
+  for (const token of trailing) {
+    if (token.type === "list") {
+      pushList(
+        token as Tokens.List,
+        Math.min(list.level + 1, MAX_LIST_LEVEL),
+        list.listId,
+        out
+      );
+      continue;
+    }
+    // A later paragraph, quote or table inside a list item renders at top
+    // level: the IR carries no indent for non-list blocks. Content and order
+    // are preserved; only the indentation of this shape is lost.
+    pushBlock(token, out);
   }
 }
 
