@@ -21,6 +21,11 @@ import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import { createWebFetchTool, skillPinAllowsWebFetch } from '@/lib/tools/web-fetch-tool';
 import {
+  createDocumentCreateTool,
+  skillPinAllowsDocumentCreate,
+} from '@/lib/tools/document-create-tool';
+import { DOCUMENT_CREATE_TOOL_NAME } from '@/lib/tools/document-create-contract';
+import {
   createNexusAttachmentTools,
   createNexusRepositorySearchTools,
 } from '@/lib/nexus/attachment-repository-tool';
@@ -309,6 +314,12 @@ function createOnFinishCallback(params: {
  * `createUniversalTools()` because Nexus is the surface with a multi-step
  * budget for it (`resolveMaxSteps`). Single-step unified-streaming callers would
  * end the turn on the tool result.
+ *
+ * `generate_document` (#1898) is attached on the same terms and for the same
+ * reason: a user who asks for a Word file or a deck cannot know they were meant
+ * to enable a toggle first. It is built from the authenticated `userId` and this
+ * turn's `conversationId`, never from model input, so the model cannot write a
+ * document into someone else's conversation.
  */
 async function buildMergedChatTools(params: {
   enabledTools: string[];
@@ -318,6 +329,12 @@ async function buildMergedChatTools(params: {
   memoryTools?: ToolSet;
   /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
   webFetchAllowed: boolean;
+  /** False when a bound skill's pin excludes `generate_document`. */
+  documentCreateAllowed: boolean;
+  /** Authenticated user id, for the server-built document tool. */
+  userId: number;
+  /** This turn's conversation id, for the server-built document tool. */
+  conversationId: string;
 }): Promise<ToolSet | undefined> {
   const {
     enabledTools,
@@ -326,7 +343,17 @@ async function buildMergedChatTools(params: {
     attachmentTools,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
+    userId,
+    conversationId,
   } = params;
+  const documentTool = documentCreateAllowed
+    ? createDocumentCreateTool({ userId, conversationId })
+    : undefined;
+  // Assigned LAST (see `attachNexusBuiltInTools`) so no connector or workspace
+  // tool of the same name can replace a server-built built-in.
+  const attachBuiltIns = (target: ToolSet): ToolSet =>
+    attachNexusBuiltInTools(target, { webFetchAllowed, documentTool });
   const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
@@ -337,7 +364,8 @@ async function buildMergedChatTools(params: {
     !hasAttachmentTools &&
     !hasMemoryTools
   ) {
-    return webFetchAllowed ? { web_fetch: createWebFetchTool() } : undefined;
+    const builtIns = attachBuiltIns({});
+    return Object.keys(builtIns).length > 0 ? builtIns : undefined;
   }
   const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
   for (const result of connectorToolResults) {
@@ -359,16 +387,34 @@ async function buildMergedChatTools(params: {
     // silently disable or widen them.
     Object.assign(merged, memoryTools);
   }
-  // Assigned LAST so a connector or workspace tool that happens to be named
-  // `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in. The
-  // Nexus tool card also expects this implementation's result shape. A skill
-  // pin that excludes it removes any same-named external tool too.
-  if (webFetchAllowed) {
-    merged.web_fetch = createWebFetchTool();
+  return attachBuiltIns(merged);
+}
+
+/**
+ * Attach the Nexus-only built-in tools, overwriting any same-named entry.
+ *
+ * Applied LAST in the merge so a connector or workspace tool that happens to be
+ * named `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in,
+ * and nothing can replace the conversation-scoped `generate_document` whose
+ * result shape the download card depends on. A skill `allowed-tools` pin that
+ * excludes one of these deletes any same-named external tool too, rather than
+ * leaving a look-alike in its place.
+ */
+function attachNexusBuiltInTools(
+  target: ToolSet,
+  options: { webFetchAllowed: boolean; documentTool?: ToolSet[string] },
+): ToolSet {
+  if (options.webFetchAllowed) {
+    target.web_fetch = createWebFetchTool();
   } else {
-    delete merged.web_fetch;
+    delete target.web_fetch;
   }
-  return merged;
+  if (options.documentTool) {
+    target[DOCUMENT_CREATE_TOOL_NAME] = options.documentTool;
+  } else {
+    delete target[DOCUMENT_CREATE_TOOL_NAME];
+  }
+  return target;
 }
 
 function addConnectorToolHeader(
@@ -440,6 +486,46 @@ function buildStreamingResponseHeaders(params: {
 }
 
 /**
+ * The stream's lifecycle callbacks. Extracted so `executeStreaming` stays within
+ * the module's function-length budget; the behaviour is unchanged.
+ */
+function buildStreamCallbacks(params: {
+  conversationId: string;
+  userId: number;
+  sessionId: string;
+  requestId: string;
+  latestUserText: string;
+  dbModelId: number;
+  connectorToolResults: McpConnectorToolsResult[];
+  log: ReturnType<typeof createLogger>;
+  timer: (data: Record<string, unknown>) => void;
+  routingMetadata: NexusRoutingMetadata;
+}): StreamRequest["callbacks"] {
+  const { connectorToolResults, log, conversationId } = params;
+  return {
+    onFinish: createOnFinishCallback({
+      conversationId,
+      userId: params.userId,
+      cognitoSub: params.sessionId,
+      requestId: params.requestId,
+      latestUserText: params.latestUserText,
+      dbModelId: params.dbModelId,
+      connectorToolResults,
+      log,
+      timer: params.timer,
+      routingMetadata: params.routingMetadata,
+    }),
+    onError: async (error: Error) => {
+      log.warn("Stream error — closing MCP clients", {
+        conversationId,
+        error: error.message,
+      });
+      await closeMcpClients(connectorToolResults, log, "onError");
+    },
+  };
+}
+
+/**
  * Execute streaming and return response
  */
 
@@ -477,6 +563,8 @@ async function executeStreaming(params: {
   memoryTools?: ToolSet;
   /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
   webFetchAllowed: boolean;
+  /** False when a bound skill's pin excludes `generate_document` (#1898). */
+  documentCreateAllowed: boolean;
   /** Sanitized, owner-scoped memory context for this turn. */
   userMemoryFragment?: string;
   /** Guardrail-processed latest user text used for post-turn extraction. */
@@ -510,6 +598,7 @@ async function executeStreaming(params: {
     repositoryPromptFragment,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
     userMemoryFragment,
     latestUserText,
     reasoningEffort,
@@ -552,6 +641,9 @@ async function executeStreaming(params: {
     attachmentTools: hasRepositoryTools ? attachmentTools : undefined,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
+    userId,
+    conversationId,
   });
 
   const streamRequest: StreamRequest = {
@@ -576,27 +668,18 @@ async function executeStreaming(params: {
     // `lib/nexus/chat-step-budget.ts` for why a workspace turn gets a wider bound.
     maxSteps: resolveMaxSteps({ multiStepToolsActive, hasWorkspaceTools }),
     options: { reasoningEffort, responseMode },
-    callbacks: {
-      onFinish: createOnFinishCallback({
-        conversationId,
-        userId,
-        cognitoSub: sessionId,
-        requestId,
-        latestUserText,
-        dbModelId,
-        connectorToolResults,
-        log,
-        timer,
-        routingMetadata,
-      }),
-      onError: async (error: Error) => {
-        log.warn("Stream error — closing MCP clients", {
-          conversationId,
-          error: error.message,
-        });
-        await closeMcpClients(connectorToolResults, log, "onError");
-      },
-    },
+    callbacks: buildStreamCallbacks({
+      conversationId,
+      userId,
+      sessionId,
+      requestId,
+      latestUserText,
+      dbModelId,
+      connectorToolResults,
+      log,
+      timer,
+      routingMetadata,
+    }),
   };
 
   log.info("Starting unified streaming service", {
@@ -2969,6 +3052,9 @@ async function resolveToolsAndStream(params: {
     }),
     memoryTools: memoryContext.tools,
     webFetchAllowed: skillPinAllowsWebFetch(skillBinding.skillAllowedTools),
+    documentCreateAllowed: skillPinAllowsDocumentCreate(
+      skillBinding.skillAllowedTools,
+    ),
     userMemoryFragment: memoryContext.userMemoryFragment,
     latestUserText: resolved.protectedLatestUserText,
     reasoningEffort: prepared.validationData.reasoningEffort || "medium",

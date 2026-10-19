@@ -667,6 +667,23 @@ const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = AI_SDK_TOOLS.map((tool) => 
  * lazily at dispatch — keeping the S3/AI-SDK/format-lib graph out of this
  * Edge-compiled manifest module.
  */
+
+/**
+ * Agent-platform tools ALSO exposed on the `ai_sdk` (Nexus chat) surface.
+ *
+ * `documents.create` is here for Issue #1898: Nexus could not hand back a real
+ * file, while the generator this tool wraps already produced docx/xlsx/pptx/pdf
+ * for the agent runtime. Listing the chat surface here — rather than adding a
+ * second catalog entry — keeps one tool, one handler, one identifier.
+ *
+ * The entry carries no `displayName`, so it is an always-on chat tool rather
+ * than a selectable toggle (see `getSelectableToolConfigsFromCatalog`), exactly
+ * like `chat.web_fetch`. Rollback for #1898 is removing the identifier from this
+ * set; the `internal` agent surface is untouched either way.
+ */
+const AGENT_TOOLS_ALSO_ON_CHAT_SURFACE: ReadonlySet<string> = new Set([
+  "documents.create",
+]);
 const AGENT_TOOL_MANIFEST_ENTRIES: ToolManifestEntry[] = AGENT_TOOL_DESCRIPTORS.map(
   (descriptor): ToolManifestEntry => ({
     identifier: descriptor.identifier,
@@ -674,7 +691,9 @@ const AGENT_TOOL_MANIFEST_ENTRIES: ToolManifestEntry[] = AGENT_TOOL_DESCRIPTORS.
     name: descriptor.name,
     description: descriptor.description,
     inputSchema: descriptor.inputSchema,
-    surfaces: ["internal"],
+    surfaces: AGENT_TOOLS_ALSO_ON_CHAT_SURFACE.has(descriptor.identifier)
+      ? ["internal", "ai_sdk"]
+      : ["internal"],
     requiredScopes: descriptor.requiredScopes,
     agentCallable: true,
   })
