@@ -35,9 +35,12 @@ export type MarkdownBlock =
   | { kind: "quote"; runs: InlineRun[] }
   /**
    * `level` is 0-based nesting depth. `listId` identifies which markdown list
-   * the item came from — the IR is a flat block stream, so without it a
-   * renderer cannot tell two adjacent ordered lists apart and would continue
-   * one counter across both ("3. 4." instead of a fresh "1. 2."). `checked` is
+   * the item came from, and EVERY list gets its own — a nested one too. The IR
+   * is a flat block stream, so without it a renderer cannot tell two adjacent
+   * ordered lists apart and would continue one counter across both ("3. 4."
+   * instead of a fresh "1. 2."); the same happens to two numbered sublists
+   * under different bulleted parents when they share the parent's id, because
+   * a bullet never advances the ordered counter in Word. `checked` is
    * present only for a GFM task-list item (`- [x]` / `- [ ]`). `start` is
    * present only for an ordered list whose first number is not 1 (`5. Fifth`
    * → 5): `marked` reports it as `List.start`, and a renderer that drops it
@@ -221,6 +224,8 @@ interface ListContext {
   listId: number;
   /** Explicit first number of an ordered list, when it is not 1. */
   start: number | undefined;
+  /** The parse-wide id allocator, so a nested list can take an id of its own. */
+  nextListId: () => number;
 }
 
 function pushListItems(
@@ -278,10 +283,12 @@ function pushListItems(
   // after it.
   for (const token of trailing) {
     if (token.type === "list") {
+      // Its own id, not the parent's: see `listId` on the IR type.
       pushList(
         token as Tokens.List,
         Math.min(list.level + 1, MAX_LIST_LEVEL),
-        list.listId,
+        list.nextListId(),
+        list.nextListId,
         out
       );
       continue;
@@ -289,7 +296,7 @@ function pushListItems(
     // A later paragraph, quote or table inside a list item renders at top
     // level: the IR carries no indent for non-list blocks. Content and order
     // are preserved; only the indentation of this shape is lost.
-    pushBlock(token, out);
+    pushBlock(token, out, list.nextListId);
   }
 }
 
@@ -297,6 +304,7 @@ function pushList(
   list: Tokens.List,
   level: number,
   listId: number,
+  nextListId: () => number,
   out: MarkdownBlock[]
 ): void {
   const ordered = list.ordered === true;
@@ -307,7 +315,7 @@ function pushList(
     ordered && typeof list.start === "number" && list.start !== 1
       ? list.start
       : undefined;
-  const context: ListContext = { ordered, level, listId, start };
+  const context: ListContext = { ordered, level, listId, start, nextListId };
   for (const item of list.items ?? []) {
     pushListItems(item, context, out);
   }
@@ -346,8 +354,8 @@ function pushStructuralBlock(
 ): boolean {
   switch (token.type) {
     case "list":
-      // A new id per TOP-LEVEL list; nested lists share their parent's.
-      pushList(token as Tokens.List, 0, nextListId(), out);
+      // A new id per list; nested lists draw their own from the same allocator.
+      pushList(token as Tokens.List, 0, nextListId(), nextListId, out);
       return true;
     case "table":
       pushTable(token as Tokens.Table, out);

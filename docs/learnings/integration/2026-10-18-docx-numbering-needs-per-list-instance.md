@@ -35,4 +35,8 @@ adjacent lists apart without it.
 ## Prevention
 
 When generating DOCX ordered lists programmatically, always pass a unique
-`instance` per logical list, not just a shared `reference`.
+`instance` per logical list, not just a shared `reference` — and "logical
+list" includes every NESTED list. A sublist that reuses its parent's instance
+shares a level-1 counter with every other sublist under that parent list; when
+the parents are bullets (which never advance the ordered counter) the second
+sublist continues "3. 4." (Codex review round 6 on PR #1941).

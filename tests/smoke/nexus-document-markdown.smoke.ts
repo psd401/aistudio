@@ -232,7 +232,7 @@ await check("keeps task state in a LOOSE list too (different marked token shape)
   );
 });
 
-await check("gives each top-level list its own id, shared by its nested items", () => {
+await check("gives every list its own id — nested lists too", () => {
   const blocks = parseMarkdownBlocks(
     "1. First\n2. Second\n\nA paragraph.\n\n1. Alpha\n   1. Nested"
   );
@@ -243,7 +243,12 @@ await check("gives each top-level list its own id, shared by its nested items", 
   const ids = items.map((i) => i.listId);
   assert.equal(ids[0], ids[1], "items of one list share an id");
   assert.notEqual(ids[1], ids[2], "a separate list gets a new id");
-  assert.equal(ids[2], ids[3], "a nested list shares its parent's id");
+  assert.notEqual(
+    ids[2],
+    ids[3],
+    "a nested list gets its OWN id — in Word a sublist is its own numbering instance"
+  );
+  assert.equal(new Set(ids).size, 3, "three lists, three ids");
 });
 
 await check("keeps an explicit ordered-list start and omits the default", () => {
@@ -463,6 +468,44 @@ await check("DOCX gives a loose item's second paragraph its own paragraph", asyn
     2,
     "only the two list items carry list numbering"
   );
+});
+
+/** `[level, numId]` for every numbered paragraph in the body, in order. */
+function numberingPairs(xml: string): [string, string][] {
+  return [
+    ...bodyOf(xml).matchAll(/<w:ilvl w:val="(\d+)"\/>\s*<w:numId w:val="(\d+)"\/>/g),
+  ].map((m) => [m[1], m[2]]);
+}
+
+await check("DOCX restarts a numbered sublist under EACH bulleted parent", async () => {
+  const xml = await documentXml(
+    undefined,
+    "- Alpha\n  1. one\n  2. two\n- Beta\n  1. three\n  2. four"
+  );
+  const nested = numberingPairs(xml).filter(([level]) => level === "1");
+  assert.equal(nested.length, 4, "four nested numbered items");
+  assert.equal(nested[0][1], nested[1][1], "first sublist shares one instance");
+  assert.equal(nested[2][1], nested[3][1], "second sublist shares one instance");
+  assert.notEqual(
+    nested[1][1],
+    nested[2][1],
+    "the second sublist gets its OWN instance — the bullet parents never advance the ordered counter, so a shared instance continues 3., 4."
+  );
+});
+
+await check("DOCX keeps a numbered parent and its numbered sublists on separate instances", async () => {
+  const xml = await documentXml(
+    undefined,
+    "1. a\n   1. x\n   2. y\n2. b\n   1. z"
+  );
+  const pairs = numberingPairs(xml);
+  const top = pairs.filter(([level]) => level === "0").map(([, id]) => id);
+  const nested = pairs.filter(([level]) => level === "1").map(([, id]) => id);
+  assert.deepEqual(top, [top[0], top[0]], "both parent items share one instance");
+  assert.equal(nested.length, 3, "three nested items");
+  assert.equal(nested[0], nested[1], "x and y share one instance");
+  assert.notEqual(nested[1], nested[2], "z is a new sublist, so a new instance");
+  assert.ok(!nested.includes(top[0]), "no sublist reuses the parent's instance");
 });
 
 await check("DOCX marks a task list done vs not-done", async () => {

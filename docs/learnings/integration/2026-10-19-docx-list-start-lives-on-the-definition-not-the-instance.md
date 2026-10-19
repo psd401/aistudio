@@ -34,9 +34,8 @@ override — `IConcreteNumberingOptions.overrideLevels` exists but is internal.
 - `document-docx-builder.ts` declares one numbering definition per distinct
   start value in the document (`psd-ordered-list-from-5`), with `start` on its
   level 0, and points each list's paragraphs at the definition for its own
-  start. Nested lists keep the default: Word restarts a nested level from the
-  definition's value under every parent item, so honouring one nested start
-  would renumber its siblings too.
+  start. Nested lists keep the default: the definition's `start` reaches
+  level 0 only, and a nested list numbers at level 1 and deeper.
 
 ## Prevention
 

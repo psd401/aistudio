@@ -97,10 +97,9 @@ const ORDERED_LIST_LEVELS = [
  * Explicit first number per TOP-LEVEL ordered list, keyed by `listId`. Only a
  * list that does not start at 1 is present (`5. Fifth` → 5).
  *
- * A nested list's own start is not honoured: Word restarts a nested level from
- * the definition's value under EVERY parent item, so one nested list asking
- * for `3.` would renumber its siblings as well. Nested lists keep the default
- * and start at a. / i.
+ * A nested list's own start is not honoured: the definition's `start` reaches
+ * level 0 only (see `orderedListReference`), and a nested list numbers at
+ * level 1 and deeper. Nested lists keep the default and start at a. / i.
  */
 function orderedListStarts(blocks: MarkdownBlock[]): Map<number, number> {
   const starts = new Map<number, number>();
