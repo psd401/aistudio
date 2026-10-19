@@ -78,9 +78,11 @@ describe("a budget spent entirely on tool calls is explained (#1899)", () => {
       sawReasoning: false,
       sawFile: false,
       sawToolActivity: true,
+      sawDeliverableTool: false,
       sawOtherRendered: false,
       completedSteps: maxSteps,
       maxSteps,
+      requireTextPart: true,
     });
 
     expect(kind).toBe("step_budget_exhausted");
@@ -94,9 +96,11 @@ describe("a budget spent entirely on tool calls is explained (#1899)", () => {
         sawReasoning: false,
         sawFile: false,
         sawToolActivity: true,
+        sawDeliverableTool: false,
         sawOtherRendered: false,
         completedSteps: WEB_FETCH_MAX_STEPS,
         maxSteps: WEB_FETCH_MAX_STEPS,
+        requireTextPart: true,
       })
     ).toBeNull();
   });

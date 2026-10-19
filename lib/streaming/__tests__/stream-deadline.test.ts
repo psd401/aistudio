@@ -260,7 +260,9 @@ class ResponseAdapter extends TestAdapter {
     chunks: unknown[],
     aborted: boolean,
     timedOut: boolean,
-    maxSteps?: number
+    maxSteps?: number,
+    /** Nexus semantics by default; the suite below covers the other callers. */
+    requireTextPart = true
   ): Response {
     const stream = new ReadableStream({
       start(controller) {
@@ -278,7 +280,8 @@ class ResponseAdapter extends TestAdapter {
       },
       () => aborted,
       () => timedOut,
-      typeof maxSteps === 'number' ? { maxSteps } : undefined
+      undefined,
+      { requireTextPart, maxSteps }
     );
   }
 }
@@ -427,6 +430,52 @@ describe('buildAbortAwareResponse — answer-less turns (#1899)', () => {
     const last = chunks.at(-1) as { type: string; errorText: string };
     expect(last.type).toBe('error');
     expect(last.errorText).toContain('used up all of its tool steps');
+  });
+
+  it('stays silent when a direct-render tool produced the deliverable (#1898)', async () => {
+    // The download card IS the answer; a notice under it would contradict it.
+    const chunks = await readChunks(
+      responder.respond(
+        [
+          { type: 'start' },
+          {
+            type: 'tool-input-available',
+            toolCallId: 'c1',
+            toolName: 'generate_document',
+            input: { kind: 'docx' },
+          },
+          { type: 'tool-output-available', toolCallId: 'c1', output: { ok: true } },
+          { type: 'finish-step' },
+          { type: 'finish' },
+        ],
+        false,
+        false,
+        1
+      )
+    );
+    expect(chunks.some(c => c.type === 'error')).toBe(false);
+  });
+
+  it('leaves non-Nexus callers on the pre-#1899 rule', async () => {
+    // Assistant Architect / decision-chat / the v1 assistants API share this
+    // method; a run that ends on a structured tool call is a success there, and
+    // an injected error chunk makes their AI SDK client throw.
+    const toolOnly = [
+      { type: 'start' },
+      { type: 'tool-input-start', toolCallId: 'c1', toolName: 'commit_decision' },
+      { type: 'finish-step' },
+      { type: 'finish' },
+    ];
+    expect(
+      (await readChunks(responder.respond(toolOnly, false, false, 1, false))).some(
+        c => c.type === 'error'
+      )
+    ).toBe(false);
+    // A wholly silent run is still called empty for them, as before.
+    const silent = await readChunks(
+      responder.respond([{ type: 'start' }, { type: 'finish' }], false, false, 1, false)
+    );
+    expect((silent.at(-1) as { errorText: string }).errorText).toContain('empty response');
   });
 
   it('stays silent for a turn that rendered only a source or a data part', async () => {

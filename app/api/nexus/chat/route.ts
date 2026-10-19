@@ -85,6 +85,7 @@ import {
   persistAssistantTurn,
 } from './chat-helpers';
 import { EMPTY_TURN_PERSIST_NOTICE } from '@/lib/streaming/empty-turn-notice';
+import { sanitizeStreamErrorMessage } from '@/lib/streaming/stream-error-message';
 
 import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
@@ -239,7 +240,7 @@ function createOnFinishCallback(params: {
       aborted: !!aborted,
     });
 
-    const skipReason = incompleteTurnReason({ text, aborted, steps });
+    const skipReason = incompleteTurnReason({ text, aborted, steps, toolCalls });
     if (skipReason === 'stream_aborted') {
       log.warn('Skipping assistant message persistence — incomplete turn', {
         conversationId,
@@ -1077,7 +1078,40 @@ function formatDeepResearchReport(
   return body;
 }
 
-function createDeepResearchResponse(params: {
+
+/**
+ * Keep a failed Deep Research turn readable after a reload (#1899, case 4).
+ *
+ * The user message is written before the research starts, so a failure that is
+ * only streamed leaves the prompt with no reply the next time the conversation
+ * loads. A failure of this write is logged, never thrown — the stream and the
+ * research lease still have to unwind.
+ */
+async function persistDeepResearchFailure(
+  params: DeepResearchResponseParams,
+  text: string,
+): Promise<void> {
+  try {
+    await params.persistAssistantMessage({
+      conversationId: params.conversationId,
+      text,
+      finishReason: "error",
+      dbModelId: params.dbModelId,
+      metadata: { routing: params.routingMetadata, deepResearchFailed: true },
+    });
+  } catch (persistError) {
+    params.log.error("Failed to persist Deep Research failure notice", {
+      conversationId: params.conversationId,
+      error:
+        persistError instanceof Error
+          ? persistError.message
+          : String(persistError),
+    });
+  }
+}
+
+/** Everything `createDeepResearchResponse` and its helpers need for one run. */
+interface DeepResearchResponseParams {
   prompt: string;
   modelId: string;
   dbModelId: number;
@@ -1095,7 +1129,9 @@ function createDeepResearchResponse(params: {
   createUIMessageStream: (typeof import("ai"))["createUIMessageStream"];
   createUIMessageStreamResponse: (typeof import("ai"))["createUIMessageStreamResponse"];
   releaseDeepResearch: (typeof import("@/lib/ai/deep-research-budget"))["releaseDeepResearch"];
-}): Response {
+}
+
+function createDeepResearchResponse(params: DeepResearchResponseParams): Response {
   const messageId = `dr-${Date.now()}`;
   const headers: Record<string, string> = {
     "X-Request-Id": params.requestId,
@@ -1183,12 +1219,19 @@ function createDeepResearchResponse(params: {
             message,
           });
           if (!streamEnded) {
+            // #1899: the raw provider/tool message can carry request ids and
+            // prompt fragments, and "An error occurred."-grade text tells the
+            // user nothing. Say which kind of failure it was instead — and
+            // persist it, or the prompt reloads with no reply under it at all
+            // (the user message was saved before the research started).
+            const notice = `\n\n**Research failed:** ${sanitizeStreamErrorMessage(error)}`;
             writer.write({
               type: "text-delta",
               id: messageId,
-              delta: `\n\n**Research failed:** ${message}`,
+              delta: notice,
             });
             writer.write({ type: "text-end", id: messageId });
+            await persistDeepResearchFailure(params, notice.trim());
           }
           params.timer({
             status: "error",

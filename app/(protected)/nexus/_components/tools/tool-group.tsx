@@ -7,24 +7,15 @@ import { ChevronDown, ChevronUp, Wrench, Loader2, Plug } from "lucide-react";
 import { useMessage } from "@assistant-ui/react";
 import { useConnectorToolsOptional } from "./connector-tool-context";
 import { useWorkspaceChangeSignals } from "./use-workspace-change-signal";
+// Tools that render directly, without the collapsible wrapper. Shared with the
+// streaming layer, which must not call such a turn answer-less (#1899).
+import { isDirectRenderTool } from "@/lib/tools/direct-render-tools";
 
 interface ToolGroupProps {
   startIndex: number;
   endIndex: number;
 }
 
-// Tools that should render directly without the collapsible wrapper
-const DIRECT_RENDER_TOOLS = [
-  "show_chart",
-  "search_graph_nodes",
-  "propose_decision",
-  "commit_decision",
-  // #1898: the download card IS the deliverable. Inside the collapsed "Tool
-  // Actions" card the user would have to click "Show" to find the file they
-  // asked for, and renderers mount only while expanded — so the card must
-  // render directly.
-  "generate_document",
-];
 
 /**
  * Detect group type based on tool contents and connector context.
@@ -46,7 +37,7 @@ function classifyToolGroup(
 ): GroupType {
   const names = toolCalls.map(toolNameOf);
   if (
-    names.every((name) => name !== null && DIRECT_RENDER_TOOLS.includes(name))
+    names.every((name) => name !== null && isDirectRenderTool(name))
   ) {
     return "direct";
   }

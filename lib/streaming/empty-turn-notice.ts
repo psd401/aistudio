@@ -30,10 +30,15 @@ export type ChunkVisibility = "text" | "reasoning" | "file" | "tool" | "other" |
  * Bucket a UI-message-stream chunk type by what the Nexus thread does with it.
  *
  * `other` covers the part types the thread renders but which never stand in for
- * an answer on their own: retrieved sources (`source-*`, rendered by
- * `WebSearchSource`) and custom `data-*` parts. A turn made only of those is
- * left alone rather than labelled empty — calling a rendered answer "empty" is
- * the one failure mode worse than staying quiet.
+ * an answer on their own: retrieved sources (`source-*`, which the thread does
+ * register a renderer for, `WebSearchSource`) and custom `data-*` parts. A turn
+ * made only of those is left alone rather than labelled empty — calling a
+ * rendered answer "empty" is the one failure mode worse than staying quiet.
+ *
+ * Note that neither is emitted on this path today: `source-*` chunks require
+ * `toUIMessageStream({ sendSources: true })`, which nothing sets, and no
+ * adapter writes `data-*` parts. The bucket is defensive, so that turning
+ * sources on later cannot silently start labelling citation turns empty.
  */
 export function classifyChunkVisibility(type: string): ChunkVisibility {
   if (type === "text-delta") return "text";
@@ -58,12 +63,45 @@ export interface EmptyTurnObservation {
   sawReasoning: boolean;
   sawFile: boolean;
   sawToolActivity: boolean;
+  /**
+   * A tool from `DIRECT_RENDER_TOOL_NAMES` ran — a chart, a generated document,
+   * a decision card. Its own rendered output is the answer, so the turn is not
+   * answer-less however little prose came with it.
+   */
+  sawDeliverableTool: boolean;
   /** `source-*` / `data-*` parts, which the thread renders on their own. */
   sawOtherRendered: boolean;
   /** `finish-step` chunks seen, i.e. agent-loop steps that completed. */
   completedSteps: number;
   /** The run's step budget (`resolveMaxSteps`), when the caller knows it. */
   maxSteps?: number;
+  /**
+   * Whether a turn needs a TEXT part to count as answered.
+   *
+   * True only for Nexus, whose Thread is the surface whose missing Reasoning and
+   * File renderers make these turns blank. `buildAbortAwareResponse` is shared
+   * with Assistant Architect execution, decision-chat and the programmatic
+   * `/api/v1/assistants` path, where a run that ends on a structured tool call
+   * is an ordinary success and an injected `error` chunk would make the caller's
+   * AI SDK client throw. Those callers keep the narrower #1686 rule: only a run
+   * that emitted nothing whatsoever is called empty.
+   */
+  requireTextPart: boolean;
+}
+
+/**
+ * The pre-#1899 rule, kept for every caller that is not Nexus: only a run that
+ * emitted nothing whatsoever is called empty.
+ */
+function classifyWithoutTextRule(
+  observation: EmptyTurnObservation
+): EmptyTurnKind | null {
+  const renderedSomething =
+    observation.sawReasoning ||
+    observation.sawFile ||
+    observation.sawToolActivity ||
+    observation.sawOtherRendered;
+  return renderedSomething ? null : "nothing";
 }
 
 /**
@@ -79,6 +117,10 @@ export function classifyEmptyTurn(
   observation: EmptyTurnObservation
 ): EmptyTurnKind | null {
   if (observation.sawText) return null;
+  // The chart / document / decision card the user asked for IS the answer.
+  if (observation.sawDeliverableTool) return null;
+
+  if (!observation.requireTextPart) return classifyWithoutTextRule(observation);
 
   if (observation.sawToolActivity) {
     const { maxSteps, completedSteps } = observation;

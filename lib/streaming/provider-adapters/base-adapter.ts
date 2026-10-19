@@ -16,6 +16,7 @@ import {
   emptyTurnNotice,
 } from '../empty-turn-notice';
 import { sanitizeStreamErrorMessage } from '../stream-error-message';
+import { isDirectRenderTool } from '@/lib/tools/direct-render-tools';
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -492,15 +493,12 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Handle streaming chunks for progress tracking
       this.handleStreamProgress(result, callbacks);
       
-      const buildResponse = (options?: { headers?: Record<string, string> }) =>
-        this.buildAbortAwareResponse(
-          result,
-          () => streamAborted || deadline.timedOut(),
-          () => deadline.timedOut(),
-          // #1899: the step budget lets the notice distinguish "spent every tool
-          // step without answering" from "stopped after one tool call".
-          { ...options, ...(typeof enhancedConfig.maxSteps === 'number' ? { maxSteps: enhancedConfig.maxSteps } : {}) }
-        );
+      const buildResponse = this.buildResponseFactory(
+        result,
+        enhancedConfig,
+        deadline,
+        () => streamAborted
+      );
 
       return {
         toDataStreamResponse: buildResponse,
@@ -635,21 +633,57 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * The chunk is appended at end-of-stream, so it neither reorders nor rewrites
    * any content the model already produced.
    *
-   * #1899: the "is this turn blank?" test is anchored on a TEXT part, not on
-   * "some chunk arrived". `reasoning-delta` and `file` chunks used to count as
-   * visible, but the Nexus Thread registers no Reasoning and no File renderer,
-   * so a think-then-say-nothing turn rendered an empty bubble with no notice.
-   * Tool-only turns are covered too: `resolveMaxSteps` gives an ordinary turn
-   * three steps, so a turn can spend them all on `web_fetch` and end with tool
-   * cards and no answer. `classifyEmptyTurn` decides which of those happened
-   * and `emptyTurnNotice` says so. `source-*` / `data-*` parts still suppress
-   * the notice — the thread renders those itself, and telling someone their
-   * visible answer was empty is the one failure worse than staying quiet.
+   * #1899: for Nexus, the "is this turn blank?" test is anchored on a TEXT part,
+   * not on "some chunk arrived". `reasoning-delta` and `file` chunks used to
+   * count as visible, but the Nexus Thread registers no Reasoning and no File
+   * renderer, so a think-then-say-nothing turn rendered an empty bubble with no
+   * notice. Tool-only turns are covered too: `resolveMaxSteps` gives an ordinary
+   * turn three steps, so a turn can spend them all on `web_fetch` and end with
+   * tool cards and no answer. `classifyEmptyTurn` decides which happened and
+   * `emptyTurnNotice` says so.
+   *
+   * Two guards keep that from firing on a turn that DID answer:
+   *  - a direct-render tool (`lib/tools/direct-render-tools.ts`) means the chart
+   *    or generated document IS the answer, so nothing is said; and
+   *  - `emptyTurn.requireTextPart` is set only for Nexus. The same method serves
+   *    Assistant Architect execution, decision-chat and the programmatic
+   *    `/api/v1/assistants` path, where a run ending on a structured tool call
+   *    is an ordinary success — and an injected `error` chunk makes an AI SDK
+   *    client throw. Those keep the narrower pre-#1899 rule.
    *
    * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`):
    * a turn this method calls blank is also the turn that route persists as a
    * notice row, so the notice survives a reload instead of vanishing.
    */
+  /**
+   * The response builder every adapter returns, with the empty-turn policy for
+   * this run already resolved.
+   *
+   * Shared so the base and OpenAI Responses-API paths cannot drift: only Nexus
+   * requires a text part (its Thread draws nothing for reasoning/file parts),
+   * and the step budget lets the notice distinguish "spent every tool step
+   * without answering" from "stopped after one call". (#1899)
+   */
+  protected buildResponseFactory(
+    result: Parameters<BaseProviderAdapter['buildAbortAwareResponse']>[0],
+    config: Pick<StreamConfig, 'source' | 'maxSteps'>,
+    deadline: StreamDeadline,
+    wasAborted: () => boolean
+  ): (options?: { headers?: Record<string, string> }) => Response {
+    const emptyTurn = {
+      requireTextPart: config.source === 'nexus',
+      maxSteps: config.maxSteps,
+    };
+    return options =>
+      this.buildAbortAwareResponse(
+        result,
+        () => wasAborted() || deadline.timedOut(),
+        () => deadline.timedOut(),
+        options,
+        emptyTurn
+      );
+  }
+
   protected buildAbortAwareResponse(
     result: {
       toUIMessageStream?: (options?: { onError?: (error: unknown) => string }) => ReadableStream<UIMessageChunk>;
@@ -658,7 +692,11 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     },
     wasAborted: () => boolean,
     didTimeOut: () => boolean,
-    options?: { headers?: Record<string, string>; maxSteps?: number }
+    /** Transport only — passed straight to the Response. */
+    options?: { headers?: Record<string, string> },
+    /** How to judge an answer-less turn (#1899). Kept out of `options` so no
+     *  business input can ride along into the HTTP response. */
+    emptyTurn?: { requireTextPart: boolean; maxSteps?: number }
   ): Response {
     // Providers without the UI-message stream (plain text responses) keep the
     // previous behaviour — there is no chunk protocol to append to.
@@ -674,10 +712,12 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       sawReasoning: false,
       sawFile: false,
       sawToolActivity: false,
+      sawDeliverableTool: false,
       sawOtherRendered: false,
       completedSteps: 0,
     };
-    const maxSteps = options?.maxSteps;
+    const requireTextPart = emptyTurn?.requireTextPart ?? false;
+    const maxSteps = emptyTurn?.maxSteps;
 
     const stream = result
       .toUIMessageStream({
@@ -704,9 +744,17 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
               case 'file':
                 seen.sawFile = true;
                 break;
-              case 'tool':
+              case 'tool': {
                 seen.sawToolActivity = true;
+                // `tool-input-start` / `tool-input-available` carry the name;
+                // later chunks for the same call do not, which is why the flag
+                // is sticky rather than recomputed at the end.
+                const toolName = (chunk as { toolName?: unknown }).toolName;
+                if (typeof toolName === 'string' && isDirectRenderTool(toolName)) {
+                  seen.sawDeliverableTool = true;
+                }
                 break;
+              }
               case 'other':
                 seen.sawOtherRendered = true;
                 break;
@@ -726,10 +774,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             // A run that ended cleanly with no answer is still a dead end for
             // the user: without a notice the stream would simply stop, and the
             // turn would reload as if it had never happened. Say what happened.
-            const emptyKind = classifyEmptyTurn({
-              ...seen,
-              ...(typeof maxSteps === 'number' ? { maxSteps } : {}),
-            });
+            const emptyKind = classifyEmptyTurn({ ...seen, requireTextPart, maxSteps });
             if (emptyKind) {
               controller.enqueue({
                 type: 'error',

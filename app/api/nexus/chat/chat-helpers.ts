@@ -940,20 +940,37 @@ export async function saveConversationSteps(params: {
  *   text row, which replays safely). This function still reports the reason; the
  *   caller decides what to write.
  *
- * Completed multi-step runs still persist via saveConversationSteps even when the
- * final step is text-free, so MCP tool history survives.
+ * A turn with TOOL CALLS is never `no_content`, however little prose came with
+ * it: the tool history is the thing worth keeping. A one-shot
+ * `generate_document` or `show_chart` call whose trailing sentence the model
+ * skipped is the common shape — counting it as empty would replace the
+ * document the user asked for with a notice telling them to try again. It
+ * persists through the normal path (`saveAssistantMessage` with its tool calls,
+ * or `saveConversationSteps` for a real multi-step run), which writes the
+ * `state: 'output-available'` + `input` parts replay needs.
+ *
+ * Step COUNT alone is not evidence of content: a run can report several step
+ * boundaries whose steps are all text-free and tool-free, and
+ * `saveConversationSteps` then filters every row away and writes nothing at all
+ * while reporting success. Looking at what the steps hold closes that hole.
  */
 export function incompleteTurnReason(input: {
   text: string;
   aborted?: boolean;
   steps?: StepData[];
+  toolCalls?: ToolCallData[];
 }): "stream_aborted" | "no_content" | null {
   if (input.aborted) {
     return "stream_aborted";
   }
   const hasText = input.text.trim().length > 0;
-  const hasMultiStepHistory = (input.steps?.length ?? 0) > 1;
-  return hasText || hasMultiStepHistory ? null : "no_content";
+  const hasToolHistory =
+    (input.toolCalls?.length ?? 0) > 0 ||
+    (input.steps?.some(
+      (step) => step.toolCalls.length > 0 || step.text.trim().length > 0,
+    ) ??
+      false);
+  return hasText || hasToolHistory ? null : "no_content";
 }
 
 /** What `persistAssistantTurn` managed to write. */

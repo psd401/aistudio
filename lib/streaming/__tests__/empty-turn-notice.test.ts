@@ -26,8 +26,10 @@ const NOTHING_SEEN: EmptyTurnObservation = {
   sawReasoning: false,
   sawFile: false,
   sawToolActivity: false,
+  sawDeliverableTool: false,
   sawOtherRendered: false,
   completedSteps: 0,
+  requireTextPart: true,
 }
 
 describe('classifyChunkVisibility', () => {
@@ -142,6 +144,59 @@ describe('classifyEmptyTurn', () => {
     expect(
       classifyEmptyTurn({ ...NOTHING_SEEN, sawReasoning: true, sawFile: true })
     ).toBe('reasoning_only')
+  })
+
+  it('says nothing when a direct-render tool produced the deliverable (#1898)', () => {
+    // `generate_document` / `show_chart` render the file or chart themselves and
+    // the model often skips the trailing sentence. Telling the user "it never
+    // wrote an answer" under their own download card is worse than silence.
+    expect(
+      classifyEmptyTurn({
+        ...NOTHING_SEEN,
+        sawToolActivity: true,
+        sawDeliverableTool: true,
+        completedSteps: 1,
+      })
+    ).toBeNull()
+    // Even with the budget fully spent, the deliverable still counts.
+    expect(
+      classifyEmptyTurn({
+        ...NOTHING_SEEN,
+        sawToolActivity: true,
+        sawDeliverableTool: true,
+        completedSteps: 3,
+        maxSteps: 3,
+      })
+    ).toBeNull()
+  })
+
+  describe('non-Nexus callers keep the narrower pre-#1899 rule', () => {
+    // buildAbortAwareResponse also serves Assistant Architect execution,
+    // decision-chat and the programmatic /api/v1/assistants path. There a run
+    // ending on a structured tool call is an ordinary success, and the injected
+    // `error` chunk would make the caller's AI SDK client throw.
+    const other = { ...NOTHING_SEEN, requireTextPart: false }
+
+    it('does not flag a tool-only, reasoning-only or file-only run', () => {
+      expect(classifyEmptyTurn({ ...other, sawToolActivity: true })).toBeNull()
+      expect(classifyEmptyTurn({ ...other, sawReasoning: true })).toBeNull()
+      expect(classifyEmptyTurn({ ...other, sawFile: true })).toBeNull()
+    })
+
+    it('does not claim step-budget exhaustion', () => {
+      expect(
+        classifyEmptyTurn({
+          ...other,
+          sawToolActivity: true,
+          completedSteps: 10,
+          maxSteps: 10,
+        })
+      ).toBeNull()
+    })
+
+    it('still flags a run that emitted nothing whatsoever (#1686)', () => {
+      expect(classifyEmptyTurn(other)).toBe('nothing')
+    })
   })
 
   it('leaves a source-only or data-only turn alone', () => {

@@ -438,15 +438,12 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         });
       });
       
-      const buildResponse = (options?: { headers?: Record<string, string> }) =>
-        this.buildAbortAwareResponse(
-          result,
-          () => streamAborted || deadline.timedOut(),
-          () => deadline.timedOut(),
-          // #1899: the step budget lets the notice distinguish "spent every tool
-          // step without answering" from "stopped after one tool call".
-          { ...options, ...(typeof enhancedConfig.maxSteps === 'number' ? { maxSteps: enhancedConfig.maxSteps } : {}) }
-        );
+      const buildResponse = this.buildResponseFactory(
+        result,
+        enhancedConfig,
+        deadline,
+        () => streamAborted
+      );
 
       return {
         toDataStreamResponse: buildResponse,
