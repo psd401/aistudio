@@ -333,7 +333,7 @@ INSERT INTO ai_models (
 -- Anthropic Claude Models (via AWS Bedrock US Inference)
 (
     'Claude Opus 4.5 (Bedrock)',
-    'us.anthropic.claude-opus-4-5-20250929-v1:0',
+    'us.anthropic.claude-opus-4-5-20251101-v1:0',
     'amazon-bedrock',
     'Anthropic''s most capable model with exceptional reasoning and coding skills, perfect for complex research and detailed analysis',
     '["chat", "function_calling", "json_mode", "image_analysis", "streaming", "thinking", "computer_use"]',
