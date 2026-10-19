@@ -195,4 +195,38 @@ describe("catalog registration (#1898)", () => {
       expect(getManifestEntry(identifier)?.surfaces).toEqual(["internal"]);
     }
   });
+
+  /**
+   * One catalog identifier now spans two surfaces with two independent
+   * bindings: the agent loop dispatches `documents.create` through the catalog
+   * to `handleGenerateDocument`, while Nexus attaches `createDocumentCreateTool`
+   * directly. Nothing in the codebase compares their schemas, so editing one
+   * without the other would silently desync the two surfaces' contracts. This
+   * pins them together.
+   */
+  it("keeps the catalog schema and the chat wire schema in sync", () => {
+    const catalogProps = Object.keys(
+      (getManifestEntry("documents.create")?.inputSchema as {
+        properties?: Record<string, unknown>;
+      }).properties ?? {}
+    ).sort();
+    const wireSchema = buildTool().inputSchema as unknown as {
+      jsonSchema: {
+        properties: Record<string, unknown>;
+        required?: string[];
+      };
+    };
+    expect(Object.keys(wireSchema.jsonSchema.properties).sort()).toEqual(
+      catalogProps
+    );
+    expect(wireSchema.jsonSchema.required?.slice().sort()).toEqual(
+      (
+        (getManifestEntry("documents.create")?.inputSchema as {
+          required?: string[];
+        }).required ?? []
+      )
+        .slice()
+        .sort()
+    );
+  });
 });

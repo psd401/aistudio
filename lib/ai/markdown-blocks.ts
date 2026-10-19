@@ -33,8 +33,21 @@ export type MarkdownBlock =
   | { kind: "heading"; level: HeadingLevelNumber; runs: InlineRun[] }
   | { kind: "paragraph"; runs: InlineRun[] }
   | { kind: "quote"; runs: InlineRun[] }
-  /** `level` is 0-based nesting depth. */
-  | { kind: "listItem"; ordered: boolean; level: number; runs: InlineRun[] }
+  /**
+   * `level` is 0-based nesting depth. `listId` identifies which markdown list
+   * the item came from — the IR is a flat block stream, so without it a
+   * renderer cannot tell two adjacent ordered lists apart and would continue
+   * one counter across both ("3. 4." instead of a fresh "1. 2."). `checked` is
+   * present only for a GFM task-list item (`- [x]` / `- [ ]`).
+   */
+  | {
+      kind: "listItem";
+      ordered: boolean;
+      level: number;
+      listId: number;
+      checked?: boolean;
+      runs: InlineRun[];
+    }
   | { kind: "table"; header: TableCellRuns[]; rows: TableCellRuns[][] }
   | { kind: "code"; text: string; lang?: string }
   | { kind: "rule" };
@@ -201,6 +214,7 @@ function pushListItems(
   item: Tokens.ListItem,
   ordered: boolean,
   level: number,
+  listId: number,
   out: MarkdownBlock[]
 ): void {
   // An item's own text and its nested lists arrive as siblings in `tokens`.
@@ -212,6 +226,13 @@ function pushListItems(
       nestedLists.push(child as Tokens.List);
     } else if (child.type === "text" || child.type === "paragraph") {
       ownInline.push(child);
+    } else if (child.type === "checkbox") {
+      // `marked` injects a `checkbox` token for a GFM task item — as a sibling
+      // in a tight list, or spliced into the paragraph's inline tokens in a
+      // loose one. It carries no `text`, so every path that looks for one drops
+      // it silently. The state is read from `item.task`/`item.checked` below
+      // instead, which `marked` sets in BOTH cases.
+      continue;
     } else {
       nestedBlocks.push(child);
     }
@@ -221,21 +242,36 @@ function pushListItems(
   // An item whose only content is a nested list still needs a marker emitted,
   // otherwise the nesting level the children sit under has no visible parent.
   if (runs.length > 0 || nestedLists.length === 0) {
-    out.push({ kind: "listItem", ordered, level, runs });
+    out.push({
+      kind: "listItem",
+      ordered,
+      level,
+      listId,
+      ...(item.task === true ? { checked: item.checked === true } : {}),
+      runs,
+    });
   }
 
   for (const nested of nestedLists) {
-    pushList(nested, Math.min(level + 1, MAX_LIST_LEVEL), out);
+    pushList(nested, Math.min(level + 1, MAX_LIST_LEVEL), listId, out);
   }
   for (const block of nestedBlocks) {
+    // A quote or table nested inside a list item renders at top level: the IR
+    // carries no indent for non-list blocks. Content is preserved; only the
+    // indentation of this rare shape is lost.
     pushBlock(block, out);
   }
 }
 
-function pushList(list: Tokens.List, level: number, out: MarkdownBlock[]): void {
+function pushList(
+  list: Tokens.List,
+  level: number,
+  listId: number,
+  out: MarkdownBlock[]
+): void {
   const ordered = list.ordered === true;
   for (const item of list.items ?? []) {
-    pushListItems(item, ordered, level, out);
+    pushListItems(item, ordered, level, listId, out);
   }
 }
 
@@ -265,10 +301,15 @@ function pushTable(table: Tokens.Table, out: MarkdownBlock[]): void {
  * Block types with no inline-run body of their own. Returns false when the
  * token is not one of them.
  */
-function pushStructuralBlock(token: Token, out: MarkdownBlock[]): boolean {
+function pushStructuralBlock(
+  token: Token,
+  out: MarkdownBlock[],
+  nextListId: () => number
+): boolean {
   switch (token.type) {
     case "list":
-      pushList(token as Tokens.List, 0, out);
+      // A new id per TOP-LEVEL list; nested lists share their parent's.
+      pushList(token as Tokens.List, 0, nextListId(), out);
       return true;
     case "table":
       pushTable(token as Tokens.Table, out);
@@ -296,7 +337,11 @@ function pushStructuralBlock(token: Token, out: MarkdownBlock[]): boolean {
   }
 }
 
-function pushBlock(token: Token, out: MarkdownBlock[]): void {
+function pushBlock(
+  token: Token,
+  out: MarkdownBlock[],
+  nextListId: () => number = () => 0
+): void {
   if (token.type === "heading") {
     const heading = token as Tokens.Heading;
     const runs = trimRuns(collectInlineRuns(heading.tokens));
@@ -323,7 +368,7 @@ function pushBlock(token: Token, out: MarkdownBlock[]): void {
     pushInlineBlock("quote", (token as Tokens.Blockquote).tokens, out);
     return;
   }
-  if (pushStructuralBlock(token, out)) return;
+  if (pushStructuralBlock(token, out, nextListId)) return;
   const text = (token as { text?: string }).text;
   if (typeof text === "string" && text.trim() !== "") {
     out.push({ kind: "paragraph", runs: [{ text: text.trim() }] });
@@ -348,10 +393,25 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       .map((chunk): MarkdownBlock => ({ kind: "paragraph", runs: [{ text: chunk }] }));
   }
   const blocks: MarkdownBlock[] = [];
+  let listCounter = 0;
+  const nextListId = () => ++listCounter;
   for (const token of tokens) {
-    pushBlock(token, blocks);
+    pushBlock(token, blocks, nextListId);
   }
   return blocks;
+}
+
+/**
+ * A list item's bullet text for a slide. A checklist slide must still
+ * distinguish done from not-done, and the IR carries the state because the
+ * markdown `[x]` never survives parsing.
+ */
+function listItemBulletText(
+  block: Extract<MarkdownBlock, { kind: "listItem" }>
+): string {
+  const text = runsToPlainText(block.runs);
+  if (block.checked === undefined) return text;
+  return `${block.checked ? "[x]" : "[ ]"} ${text}`;
 }
 
 /** One PPTX slide: a title line plus its bullet lines. */
@@ -456,9 +516,11 @@ export function markdownToSlides(markdown: string): SlideSpec[] {
       case "rule":
         flush();
         break;
+      case "listItem":
+        addBullet(listItemBulletText(block));
+        break;
       case "paragraph":
       case "quote":
-      case "listItem":
         addBullet(runsToPlainText(block.runs));
         break;
       case "code":

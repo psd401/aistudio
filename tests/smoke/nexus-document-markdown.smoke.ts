@@ -192,6 +192,77 @@ await check("tracks nested list depth", () => {
   );
 });
 
+await check("keeps GFM task state, which markdown parsing otherwise erases", () => {
+  const blocks = parseMarkdownBlocks("- [x] Done thing\n- [ ] Not done\n- plain");
+  const items = blocks.filter(
+    (b): b is Extract<MarkdownBlock, { kind: "listItem" }> =>
+      b.kind === "listItem"
+  );
+  assert.deepEqual(
+    items.map((i) => i.checked),
+    [true, false, undefined],
+    "checked/unchecked/not-a-task are distinguishable"
+  );
+  // `marked` injects a text-less `checkbox` token; it must not leak into runs.
+  assert.equal(runsToPlainText(items[0].runs), "Done thing");
+});
+
+await check("keeps task state in a LOOSE list too (different marked token shape)", () => {
+  const blocks = parseMarkdownBlocks("- [x] Done thing\n\n- [ ] Not done");
+  const items = blocks.filter(
+    (b): b is Extract<MarkdownBlock, { kind: "listItem" }> =>
+      b.kind === "listItem"
+  );
+  assert.deepEqual(
+    items.map((i) => i.checked),
+    [true, false]
+  );
+});
+
+await check("gives each top-level list its own id, shared by its nested items", () => {
+  const blocks = parseMarkdownBlocks(
+    "1. First\n2. Second\n\nA paragraph.\n\n1. Alpha\n   1. Nested"
+  );
+  const items = blocks.filter(
+    (b): b is Extract<MarkdownBlock, { kind: "listItem" }> =>
+      b.kind === "listItem"
+  );
+  const ids = items.map((i) => i.listId);
+  assert.equal(ids[0], ids[1], "items of one list share an id");
+  assert.notEqual(ids[1], ids[2], "a separate list gets a new id");
+  assert.equal(ids[2], ids[3], "a nested list shares its parent's id");
+});
+
+await check("keeps strikethrough text, image alt text and escapes", () => {
+  assert.equal(
+    runsToPlainText(
+      (parseMarkdownBlocks("~~gone~~ stays")[0] as Extract<
+        MarkdownBlock,
+        { kind: "paragraph" }
+      >).runs
+    ),
+    "gone stays",
+    "struck-through text is kept rather than dropped"
+  );
+  const image = parseMarkdownBlocks("![a diagram](x.png)")[0];
+  assert.ok(
+    runsToPlainText(
+      (image as Extract<MarkdownBlock, { kind: "paragraph" }>).runs
+    ).includes("a diagram"),
+    "image alt text is kept"
+  );
+  assert.equal(
+    runsToPlainText(
+      (parseMarkdownBlocks("a \\* b")[0] as Extract<
+        MarkdownBlock,
+        { kind: "paragraph" }
+      >).runs
+    ),
+    "a * b",
+    "a backslash escape yields the literal character"
+  );
+});
+
 await check("keeps a link's text and its target", () => {
   const blocks = parseMarkdownBlocks("See [the policy](https://example.org/p).");
   const runs = blocks[0].kind === "paragraph" ? blocks[0].runs : [];
@@ -303,6 +374,44 @@ await check("DOCX renders a markdown table as a Word table with a header row", a
   );
 });
 
+await check("DOCX restarts numbering for a SECOND ordered list", async () => {
+  const xml = await documentXml(
+    undefined,
+    "1. First\n2. Second\n\nA paragraph.\n\n1. Alpha\n2. Beta"
+  );
+  const numIds = [...xml.matchAll(/<w:numId w:val="(\d+)"\/>/g)].map((m) => m[1]);
+  assert.equal(numIds.length, 4, "four numbered items");
+  assert.equal(numIds[0], numIds[1], "first list shares one instance");
+  assert.equal(numIds[2], numIds[3], "second list shares one instance");
+  assert.notEqual(
+    numIds[1],
+    numIds[2],
+    "the second list gets its OWN numbering instance, so Word restarts it at 1 instead of continuing 3., 4."
+  );
+});
+
+await check("DOCX marks a task list done vs not-done", async () => {
+  const xml = await documentXml(undefined, "- [x] Done thing\n- [ ] Not done");
+  assert.ok(hasRunText(xml, "\u2612 "), "checked ballot glyph present");
+  assert.ok(hasRunText(xml, "\u2610 "), "unchecked ballot glyph present");
+  assert.ok(hasRunText(xml, "Done thing"));
+  assert.ok(hasRunText(xml, "Not done"));
+});
+
+await check("DOCX keeps inline styling inside a header cell and a quote", async () => {
+  // A header cell is bold ON TOP of its own styling, not instead of it.
+  const table = await documentXml(
+    undefined,
+    "| **Name** (*required*) | B |\n|---|---|\n| x | y |"
+  );
+  assert.ok(/<w:b\b/.test(table), "header cell is bold");
+  assert.ok(/<w:i\b/.test(table), "the italic parenthetical survives");
+
+  const quote = await documentXml(undefined, "> a **bold** quote");
+  assert.ok(/<w:i\b/.test(quote), "quote is italic");
+  assert.ok(/<w:b\b/.test(quote), "bold inside the quote survives");
+});
+
 await check("DOCX keeps non-ASCII text intact (OOXML is UTF-8)", async () => {
   const xml = await documentXml(
     "Café — Update",
@@ -377,6 +486,11 @@ await check("a sub-heading under a title-less slide becomes that slide's title",
     { title: "Deck title", bullets: [] },
     { title: "First slide", bullets: ["point"] },
   ]);
+});
+
+await check("slides show task state as [x] / [ ]", () => {
+  const slides = markdownToSlides("## Checklist\n\n- [x] Done\n- [ ] Pending");
+  assert.deepEqual(slides[0].bullets, ["[x] Done", "[ ] Pending"]);
 });
 
 await check("table rows and code lines become bullets rather than being dropped", () => {

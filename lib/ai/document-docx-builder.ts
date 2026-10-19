@@ -43,19 +43,32 @@ const HEADING_BY_LEVEL = [
   HeadingLevel.HEADING_6,
 ] as const;
 
-function toTextRuns(runs: InlineRun[]): TextRun[] {
+/**
+ * Map IR runs to Word runs.
+ *
+ * `force` ADDS styling (a header cell is bold, a quote is italic) rather than
+ * replacing it, so a header written `**Name** (*required*)` or a quote with a
+ * bold word or a code span keeps what the markdown asked for.
+ */
+function toTextRuns(
+  runs: InlineRun[],
+  force: { bold?: boolean; italics?: boolean } = {}
+): TextRun[] {
   // Word needs at least one run in a paragraph's children.
-  if (runs.length === 0) return [new TextRun("")];
+  if (runs.length === 0) return [new TextRun({ text: "", ...force })];
   return runs.map(
     (run) =>
       new TextRun({
         text: run.text,
-        ...(run.bold ? { bold: true } : {}),
-        ...(run.italic ? { italics: true } : {}),
+        ...(run.bold || force.bold ? { bold: true } : {}),
+        ...(run.italic || force.italics ? { italics: true } : {}),
         ...(run.code ? { font: CODE_FONT } : {}),
       })
   );
 }
+
+/** Word's checked/unchecked ballot glyphs for a GFM task-list item. */
+const CHECKBOX_GLYPH = { checked: "\u2612 ", unchecked: "\u2610 " } as const;
 
 /** Ordered-list numbering definition: 1. / a. / i. by depth, matching Word. */
 const ORDERED_LIST_LEVELS = [
@@ -128,27 +141,43 @@ function pushBlock(block: MarkdownBlock, out: (Paragraph | Table)[]): void {
       out.push(
         new Paragraph({
           indent: { left: 720 },
-          children: block.runs.map(
-            (run) => new TextRun({ text: run.text, italics: true })
-          ),
+          children: toTextRuns(block.runs, { italics: true }),
         })
       );
       break;
-    case "listItem":
+    case "listItem": {
+      // A task item's `[x]` never survives markdown parsing, so without an
+      // explicit glyph a done item and a not-done item render identically.
+      const marker =
+        block.checked === undefined
+          ? []
+          : [
+              new TextRun({
+                text: block.checked
+                  ? CHECKBOX_GLYPH.checked
+                  : CHECKBOX_GLYPH.unchecked,
+              }),
+            ];
       out.push(
         new Paragraph({
-          children: toTextRuns(block.runs),
+          children: [...marker, ...toTextRuns(block.runs)],
           ...(block.ordered
             ? {
                 numbering: {
                   reference: ORDERED_LIST_REFERENCE,
                   level: Math.min(block.level, ORDERED_LIST_LEVELS.length - 1),
+                  // One concrete numbering instance PER markdown list. Sharing
+                  // the reference without an instance makes Word run a single
+                  // counter across the whole document, so a second ordered list
+                  // continues "3. 4." instead of restarting at "1.".
+                  instance: block.listId,
                 },
               }
             : { bullet: { level: block.level } }),
         })
       );
       break;
+    }
     case "code":
       for (const line of block.text.split(/\r?\n/)) {
         out.push(
@@ -212,11 +241,7 @@ function buildRow(
         new TableCell({
           children: [
             new Paragraph({
-              children: isHeader
-                ? cell.map(
-                    (run) => new TextRun({ text: run.text, bold: true })
-                  )
-                : toTextRuns(cell),
+              children: toTextRuns(cell, isHeader ? { bold: true } : {}),
             }),
           ],
         })

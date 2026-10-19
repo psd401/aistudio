@@ -98,7 +98,8 @@ export interface SweepPorts {
 
   /**
    * Delete every version + delete marker under the conversation-scoped
-   * prefixes (`conversations/<id>/`, `v2/generated-images/<id>/`).
+   * prefixes (`conversations/<id>/`, `v2/generated-images/<id>/`,
+   * `v2/nexus-documents/<id>/`).
    *
    * Prefix-based rather than driven off message parts because the persist path
    * downgrades user image parts to `{ hasImage: true }` — the object exists in
