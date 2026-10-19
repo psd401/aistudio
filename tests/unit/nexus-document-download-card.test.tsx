@@ -33,7 +33,7 @@ import {
 import type { DocumentCreateToolResult } from "@/lib/tools/document-create-contract";
 
 const VALID_PATH =
-  "/api/nexus/documents/v2/nexus-documents/11111111-2222-3333-4444-555555555555/req-report.docx";
+  "/api/nexus/documents/v2/nexus-documents/11111111-2222-3333-4444-555555555555/req123/report.docx";
 
 /**
  * The subset of assistant-ui's `ToolCallMessagePartStatus` the resolver reads.

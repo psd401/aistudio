@@ -53,8 +53,8 @@ describe("createDocumentCreateTool", () => {
   beforeEach(() => {
     generateDocumentMock.mockReset();
     generateDocumentMock.mockResolvedValue({
-      s3Key: `v2/nexus-documents/${CONVERSATION_ID}/abc-report.docx`,
-      downloadPath: `/api/nexus/documents/v2/nexus-documents/${CONVERSATION_ID}/abc-report.docx`,
+      s3Key: `v2/nexus-documents/${CONVERSATION_ID}/abc/report.docx`,
+      downloadPath: `/api/nexus/documents/v2/nexus-documents/${CONVERSATION_ID}/abc/report.docx`,
       format: "docx",
       filename: "report.docx",
       bytes: 2048,
@@ -76,7 +76,7 @@ describe("createDocumentCreateTool", () => {
       filename: "report.docx",
       format: "docx",
       bytes: 2048,
-      downloadUrl: `/api/nexus/documents/v2/nexus-documents/${CONVERSATION_ID}/abc-report.docx`,
+      downloadUrl: `/api/nexus/documents/v2/nexus-documents/${CONVERSATION_ID}/abc/report.docx`,
     });
   });
 

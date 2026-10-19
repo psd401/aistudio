@@ -71,7 +71,8 @@ const KEY_PARTS = [
   "v2",
   "nexus-documents",
   CONVERSATION_ID,
-  "req123-staff-newsletter.docx",
+  "req123",
+  "staff-newsletter.docx",
 ];
 
 function request(): Request {
@@ -152,8 +153,10 @@ describe("GET /api/nexus/documents/[...key]", () => {
     expect(response.headers.get("Content-Type")).toBe(
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     );
+    // The saved name is the one the card advertises. The request id is its own
+    // key segment, so it never leaks into the filename the browser writes.
     expect(response.headers.get("Content-Disposition")).toBe(
-      'attachment; filename="req123-staff-newsletter.docx"'
+      'attachment; filename="staff-newsletter.docx"'
     );
     expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
@@ -207,9 +210,12 @@ describe("GET /api/nexus/documents/[...key]", () => {
   it.each([
     ["a foreign prefix", ["v2", "generated-documents", "42", "doc.txt"]],
     ["path traversal", ["v2", "nexus-documents", CONVERSATION_ID, "..", "..", "secret.txt"]],
-    ["a non-UUID conversation segment", ["v2", "nexus-documents", "all", "doc.txt"]],
-    ["a nested object path", ["v2", "nexus-documents", CONVERSATION_ID, "a", "b.txt"]],
-    ["no extension", ["v2", "nexus-documents", CONVERSATION_ID, "doc"]],
+    ["a non-UUID conversation segment", ["v2", "nexus-documents", "all", "req123", "doc.txt"]],
+    ["the legacy request-id-prefixed basename", ["v2", "nexus-documents", CONVERSATION_ID, "req123-doc.txt"]],
+    ["an extra path segment", ["v2", "nexus-documents", CONVERSATION_ID, "req123", "nested", "doc.txt"]],
+    ["traversal in the request segment", ["v2", "nexus-documents", CONVERSATION_ID, "..", "doc.txt"]],
+    ["a dot in the request segment", ["v2", "nexus-documents", CONVERSATION_ID, "req.123", "doc.txt"]],
+    ["no extension", ["v2", "nexus-documents", CONVERSATION_ID, "req123", "doc"]],
     ["an empty key", []],
   ])("returns 404 for %s before any lookup", async (_label, keyParts) => {
     signedInAs(OWNER_ID);
@@ -272,7 +278,8 @@ describe("GET /api/nexus/documents/[...key]", () => {
       "v2",
       "nexus-documents",
       CONVERSATION_ID,
-      "req123-page.html",
+      "req123",
+      "page.html",
     ]);
 
     expect(response.status).toBe(200);

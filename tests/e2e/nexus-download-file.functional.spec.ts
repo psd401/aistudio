@@ -73,6 +73,8 @@ async function clickAndDownload(
   await expect(card).toBeVisible({ timeout: 150_000 });
   const href = await card.getAttribute("href");
   expect(href, "card links somewhere").toBeTruthy();
+  const advertised = await card.getAttribute("data-filename");
+  expect(advertised, "card shows a filename").toBeTruthy();
   // The link must be our authenticated route, never a presigned S3 URL: that is
   // what makes the card survive a reload and re-check ownership per request.
   expect(href).toMatch(/^\/api\/nexus\/documents\/v2\/nexus-documents\//);
@@ -81,8 +83,12 @@ async function clickAndDownload(
     page.waitForEvent("download", { timeout: 120_000 }),
     card.click(),
   ]);
+  const filename = download.suggestedFilename();
+  // The browser must save the name the card shows, not the storage basename
+  // (the route's Content-Disposition wins over the anchor's `download`).
+  expect(filename).toBe(advertised);
   return {
-    filename: download.suggestedFilename(),
+    filename,
     bytes: await readDownload(download),
     url: href as string,
   };

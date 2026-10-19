@@ -76,6 +76,21 @@ export interface GenerateDocumentResult {
 /** S3 prefix for conversation-scoped Nexus documents (#1898). */
 export const NEXUS_DOCUMENT_PREFIX = "v2/nexus-documents/";
 
+/**
+ * A conversation-scoped key is `v2/nexus-documents/{conversationId}/{requestId}/{filename}`.
+ *
+ * The request id is its OWN segment rather than a prefix on the filename, so
+ * the object's basename is exactly the filename the download card advertises.
+ * The download route takes `Content-Disposition` from that basename; with the
+ * earlier `{requestId}-{filename}` form the browser saved
+ * `V1StGXR8_Z-staff-newsletter.docx` while the card said
+ * `staff-newsletter.docx` (Codex review, PR #1941).
+ *
+ * `generateRequestId` is a nanoid: `[\w-]` only, so a request segment can never
+ * be `.` or `..`. The bound is generous against a longer id, never a dot.
+ */
+const REQUEST_SEGMENT_PATTERN = /^[\w-]{1,32}$/;
+
 
 /**
  * Canonical UUID form. The conversation id becomes a path segment that the
@@ -89,9 +104,10 @@ const UUID_PATTERN =
 export function isConversationScopedDocumentKey(s3Key: string): boolean {
   if (!s3Key.startsWith(NEXUS_DOCUMENT_PREFIX)) return false;
   const rest = s3Key.slice(NEXUS_DOCUMENT_PREFIX.length).split("/");
-  if (rest.length !== 2) return false;
-  const [conversationId, objectName] = rest;
+  if (rest.length !== 3) return false;
+  const [conversationId, requestId, objectName] = rest;
   if (!UUID_PATTERN.test(conversationId)) return false;
+  if (!REQUEST_SEGMENT_PATTERN.test(requestId)) return false;
   // `safeBaseName` restricts the base to [\w-]; the extension is a known format.
   return /^[\w-]+\.[a-z]{2,5}$/.test(objectName);
 }
@@ -553,9 +569,11 @@ export async function generateDocument(
   }
   // Deterministic-ish, traceable key; the requestId disambiguates concurrent runs.
   // A conversation-scoped document lives under the conversation so the download
-  // route can re-derive and re-authorize the owner from the key alone.
+  // route can re-derive and re-authorize the owner from the key alone, and the
+  // request id is its own segment so the basename is the advertised filename
+  // (see REQUEST_SEGMENT_PATTERN).
   const s3Key = conversationId
-    ? `${NEXUS_DOCUMENT_PREFIX}${conversationId}/${requestId}-${filename}`
+    ? `${NEXUS_DOCUMENT_PREFIX}${conversationId}/${requestId}/${filename}`
     : `v2/generated-documents/${request.userId}/${requestId}-${filename}`;
 
   const s3 = await getS3Client();

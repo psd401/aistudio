@@ -268,6 +268,12 @@ describe("generateDocument (#1898)", () => {
       expect(result.s3Key.startsWith(`v2/nexus-documents/${conversationId}/`)).toBe(
         true
       );
+      // `{prefix}/{conversationId}/{requestId}/{filename}`: the request id is
+      // its own segment, so the basename is exactly the advertised filename —
+      // the download route's Content-Disposition is taken from it.
+      expect(result.s3Key.split("/")).toHaveLength(5);
+      expect(result.filename).toBe("notes.txt");
+      expect(result.s3Key.endsWith(`/${result.filename}`)).toBe(true);
       expect(result.downloadPath).toBe(`/api/nexus/documents/${result.s3Key}`);
       // No presigned URL is minted for a conversation-scoped document: the
       // route re-authorizes instead, so there is no bearer credential to leak.
@@ -308,10 +314,14 @@ describe("generateDocument (#1898)", () => {
 
       for (const bad of [
         "v2/generated-documents/42/x-doc.txt",
-        `v2/nexus-documents/${conversationId}/nested/doc.txt`,
-        "v2/nexus-documents/not-a-uuid/doc.txt",
+        // The legacy `{requestId}-{filename}` basename is not a valid key.
+        `v2/nexus-documents/${conversationId}/req123-doc.txt`,
+        `v2/nexus-documents/${conversationId}/req123/nested/doc.txt`,
+        "v2/nexus-documents/not-a-uuid/req123/doc.txt",
         `v2/nexus-documents/${conversationId}/../../secret.txt`,
-        `v2/nexus-documents/${conversationId}/doc`,
+        `v2/nexus-documents/${conversationId}/../doc.txt`,
+        `v2/nexus-documents/${conversationId}/req.123/doc.txt`,
+        `v2/nexus-documents/${conversationId}/req123/doc`,
         "",
       ]) {
         expect(isConversationScopedDocumentKey(bad)).toBe(false);

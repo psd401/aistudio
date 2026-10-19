@@ -15,8 +15,10 @@
  *    request, so revoking access to a conversation revokes its files too.
  *
  * Ownership is derived from the object key itself: conversation-scoped keys are
- * `v2/nexus-documents/{conversationId}/{name}.{ext}`, strictly validated by
- * `isConversationScopedDocumentKey`, and the conversation is then loaded with
+ * `v2/nexus-documents/{conversationId}/{requestId}/{name}.{ext}`, strictly
+ * validated by `isConversationScopedDocumentKey` (the request id is its own
+ * segment, so the basename is exactly the filename the card advertises), and
+ * the conversation is then loaded with
  * `getConversationById(conversationId, userId)` — which filters on `user_id`, so
  * a non-owner gets `null` and this route answers 404 (not 403: a 403 would
  * confirm the file exists). This mirrors `/api/images/[...key]`, which gates
@@ -164,8 +166,11 @@ async function serveDocumentObject(args: {
 
   const headers: Record<string, string> = {
     "Content-Type": contentType,
-    // The filename is [\w-]+.ext by construction (`safeBaseName`), so it needs
-    // no quoting escape, and the key validation re-proves it on every request.
+    // The basename IS the filename the card advertises — the request id lives
+    // in its own key segment, never as a prefix here — so the browser saves the
+    // name the user was shown. It is [\w-]+.ext by construction
+    // (`safeBaseName`), so it needs no quoting escape, and the key validation
+    // re-proves it on every request.
     "Content-Disposition": `attachment; filename="${filename}"`,
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
