@@ -1360,8 +1360,10 @@ Google Workspace operations are classified into allowlist categories:
 
 | Category | Description | Examples |
 |----------|-------------|----------|
-| `READ_ACTIONS` | Read-only operations, never mutate | `get`, `list`, `search`, `findDirectMessage` |
-| `ALLOWED_WRITES` | User-slot permitted mutations | `gmail +draft`, `gmail users drafts create`, `gmail users drafts update`, `gmail users settings filters`, `tasks tasks move` |
+| `READ_ACTIONS` | Read-only operations, never mutate. Judged by the trailing action token. | `get`, `batchGet`, `list`, `search`, `findDirectMessage` |
+| `READ_OPERATIONS` | Whole-operation reads whose trailing verb is not a read verb in general, so the entire path is named | `calendar freebusy query` |
+| `MUTATING_ACTIONS` | Bare mutating verbs that a trailing read may not carry past the write allowlist | `create`, `delete`, `append`, `resolve`, `send` |
+| `ALLOWED_WRITES` | User-slot permitted mutations, matched against the whole operation path | `gmail +draft`, `gmail users drafts create`, `gmail users drafts update`, `gmail users settings filters create`, `gmail users settings filters delete`, `tasks tasks move` |
 | `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
 
 **Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Hand generated files to the user with `psd-publish-file`, which by default creates them in the agent's Drive through the broker rather than through `drive +upload` (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)).
@@ -1371,8 +1373,55 @@ The allowlist evolves based on production failure patterns.
 | Operation | Reason |
 |-----------|--------|
 | `spaces.findDirectMessage` | DM lookup sends nothing; was refusing scheduled digests with no way to find target DM |
-| `gmail users settings filters` | Inbox filter management; requires separate `gmail.settings.basic` scope |
+| `gmail users settings filters create` and `… delete` | Inbox filter management; requires separate `gmail.settings.basic` scope. Named by action since #1893: the bare four-token resource used to grant every action beneath it. |
+| `calendar freebusy query` | Free/busy lookup creates and sends nothing; named as a whole operation so `query` stays a write everywhere else |
 | `tasks tasks move` | Task reordering within lists the user-slot can already insert into |
+
+#### Operation Parsing (#1893)
+
+**Source**: `/lib/agent-workspace/command-executor.ts`, `/infra/agent-image/skills/psd-workspace/common.js`
+
+The gate judges the **whole** leading positional path of an argv, not a prefix of it. Two parsing defects had refused valid work for about 21 users, and the fix changes how every allowlist entry is matched:
+
+- **Dotted method paths** such as `sheets spreadsheets.values.batchUpdate` arrived as one token and were judged as an unknown action. `psd-workspace/SKILL.md` had taught that spelling, so the documented form of an allowed write was refused. `canonicalizeOperationPath` now splits a dotted path in the leading positional run into space-separated tokens, keeps method case (`batchUpdate`), and never touches flag values such as `--params` objects or Drive queries. The validator and the executed argv use the same canonicalization.
+- **Four-token truncation** ended the operation at the fourth positional. `gmail users messages attachments get` was therefore judged as `… attachments`, and an allowlisted four-token prefix granted every action beneath it. `operationTokens` has no positional cutoff now.
+
+```mermaid
+flowchart TD
+    A["argv from workspace-execute route"] --> B["validateWorkspaceArguments, which runs assertParamsParse first"]
+    B --> C["normalizedOperation: canonicalize leading positionals, lowercase, join"]
+    C --> D{"+read helper?"}
+    D -- yes --> X["refuse: mutation operation"]
+    D -- no --> E{"trailing action in READ_ACTIONS, or operation in READ_OPERATIONS?"}
+    E -- yes --> F["assertReadCarriesNoMutation: no helper verb, no earlier MUTATING_ACTIONS token, no allowlisted write prefix"]
+    E -- no --> G{"operation in ALLOWED_WRITES?"}
+    G -- no --> Y["refuse: operation_not_allowed with workspaceOperation diagnostic"]
+    G -- yes --> H["shape gates: AGENT_ONLY_WRITES by scope, drive permissions shape, accessproposals resolve, gmail modify"]
+```
+
+*Reads are classified before writes. A read verb only admits the command when nothing earlier in the path is a mutation.*
+
+**Invariants**
+
+- **One operation, two spellings.** A dotted and a spaced spelling of the same method get the same allow or refuse verdict, in both directions. Positionals after the first flag are not canonicalized.
+- **Whole-path matching.** `ALLOWED_WRITES` entries are exact operation strings. List each new write with its full action (for example `gmail users settings filters create`). A resource-prefix entry such as `gmail users settings filters` no longer grants its sibling actions.
+- **Reads cannot smuggle writes.** A trailing read verb after a mutating token (`drive accessproposals resolve get`, `sheets spreadsheets values append get`) is refused, in both slots.
+- **Containment.** A made-up fifth token under an allowlisted resource is refused. Sibling settings resources (`forwardingAddresses`, `sendAs`, `delegates`, `updateVacation`) remain refused.
+- **Diagnostics stay bounded.** `workspaceOperation` returns the full path for logs and refusal messages, but returns `<operation-too-long>` past `MAX_DIAGNOSTIC_OPERATION_LENGTH` (128 characters).
+- **The skill mirrors the broker.** `splitCommand` in `psd-workspace/common.js` uses the same dotted-path rule, so the skill's local Phase 1 gates judge the same tokens the broker judges.
+- **Scope gaps key on the resource.** `requiredWorkspaceScopeGap` matches the four-token prefix `gmail users settings filters`, so `create` and `delete` both ask for `gmail.settings.basic`.
+
+**Change navigation**
+
+- Start in `canonicalizeOperationPath` and `isDottedMethodPath`, then `normalizedOperation` and `validateWorkspaceMutation`. Read classification is in `isReadOperation` and `assertReadCarriesNoMutation`.
+- Add a read verb to `READ_ACTIONS` only when that bare verb is a read in every Google service. For a verb that is a write elsewhere (such as `query`), name the whole operation in `READ_OPERATIONS`.
+- Add every mutating verb to `MUTATING_ACTIONS`, so trailing reads cannot carry it past the write allowlist.
+- Keep `psd-workspace/SKILL.md` examples in the spaced form. `allowlist-doc-drift.test.ts` fails on dotted `gws` examples and checks that each documented operation is reachable through the validator.
+- Changing `common.js` or `SKILL.md` ships through the agent image, so a deployed skill needs an agent image rebuild. The broker change is separate and takes effect on the next deploy.
+- Non-goals: do not canonicalize flag values; do not make a prefix allowlist entry for a resource with mixed read and write actions.
+- Focused tests: `tests/unit/lib/agent-workspace/allowlist-operation-parsing.test.ts` has the suites `dotted and spaced spellings are one operation`, `the operation is the WHOLE positional path`, and `reads that were missing from the read classification`. `tests/unit/lib/agent-workspace/allowlist-widening-2026-08-28.test.ts` covers the `gmail users settings filters` suite. `tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts` covers the SKILL.md spelling and reachability checks. `tests/unit/agent-workspace-skill-split-command.test.ts` covers the skill-side `splitCommand`.
+- Minimal validation (quiet, narrow): `bunx jest --silent tests/unit/lib/agent-workspace/allowlist-operation-parsing.test.ts tests/unit/lib/agent-workspace/allowlist-widening-2026-08-28.test.ts tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts tests/unit/agent-workspace-skill-split-command.test.ts`. Add `bun run test:skill:workspace` when `common.js` changes.
+- Escalate to `tests/unit/agent-workspace-execute-route.test.ts` (route validator errors and caller forwarding) when the route's argv handling or log fields change. The route logs `workspaceOperation(body.argv)`, so the completion log shows the full path.
 
 #### HTML Content Routing
 
