@@ -17,12 +17,17 @@
  * tool call with its result (a dropped `tool_result` block is what raises
  * `AI_MissingToolResultsError` on replay; see the Silent Failures guide).
  *
+ * Issue #1898 (Codex review): `generate_document` carries a whole document
+ * body as its `content` argument and is pruned on the same terms — see
+ * GENERATED_DOCUMENT_OBJECT_ID.
+ *
  * This is a MODEL-side transform only. It is applied to `safeModelMessages`
  * and never to `safePersistenceMessages`, so what is written to the database —
  * and what the thread renders on reload — is untouched.
  */
 
 import type { UIMessage } from "ai";
+import { DOCUMENT_CREATE_TOOL_NAME } from "@/lib/tools/document-create-contract";
 
 /**
  * Workspace tools whose inputs or outputs carry whole artifact/document
@@ -36,6 +41,26 @@ export const WORKSPACE_SOURCE_TOOLS = [
   "edit_workspace_document",
   "edit_atrium_document",
 ] as const;
+
+/**
+ * `generate_document` (#1898) is not a workspace tool, but its `content` arg is
+ * the same kind of payload: the whole body of a Word/PDF/PowerPoint file, kept
+ * in the history and re-sent on every later turn although the file in S3 is
+ * already the durable output. It is pruned on the same terms — the newest call
+ * stays verbatim (a "now make that a slide deck" follow-up needs it) and every
+ * earlier one is stubbed. The bodies are not revisions of one object, so all
+ * calls share this synthetic id and each counts as a replacing write.
+ */
+const GENERATED_DOCUMENT_OBJECT_ID = "generated-document";
+
+function isGeneratedDocumentPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false;
+  const { type, toolName } = part as Record<string, unknown>;
+  return (
+    toolName === DOCUMENT_CREATE_TOOL_NAME ||
+    type === `tool-${DOCUMENT_CREATE_TOOL_NAME}`
+  );
+}
 
 /**
  * Strings at or above this length are pruned from superseded payloads. A 2 KB
@@ -57,15 +82,33 @@ function isWorkspaceSourceToolPart(part: unknown): boolean {
   );
 }
 
-function stub(fieldPath: string, length: number): string {
-  return (
-    `[omitted from history: ${length.toLocaleString("en-US")} characters of ` +
-    `superseded ${fieldPath}. This is an EARLIER revision, not the current ` +
-    `one — call read_workspace_content to see what the workspace holds now.]`
-  );
+/** Every part this transform may stub: workspace sources and generated documents. */
+function isSourcePart(part: unknown): boolean {
+  return isWorkspaceSourceToolPart(part) || isGeneratedDocumentPart(part);
 }
 
-function pruneValue(value: unknown, fieldPath: string, depth: number): unknown {
+type Stub = (fieldPath: string, length: number) => string;
+
+const workspaceStub: Stub = (fieldPath, length) =>
+  `[omitted from history: ${length.toLocaleString("en-US")} characters of ` +
+  `superseded ${fieldPath}. This is an EARLIER revision, not the current ` +
+  `one — call read_workspace_content to see what the workspace holds now.]`;
+
+/**
+ * No tool reads a generated file back, so this stub must not point at one: it
+ * says the body is gone from context and that the file was already delivered.
+ */
+const generatedDocumentStub: Stub = (fieldPath, length) =>
+  `[omitted from history: ${length.toLocaleString("en-US")} characters of ` +
+  `${fieldPath} for an EARLIER generated document. That file was already ` +
+  `delivered to the user as a download; write the content again if it is needed.]`;
+
+function pruneValue(
+  value: unknown,
+  fieldPath: string,
+  depth: number,
+  stub: Stub
+): unknown {
   if (typeof value === "string") {
     return value.length >= PRUNE_THRESHOLD_CHARS
       ? stub(fieldPath, value.length)
@@ -74,14 +117,14 @@ function pruneValue(value: unknown, fieldPath: string, depth: number): unknown {
   if (depth >= MAX_DEPTH) return value;
   if (Array.isArray(value)) {
     return value.map((entry, index) =>
-      pruneValue(entry, `${fieldPath}[${index}]`, depth + 1)
+      pruneValue(entry, `${fieldPath}[${index}]`, depth + 1, stub)
     );
   }
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
       key,
-      pruneValue(nested, key, depth + 1),
+      pruneValue(nested, key, depth + 1, stub),
     ])
   );
 }
@@ -98,11 +141,14 @@ const PAYLOAD_KEYS = ["input", "output", "args", "result"] as const;
 function prunePart(part: unknown): unknown {
   if (!part || typeof part !== "object") return part;
   const record = part as Record<string, unknown>;
+  const stub = isGeneratedDocumentPart(part)
+    ? generatedDocumentStub
+    : workspaceStub;
   let changed = false;
   const next: Record<string, unknown> = { ...record };
   for (const key of PAYLOAD_KEYS) {
     if (!(key in record) || record[key] == null) continue;
-    const pruned = pruneValue(record[key], key, 0);
+    const pruned = pruneValue(record[key], key, 0, stub);
     if (pruned !== record[key]) {
       next[key] = pruned;
       changed = true;
@@ -123,6 +169,7 @@ function prunePart(part: unknown): unknown {
  * to every part before pruning existed.
  */
 function partObjectId(part: unknown): string | null {
+  if (isGeneratedDocumentPart(part)) return GENERATED_DOCUMENT_OBJECT_ID;
   return stringField(part, "objectId") ?? null;
 }
 
@@ -161,8 +208,9 @@ function readOffset(part: unknown): number {
 
 /**
  * How a write part changed the source:
- *  - "replace": it carried the WHOLE new source — artifact `code`, or a
- *    document edit with `mode: "replace"`. Everything earlier is superseded.
+ *  - "replace": it carried the WHOLE new source — artifact `code`, a
+ *    document edit with `mode: "replace"`, or a generated document's
+ *    `content`. Everything earlier is superseded.
  *  - "append": a document edit in the tools' default `append` mode. It ADDS to
  *    the document, so the earlier read and earlier appends are still part of
  *    the current source and must not be stubbed.
@@ -171,10 +219,18 @@ function readOffset(part: unknown): number {
  */
 function writeKind(part: unknown): "replace" | "append" | "none" {
   const record = part as Record<string, unknown>;
+  const generated = isGeneratedDocumentPart(part);
   for (const key of ["input", "args"] as const) {
     const payload = record[key];
     if (!payload || typeof payload !== "object") continue;
-    const { code, markdown, mode } = payload as Record<string, unknown>;
+    const { code, markdown, mode, content } = payload as Record<string, unknown>;
+    // A generated document's body is its whole content, so each call
+    // supersedes the previous one's (see GENERATED_DOCUMENT_OBJECT_ID).
+    if (generated) {
+      return typeof content === "string" && content.length > 0
+        ? "replace"
+        : "none";
+    }
     if (typeof code === "string" && code.length > 0) return "replace";
     if (typeof markdown === "string") {
       return mode === "replace" ? "replace" : "append";
@@ -250,7 +306,7 @@ function indexSourceParts(messages: UIMessage[]): {
     const parts = message?.parts;
     if (!Array.isArray(parts)) continue;
     for (const [p, part] of parts.entries()) {
-      if (!isWorkspaceSourceToolPart(part)) continue;
+      if (!isSourcePart(part)) continue;
       pos += 1;
       sourceParts.push({ pos, key: `${m}:${p}`, part });
       const objectId = partObjectId(part);
@@ -286,7 +342,7 @@ export function pruneStaleWorkspaceToolPayloads(
     if (!Array.isArray(parts)) return message;
     let messageChanged = false;
     const nextParts = parts.map((part, p) => {
-      if (!isWorkspaceSourceToolPart(part)) return part;
+      if (!isSourcePart(part)) return part;
       if (keep.has(`${m}:${p}`)) return part;
       const next = prunePart(part);
       if (next !== part) messageChanged = true;

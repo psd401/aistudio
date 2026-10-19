@@ -19,5 +19,10 @@ module.exports = {
   Sparkles: () => React.createElement('div', { className: 'mock-sparkles', 'data-testid': 'sparkles-icon' }),
   Search: () => React.createElement('div', { className: 'mock-search', 'data-testid': 'search-icon' }),
   Plus: () => React.createElement('div', { className: 'mock-plus', 'data-testid': 'plus-icon' }),
+  // Icons used by the Nexus generated-file download card (#1898)
+  Download: () => React.createElement('div', { className: 'mock-download', 'data-testid': 'download-icon' }),
+  FileText: () => React.createElement('div', { className: 'mock-file-text', 'data-testid': 'file-text-icon' }),
+  FileSpreadsheet: () => React.createElement('div', { className: 'mock-file-spreadsheet', 'data-testid': 'file-spreadsheet-icon' }),
+  Presentation: () => React.createElement('div', { className: 'mock-presentation', 'data-testid': 'presentation-icon' }),
   // Add other icons as needed
 };

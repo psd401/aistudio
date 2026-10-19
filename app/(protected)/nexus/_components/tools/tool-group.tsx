@@ -19,6 +19,11 @@ const DIRECT_RENDER_TOOLS = [
   "search_graph_nodes",
   "propose_decision",
   "commit_decision",
+  // #1898: the download card IS the deliverable. Inside the collapsed "Tool
+  // Actions" card the user would have to click "Show" to find the file they
+  // asked for, and renderers mount only while expanded — so the card must
+  // render directly.
+  "generate_document",
 ];
 
 /**

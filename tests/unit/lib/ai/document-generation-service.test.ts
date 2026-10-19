@@ -35,10 +35,25 @@ jest.mock("@/lib/settings-manager", () => ({
   Settings: { getS3: jest.fn().mockResolvedValue({ region: "us-west-2" }) },
 }));
 
+// The DOCX builder imports `marked`, which is pure ESM and NOT jest-loadable in
+// this repo (next/jest overrides transformIgnorePatterns — same constraint
+// documented for lib/content/render/markdown-render.ts in jest.config.js). The
+// real markdown -> Word mapping is covered by tests/smoke/nexus-document-markdown
+// .smoke.ts under Bun; here the builder is a black box so these tests can keep
+// verifying what the SERVICE owns: storage, keys, filenames and the result shape.
+jest.mock("@/lib/ai/document-docx-builder", () => ({
+  buildDocxDocument: jest.fn(() => ({ fake: "docx-document" })),
+  packDocx: jest.fn().mockResolvedValue(Buffer.from("DOCX-BYTES-XXXXXXXX")),
+}));
+
 import {
+  conversationIdFromDocumentKey,
   generateDocument,
+  isConversationScopedDocumentKey,
   isDocumentFormat,
+  safeWorksheetName,
   sanitizeForWinAnsi,
+  transliterateForWinAnsi,
 } from "@/lib/ai/document-generation-service";
 import { DOCUMENT_FORMATS } from "@/lib/agents/agent-tools/descriptors";
 
@@ -163,9 +178,10 @@ describe("generateDocument", () => {
       const repeated = "😀".repeat(50);
       encodeTextSpy.mockClear();
       sanitizeForWinAnsi(repeated, font);
-      // 1 call for the whole-string fast-path attempt, then 1 more per UNIQUE
-      // character in the fallback (just "😀") — not 50.
-      expect(encodeTextSpy).toHaveBeenCalledTimes(2);
+      // 1 call for the whole-string fast-path attempt, 1 for the retry after
+      // transliteration (#1898), then 1 more per UNIQUE character in the
+      // fallback (just "😀") — not 50.
+      expect(encodeTextSpy).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -176,5 +192,203 @@ describe("generateDocument", () => {
       expect(isDocumentFormat("nope")).toBe(false);
       expect(isDocumentFormat(123)).toBe(false);
     });
+  });
+});
+
+describe("generateDocument (#1898)", () => {
+  beforeEach(() => {
+    sendMock.mockClear();
+  });
+
+  /**
+   * The DoD for #1898 names curly quotes, accented names and en dashes as the
+   * characters that must survive. They are in fact INSIDE Windows-1252, so the
+   * real risk is a regression that starts replacing them: this test uses the
+   * real pdf-lib Helvetica (not the stub) and asserts the sanitizer returns the
+   * string untouched, so any such regression fails here.
+   */
+  describe("PDF text fidelity (#1898)", () => {
+    it("keeps curly quotes, accented names and en/em dashes verbatim", async () => {
+      const { PDFDocument, StandardFonts } = await import("pdf-lib");
+      const pdf = await PDFDocument.create();
+      const font = await pdf.embedFont(StandardFonts.Helvetica);
+      const text =
+        "José Núñez said \u201CRead the caf\u00E9 memo\u201D \u2014 pages 3\u20135 \u2026 it\u2019s ready.";
+      expect(sanitizeForWinAnsi(text, font)).toBe(text);
+      expect(sanitizeForWinAnsi(text, font)).not.toContain("?");
+    });
+
+    it("renders such a PDF without replacing any character", async () => {
+      const result = await generateDocument({
+        format: "pdf",
+        title: "Caf\u00E9 \u2014 Weekly Update",
+        content:
+          "Jos\u00E9 N\u00FA\u00F1ez: \u201Cthe se\u00F1or\u2019s r\u00E9sum\u00E9 \u2013 pages 3\u20135\u2026\u201D",
+        userId: "42",
+      });
+      expect(result.format).toBe("pdf");
+      expect(result.bytes).toBeGreaterThan(0);
+    });
+
+    it("transliterates characters CP1252 cannot encode instead of dropping them", () => {
+      expect(transliterateForWinAnsi("Draft \u2192 Review")).toBe("Draft -> Review");
+      expect(transliterateForWinAnsi("\u2713 done, \u2717 blocked")).toBe(
+        "[x] done, [ ] blocked"
+      );
+      expect(transliterateForWinAnsi("cost \u2264 100")).toBe("cost <= 100");
+      expect(transliterateForWinAnsi("\tindented")).toBe("    indented");
+      expect(transliterateForWinAnsi("zero\u200Bwidth")).toBe("zerowidth");
+    });
+
+    it("leaves CP1252 punctuation alone so correct output is not degraded", () => {
+      const inCp1252 = "\u201Cquote\u201D \u2013 \u2014 \u2026 \u2022 \u20AC caf\u00E9";
+      expect(transliterateForWinAnsi(inCp1252)).toBe(inCp1252);
+    });
+
+    it("still replaces a genuinely unmappable character with ?", async () => {
+      const { PDFDocument, StandardFonts } = await import("pdf-lib");
+      const pdf = await PDFDocument.create();
+      const font = await pdf.embedFont(StandardFonts.Helvetica);
+      // Line break forces the fallback path; the emoji has no CP1252 form.
+      expect(sanitizeForWinAnsi("a\n\u{1F600}b", font)).toBe("a\n?b");
+    });
+  });
+
+  describe("conversation-scoped delivery (#1898)", () => {
+    const conversationId = "11111111-2222-3333-4444-555555555555";
+
+    it("stores under the conversation prefix and returns an authenticated path", async () => {
+      const result = await generateDocument({
+        format: "txt",
+        content: "hello",
+        filename: "notes",
+        userId: "42",
+        conversationId,
+      });
+      expect(result.s3Key.startsWith(`v2/nexus-documents/${conversationId}/`)).toBe(
+        true
+      );
+      // `{prefix}/{conversationId}/{requestId}/{filename}`: the request id is
+      // its own segment, so the basename is exactly the advertised filename —
+      // the download route's Content-Disposition is taken from it.
+      expect(result.s3Key.split("/")).toHaveLength(5);
+      expect(result.filename).toBe("notes.txt");
+      expect(result.s3Key.endsWith(`/${result.filename}`)).toBe(true);
+      expect(result.downloadPath).toBe(`/api/nexus/documents/${result.s3Key}`);
+      // No presigned URL is minted for a conversation-scoped document: the
+      // route re-authorizes instead, so there is no bearer credential to leak.
+      expect(result.url).toBeUndefined();
+    });
+
+    it("keeps the presigned URL for a request with no conversation", async () => {
+      const result = await generateDocument({
+        format: "txt",
+        content: "hello",
+        userId: "42",
+      });
+      expect(result.url).toBe("https://signed.example/doc");
+      expect(result.downloadPath).toBeUndefined();
+      expect(result.s3Key.startsWith("v2/generated-documents/42/")).toBe(true);
+    });
+
+    it("rejects a conversationId that is not a UUID", async () => {
+      await expect(
+        generateDocument({
+          format: "txt",
+          content: "hello",
+          userId: "42",
+          conversationId: "../../other-conversation",
+        })
+      ).rejects.toThrow(/UUID/i);
+    });
+
+    it("recognizes and parses only well-formed conversation-scoped keys", async () => {
+      const result = await generateDocument({
+        format: "docx",
+        content: "# Hi",
+        userId: "42",
+        conversationId,
+      });
+      expect(isConversationScopedDocumentKey(result.s3Key)).toBe(true);
+      expect(conversationIdFromDocumentKey(result.s3Key)).toBe(conversationId);
+
+      for (const bad of [
+        "v2/generated-documents/42/x-doc.txt",
+        // The legacy `{requestId}-{filename}` basename is not a valid key.
+        `v2/nexus-documents/${conversationId}/req123-doc.txt`,
+        `v2/nexus-documents/${conversationId}/req123/nested/doc.txt`,
+        "v2/nexus-documents/not-a-uuid/req123/doc.txt",
+        `v2/nexus-documents/${conversationId}/../../secret.txt`,
+        `v2/nexus-documents/${conversationId}/../doc.txt`,
+        `v2/nexus-documents/${conversationId}/req.123/doc.txt`,
+        `v2/nexus-documents/${conversationId}/req123/doc`,
+        "",
+      ]) {
+        expect(isConversationScopedDocumentKey(bad)).toBe(false);
+        expect(conversationIdFromDocumentKey(bad)).toBeNull();
+      }
+    });
+  });
+
+});
+
+describe("safeWorksheetName (#1898)", () => {
+  beforeEach(() => {
+    sendMock.mockClear();
+  });
+
+  it("strips the characters Excel refuses in a sheet name", () => {
+    // `addWorksheet` THROWS on * ? : \\ / [ ] — so passing the title straight
+    // through turned "a spreadsheet called Q4 Results: Mathematics" into a
+    // failed download instead of a file, and a colon in a title is about as
+    // common as titles get.
+    expect(safeWorksheetName("Q4 Results: Mathematics")).toBe(
+      "Q4 Results Mathematics"
+    );
+    expect(safeWorksheetName("A/B test")).toBe("A B test");
+    expect(safeWorksheetName("Plan [draft]")).toBe("Plan draft");
+    expect(safeWorksheetName("What?")).toBe("What");
+    expect(safeWorksheetName("Back\\slash")).toBe("Back slash");
+    expect(safeWorksheetName("Star*name")).toBe("Star name");
+  });
+
+  it("leaves an already-valid name alone", () => {
+    expect(safeWorksheetName("Fine Name")).toBe("Fine Name");
+  });
+
+  it("falls back to Sheet1 when nothing usable is left", () => {
+    for (const input of [undefined, "", "   ", "*?:"]) {
+      expect(safeWorksheetName(input)).toBe("Sheet1");
+    }
+  });
+
+  it("respects Excel's 31-character cap without a trailing space", () => {
+    expect(safeWorksheetName("x".repeat(50))).toHaveLength(31);
+    expect(safeWorksheetName(`${"y".repeat(30)} tail`)).toBe("y".repeat(30));
+  });
+
+  it("produces a name a real workbook accepts", async () => {
+    const ExcelJS = (await import("exceljs")).default;
+    for (const title of [
+      "Q4 Results: Mathematics",
+      "A/B test",
+      "Plan [draft]",
+      "*?:",
+      "x".repeat(50),
+    ]) {
+      const wb = new ExcelJS.Workbook();
+      expect(() => wb.addWorksheet(safeWorksheetName(title))).not.toThrow();
+    }
+  });
+
+  it("generates an xlsx for a title Excel would have rejected", async () => {
+    const result = await generateDocument({
+      format: "xlsx",
+      title: "Q4 Results: Mathematics",
+      content: "name,score\nAda,99",
+      userId: "42",
+    });
+    expect(result.format).toBe("xlsx");
+    expect(result.bytes).toBeGreaterThan(0);
   });
 });

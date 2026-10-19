@@ -685,17 +685,28 @@ function defineToolCatalogSuite1Part4() {it("getRequiredScopes returns the surfa
   describe("agent platform tools (#926)", () => {
     const AGENT_TOOL_IDS = ["images.generate", "web.fetch", "documents.create"]
 
-    it("are in the manifest on the internal surface only, agentCallable, chat:write", () => {
+    it("are in the manifest, agentCallable, chat:write, and never on mcp/rest", () => {
       for (const id of AGENT_TOOL_IDS) {
         const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
         expect(entry).toBeDefined()
-        expect(entry!.surfaces).toEqual(["internal"])
+        expect(entry!.surfaces).toContain("internal")
         // Not advertised to the external MCP server or REST.
         expect(entry!.surfaces).not.toContain("mcp")
         expect(entry!.surfaces).not.toContain("rest")
         expect(entry!.agentCallable).toBe(true)
         expect(entry!.requiredScopes).toEqual(["chat:write"])
       }
+    })
+
+    // #1898: `documents.create` is ALSO the Nexus chat file-creation tool, so it
+    // carries the `ai_sdk` surface. The other two stay agent-only — removing the
+    // chat surface from this one entry is the issue's documented rollback.
+    it("exposes only documents.create on the chat (ai_sdk) surface", () => {
+      const surfacesOf = (id: string) =>
+        TOOL_MANIFEST.find((t) => t.identifier === id)!.surfaces
+      expect(surfacesOf("documents.create")).toEqual(["internal", "ai_sdk"])
+      expect(surfacesOf("images.generate")).toEqual(["internal"])
+      expect(surfacesOf("web.fetch")).toEqual(["internal"])
     })
 
     it("list({surface:'internal', agentOnly}) returns them for a chat:write caller", async () => {
