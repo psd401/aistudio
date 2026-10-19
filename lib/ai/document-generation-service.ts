@@ -392,10 +392,33 @@ async function buildDocx(title: string | undefined, content: string): Promise<Bu
   return packDocx(buildDocxDocument(title, content));
 }
 
+/**
+ * Excel forbids `* ? : \ / [ ]` in a worksheet name and caps it at 31
+ * characters; `addWorksheet` THROWS on any of them. Passing the document title
+ * straight through therefore turned an ordinary request — "a spreadsheet called
+ * Q4 Results: Mathematics" — into a failed download rather than a file, and a
+ * colon in a title is about as common as titles get.
+ *
+ * The sheet name is sanitized independently of the title, which is still shown
+ * verbatim wherever else the document uses it.
+ *
+ * Exported for unit testing.
+ */
+export function safeWorksheetName(title: string | undefined): string {
+  const cleaned = (title ?? "")
+    // eslint-disable-next-line no-useless-escape -- the class lists Excel's own forbidden set verbatim
+    .replace(/[*?:\\\/\[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 31)
+    .trim();
+  return cleaned || "Sheet1";
+}
+
 async function buildXlsx(title: string | undefined, content: string): Promise<Buffer> {
   const ExcelJS = (await import("exceljs")).default;
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet((title || "Sheet1").slice(0, 31));
+  const ws = wb.addWorksheet(safeWorksheetName(title));
   for (const row of parseCsv(content)) {
     ws.addRow(row);
   }

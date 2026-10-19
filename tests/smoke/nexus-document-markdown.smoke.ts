@@ -266,9 +266,13 @@ await check("keeps strikethrough text, image alt text and escapes", () => {
 await check("keeps a link's text and its target", () => {
   const blocks = parseMarkdownBlocks("See [the policy](https://example.org/p).");
   const runs = blocks[0].kind === "paragraph" ? blocks[0].runs : [];
-  const text = runsToPlainText(runs);
-  assert.ok(text.includes("the policy"), "link label kept");
-  assert.ok(text.includes("https://example.org/p"), "link target kept");
+  // Exact text, not a substring check: a `.includes()` on a URL is the pattern
+  // CodeQL flags as incomplete URL sanitization, and asserting the whole string
+  // is a stronger test anyway — it pins the label, the target AND their layout.
+  assert.equal(
+    runsToPlainText(runs),
+    "See the policy (https://example.org/p)."
+  );
 });
 
 await check("returns no blocks for empty input and never throws", () => {

@@ -51,6 +51,7 @@ import {
   generateDocument,
   isConversationScopedDocumentKey,
   isDocumentFormat,
+  safeWorksheetName,
   sanitizeForWinAnsi,
   transliterateForWinAnsi,
 } from "@/lib/ai/document-generation-service";
@@ -319,4 +320,65 @@ describe("generateDocument (#1898)", () => {
     });
   });
 
+});
+
+describe("safeWorksheetName (#1898)", () => {
+  beforeEach(() => {
+    sendMock.mockClear();
+  });
+
+  it("strips the characters Excel refuses in a sheet name", () => {
+    // `addWorksheet` THROWS on * ? : \\ / [ ] — so passing the title straight
+    // through turned "a spreadsheet called Q4 Results: Mathematics" into a
+    // failed download instead of a file, and a colon in a title is about as
+    // common as titles get.
+    expect(safeWorksheetName("Q4 Results: Mathematics")).toBe(
+      "Q4 Results Mathematics"
+    );
+    expect(safeWorksheetName("A/B test")).toBe("A B test");
+    expect(safeWorksheetName("Plan [draft]")).toBe("Plan draft");
+    expect(safeWorksheetName("What?")).toBe("What");
+    expect(safeWorksheetName("Back\\slash")).toBe("Back slash");
+    expect(safeWorksheetName("Star*name")).toBe("Star name");
+  });
+
+  it("leaves an already-valid name alone", () => {
+    expect(safeWorksheetName("Fine Name")).toBe("Fine Name");
+  });
+
+  it("falls back to Sheet1 when nothing usable is left", () => {
+    for (const input of [undefined, "", "   ", "*?:"]) {
+      expect(safeWorksheetName(input)).toBe("Sheet1");
+    }
+  });
+
+  it("respects Excel's 31-character cap without a trailing space", () => {
+    expect(safeWorksheetName("x".repeat(50))).toHaveLength(31);
+    expect(safeWorksheetName(`${"y".repeat(30)} tail`)).toBe("y".repeat(30));
+  });
+
+  it("produces a name a real workbook accepts", async () => {
+    const ExcelJS = (await import("exceljs")).default;
+    for (const title of [
+      "Q4 Results: Mathematics",
+      "A/B test",
+      "Plan [draft]",
+      "*?:",
+      "x".repeat(50),
+    ]) {
+      const wb = new ExcelJS.Workbook();
+      expect(() => wb.addWorksheet(safeWorksheetName(title))).not.toThrow();
+    }
+  });
+
+  it("generates an xlsx for a title Excel would have rejected", async () => {
+    const result = await generateDocument({
+      format: "xlsx",
+      title: "Q4 Results: Mathematics",
+      content: "name,score\nAda,99",
+      userId: "42",
+    });
+    expect(result.format).toBe("xlsx");
+    expect(result.bytes).toBeGreaterThan(0);
+  });
 });
