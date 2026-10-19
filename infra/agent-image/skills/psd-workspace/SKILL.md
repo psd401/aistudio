@@ -200,6 +200,11 @@ node /opt/psd-skills/psd-workspace/run.js \
   [--scope user|agent]
 ```
 
+**Name the method with SPACES, one token per path segment** — `sheets
+spreadsheets values batchUpdate`, not `sheets.spreadsheets.values.batchUpdate`.
+Both spellings are accepted (the broker canonicalizes the dotted form), but the
+spaced form is what `gws` itself implements and what every example here uses.
+
 Examples:
 
 ```bash
@@ -207,6 +212,22 @@ Examples:
 node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail users messages list --params '{\"userId\":\"me\",\"q\":\"is:unread\",\"maxResults\":20}'"
+
+# Read an attachment on a message (a five-segment method — the whole path is
+# the operation, so this is classified by its real action, `get`)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "gmail users messages attachments get --params '{\"userId\":\"me\",\"messageId\":\"<id>\",\"id\":\"<attachmentId>\"}'"
+
+# Read many Sheet ranges in ONE call (the bulk form of values.get)
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "sheets spreadsheets values batchGet --params '{\"spreadsheetId\":\"<id>\",\"ranges\":[\"A1:B9\"]}'"
+
+# Who is free when — a read, nothing is created
+node /opt/psd-skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command "calendar freebusy query --json-file /home/node/.openclaw/work/freebusy.json"
 
 # Create a draft on the user's account (lands in their Drafts folder, marker
 # is auto-appended to the body — they review and send themselves)
@@ -412,13 +433,13 @@ and style ranges immediately after, back-to-front.
 
 These cannot be bypassed by phrasing. The skill returns exit code 13 with `status: phase1-forbidden`:
 
-- **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, and the Gmail helper verbs `gmail +send`, `gmail +reply`, `gmail +reply-all`, `gmail +forward` — all blocked. Drafts only. These gates are Gmail-scoped: `chat +send` is a separate, allowed operation (agent slot only, see above) and is not covered by this boundary.
+- **No sending mail.** `gmail users messages send`, `gmail users drafts send`, and the Gmail helper verbs `gmail +send`, `gmail +reply`, `gmail +reply-all`, `gmail +forward` — all blocked. Drafts only. These gates are Gmail-scoped: `chat +send` is a separate, allowed operation (agent slot only, see above) and is not covered by this boundary.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
-- **No permission changes.** `drive.permissions.create/update/delete` (except the explicit in-district shapes below).
+- **No permission changes.** `drive permissions create` / `update` / `delete` (except the explicit in-district shapes below).
 - **No file creation as the user.** `drive files create/copy`, `docs documents create`, `sheets spreadsheets create`, `slides presentations create` on `--scope user` are hard-blocked — a file created there is owned by the user's account (impersonation; no attribution trail). Create with `--scope agent`, then share explicitly. **One exception, added 2026-07-25 (#1305):** `drive files create` with `mimeType` exactly `application/vnd.google-apps.folder` is allowed, because a folder carries no content and creating one is organizing, not authoring. The mimeType is matched exactly — a shortcut, a Doc, or a lookalike mimeType still refuses — and any media/upload flag alongside it refuses too. Nothing else gets through, and no phrasing changes that.
 - **User-slot `drive files update` is metadata-only.** Rename, move, star, describe and recolour are allowed; anything else — an unrecognised field, a media/upload flag, or `{"trashed":true}` — refuses the whole call. The allowlist is all-or-nothing: one unknown key poisons the payload.
 
-**Exception — explicit in-district shares of YOUR OWN files.** `drive.permissions.create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
+**Exception — explicit in-district shares of YOUR OWN files.** `drive permissions create` is permitted only on files the agent owns (`--scope agent`), only as `create` (never update/delete), and only in these explicit shapes:
 
 - **Named person in the district:** `type: "user"`, `role: "reader"`, `"commenter"`, or `"writer"`, `emailAddress` ending `@psd401.net` — the caller or any district colleague. Writer is for explicitly named individuals only (e.g. each member of a team space, enumerated by name) — when a group needs to edit, grant each person, never the domain.
 - **Whole district, read-only:** `type: "domain"`, `domain: "psd401.net"`, `role: "reader"` — use when a doc's link is going into a shared Chat space so every member can open it.
@@ -437,8 +458,8 @@ Offer the transfer when you hand over anything they will keep.
 **Transfer LAST. Write the whole file before you hand it over.** Ownership
 transfer is the final step of a handover, never a step in the middle of one. Once
 the file belongs to the caller it is no longer yours to author, and further
-writes — `docs.documents.batchUpdate`, `sheets.spreadsheets.values.update`,
-`slides.presentations.batchUpdate`, `forms.forms.batchUpdate` — can come back
+writes — `docs documents batchUpdate`, `sheets spreadsheets values update`,
+`slides presentations batchUpdate`, `forms forms batchUpdate` — can come back
 403 from Drive. That is what happened on 2026-08-26: a Doc was created,
 transferred, and only then populated, so all three batchUpdate attempts were
 refused and the user got an empty document (failure 13767).
@@ -455,17 +476,17 @@ Examples:
 
 ```bash
 # Hand an artifact back to the caller
-gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+gws drive permissions create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
 
 # Give the caller OWNERSHIP, so they can organize and delete it themselves.
 # transferOwnership is a QUERY parameter, so it goes in --params, not --json.
-gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+gws drive permissions create --scope agent --user hagelk@psd401.net \
   --params '{"fileId":"<id>","transferOwnership":true}' \
   --json '{"type":"user","role":"owner","emailAddress":"hagelk@psd401.net"}'
 
 # Make a doc readable district-wide before posting its link in a Chat space
-gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+gws drive permissions create --scope agent --user hagelk@psd401.net \
   --json '{"fileId":"<id>","type":"domain","role":"reader","domain":"psd401.net"}'
 ```
 
@@ -473,9 +494,9 @@ gws drive.permissions.create --scope agent --user hagelk@psd401.net \
 over — transfer ownership to the caller, or share it, exactly as with a Doc:
 
 ```bash
-gws forms.forms.create --scope agent --user hagelk@psd401.net \
+gws forms forms create --scope agent --user hagelk@psd401.net \
   --json '{"info":{"title":"TPEP Self-Assessment"}}'
-gws forms.forms.batchUpdate --scope agent --user hagelk@psd401.net \
+gws forms forms batchUpdate --scope agent --user hagelk@psd401.net \
   --params '{"formId":"<id>"}' --json '{"requests":[…]}'
 ```
 
@@ -484,7 +505,7 @@ does not own, but a COMMENT is additive and attributed, so it is allowed on the
 agent slot — use it instead of asking the user to paste content:
 
 ```bash
-gws drive.comments.create --scope agent --user hagelk@psd401.net \
+gws drive comments create --scope agent --user hagelk@psd401.net \
   --params '{"fileId":"<id>"}' --json '{"content":"Suggested reordering: …"}'
 ```
 
@@ -492,7 +513,7 @@ gws drive.comments.create --scope agent --user hagelk@psd401.net \
 authoring, so it stays on the user slot (`gmail.modify` covers it):
 
 ```bash
-gws gmail.users.labels.create --scope user --user hagelk@psd401.net \
+gws gmail users labels create --scope user --user hagelk@psd401.net \
   --json '{"name":"Digested"}'
 ```
 
@@ -500,15 +521,15 @@ gws gmail.users.labels.create --scope user --user hagelk@psd401.net \
 inbox — so it is on the user slot too. List, create and delete are all allowed:
 
 ```bash
-gws gmail.users.settings.filters.list --scope user --user hagelk@psd401.net
+gws gmail users settings filters list --scope user --user hagelk@psd401.net
 
-# Skip the inbox and label instead. Get label IDs from gmail.users.labels.list;
+# Skip the inbox and label instead. Get label IDs from `gmail users labels list`;
 # INBOX and UNREAD are built-in ids you can remove directly.
-gws gmail.users.settings.filters.create --scope user --user hagelk@psd401.net \
+gws gmail users settings filters create --scope user --user hagelk@psd401.net \
   --json '{"criteria":{"from":"eoc-alarms@psd401.net"},
            "action":{"addLabelIds":["Label_12"],"removeLabelIds":["INBOX"]}}'
 
-gws gmail.users.settings.filters.delete --scope user --user hagelk@psd401.net \
+gws gmail users settings filters delete --scope user --user hagelk@psd401.net \
   --params '{"id":"<filterId>"}'
 ```
 
@@ -529,7 +550,7 @@ agent-owned file, Drive records an access proposal. List them with
 — the same reader/commenter/writer ceiling as a named share, never `owner`:
 
 ```bash
-gws drive.accessproposals.resolve --scope agent --user hagelk@psd401.net \
+gws drive accessproposals resolve --scope agent --user hagelk@psd401.net \
   --params '{"fileId":"<id>","proposalId":"<id>"}' \
   --json '{"action":"accept","role":"writer"}'
 ```
@@ -611,7 +632,7 @@ shared it correctly the whole time (agent_failures 8289, 8322).
 ### When Drive says you exceeded your sharing quota
 
 `Rate limit exceeded: Sorry, you have exceeded your sharing quota` on
-`drive.permissions.create` is a Google anti-abuse throttle on the SHARING
+`drive permissions create` is a Google anti-abuse throttle on the SHARING
 account, not a transient error and not a problem with the file. It is most
 common on a freshly-provisioned `agnt_` account, whose sharing allowance starts
 low and rises over its first days.
@@ -633,27 +654,27 @@ So on this error, once:
 Never report this as "I could not create the document" — the document exists.
 
 **Google Tasks.** The agent may add tasks to the user's own lists and reorder
-them — `tasks.tasks.insert`, `tasks.tasks.move` — on the user slot. `move`
+them — `tasks tasks insert`, `tasks tasks move` — on the user slot. `move`
 takes the destination in `--params`, not `--json`:
 
 ```bash
 # Put a task directly under a heading task, as its child.
-gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+gws tasks tasks move --scope user --user hagelk@psd401.net \
   --params '{"tasklist":"@default","task":"<taskId>","parent":"<headingTaskId>"}'
 
 # Or just reposition it after another task at the same level.
-gws tasks.tasks.move --scope user --user hagelk@psd401.net \
+gws tasks tasks move --scope user --user hagelk@psd401.net \
   --params '{"tasklist":"@default","task":"<taskId>","previous":"<afterTaskId>"}'
 ```
 
 Deleting tasks or task lists stays forbidden on both slots (Phase 1).
 
 **Finding a person's DM space.** To deliver into your one-to-one Chat with
-someone, resolve the space first — `chat.spaces.list` only returns spaces that
+someone, resolve the space first — `chat spaces list` only returns spaces that
 already exist for you, so a DM you have never used will not appear there:
 
 ```bash
-gws chat.spaces.findDirectMessage --scope agent --user hagelk@psd401.net \
+gws chat spaces findDirectMessage --scope agent --user hagelk@psd401.net \
   --params '{"name":"users/<googleUserId>"}'
 ```
 
