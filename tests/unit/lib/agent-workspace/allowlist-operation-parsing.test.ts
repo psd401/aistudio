@@ -130,6 +130,17 @@ describe("dotted and spaced spellings are one operation", () => {
       validateWorkspaceCommand({ scope: "user", argv: ["drive.files.delete.list"] }, CALLER)
     ).toThrow(/mutation/i)
   })
+
+  it.each([
+    ["drive", "accessproposals", "resolve", "get"],
+    ["drive", "accessproposals", "resolve", "list"],
+    ["sheets", "spreadsheets", "values", "append", "get"],
+    ["drive.accessproposals.resolve.get"],
+  ])("cannot reach an allowlisted write's path with a trailing read: %j", (...argv) => {
+    for (const scope of ["agent", "user"] as const) {
+      expect(() => validateWorkspaceCommand({ scope, argv }, CALLER)).toThrow(/mutation/i)
+    }
+  })
 })
 
 describe("the operation is the WHOLE positional path", () => {

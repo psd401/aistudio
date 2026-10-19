@@ -119,7 +119,11 @@ const READ_OPERATIONS = new Set(["calendar freebusy query"])
 
 // Bare mutating verbs only. `+`-prefixed helper verbs are covered by the
 // prefix check in validateWorkspaceMutation and must not be enumerated here.
+// `append` and `resolve` are the verbs of allowlisted writes
+// (`sheets spreadsheets values append`, `drive accessproposals resolve`); they
+// were absent, so a trailing read verb after either passed as a read (#1893).
 const MUTATING_ACTIONS = new Set([
+  "append",
   "batchdelete",
   "batchmodify",
   "batchupdate",
@@ -134,6 +138,7 @@ const MUTATING_ACTIONS = new Set([
   "patch",
   "reply",
   "reply-all",
+  "resolve",
   "send",
   "stop",
   "trash",
@@ -1460,6 +1465,14 @@ function assertReadCarriesNoMutation(
   }
   if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
     throw new Error("Workspace read command contains a mutation operation")
+  }
+  // Structural backstop for the verb list above: a read whose path begins with
+  // an allowlisted write (`drive accessproposals resolve get`) would otherwise
+  // skip that write's shape rules, whatever its verb is spelled.
+  for (let end = 2; end < tokens.length; end++) {
+    if (ALLOWED_WRITES.has(tokens.slice(0, end).join(" "))) {
+      throw new Error("Workspace read command contains a mutation operation")
+    }
   }
 }
 
