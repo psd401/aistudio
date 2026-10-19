@@ -12,6 +12,7 @@ import {
 } from "@/lib/utils/text-sanitizer";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+import { ASSISTANT_SAVE_FAILED_NOTICE } from "@/lib/streaming/empty-turn-notice";
 import { repositoryAttachmentLabels } from "@/lib/nexus/repository-attachment-messages";
 import {
   buildTemporaryAttachmentMarker,
@@ -919,17 +920,25 @@ export async function saveConversationSteps(params: {
 
 /**
  * Why a finished stream must NOT be persisted as a completed assistant turn, or
- * null when it should be saved.
+ * null when it should be saved as-is.
  *
  * - `stream_aborted`: the run was cut short (wall-clock budget exhausted, or the
  *   caller aborted). AI SDK v6 still fires `onFinish` after an abort, carrying
  *   only the steps that completed before the cut. Its trailing step can hold a
  *   tool call whose result never arrived, and replaying that pair throws
- *   AI_MissingToolResultsError the next time the conversation loads.
- * - `no_content`: no prose AND no multi-step history — there is nothing to show.
- *   This is the exact production failure behind the blank Nexus replies: a 30s
- *   wall-clock abort after a single tool-call step persisted `textLength: 0` and
- *   logged it as a success, leaving a permanently empty assistant bubble.
+ *   AI_MissingToolResultsError the next time the conversation loads. Nothing is
+ *   written; the stream's own abort notice is all the user gets.
+ * - `no_content`: no prose AND no multi-step history. This is the exact
+ *   production failure behind the blank Nexus replies: a 30s wall-clock abort
+ *   after a single tool-call step persisted `textLength: 0` and logged it as a
+ *   success, leaving a permanently empty assistant bubble.
+ *
+ *   Since #1899 the route does NOT drop this turn. Dropping it made the stream's
+ *   empty-turn notice vanish on reload, so the prompt came back looking
+ *   unanswered — which is what drove people to resend the same message two to
+ *   six times. The route persists `EMPTY_TURN_PERSIST_NOTICE` instead (a plain
+ *   text row, which replays safely). This function still reports the reason; the
+ *   caller decides what to write.
  *
  * Completed multi-step runs still persist via saveConversationSteps even when the
  * final step is text-free, so MCP tool history survives.
@@ -945,4 +954,107 @@ export function incompleteTurnReason(input: {
   const hasText = input.text.trim().length > 0;
   const hasMultiStepHistory = (input.steps?.length ?? 0) > 1;
   return hasText || hasMultiStepHistory ? null : "no_content";
+}
+
+/** What `persistAssistantTurn` managed to write. */
+export interface AssistantTurnPersistResult {
+  /** True when the real assistant reply was stored. */
+  persisted: boolean;
+  /** True when the reply failed and a notice row was stored in its place. */
+  fallbackPersisted: boolean;
+}
+
+/**
+ * Store a finished assistant turn, and never leave the prompt unanswered (#1899, case 4).
+ *
+ * The user message is saved before streaming starts. Previously, if saving the
+ * assistant message threw, the failure was only logged — so the conversation
+ * reloaded showing the user's prompt with no reply at all, which is one of the
+ * shapes behind the repeated resends in the #1899 fleet read. Now a minimal
+ * assistant row carrying `ASSISTANT_SAVE_FAILED_NOTICE` is written instead, so
+ * the thread always says what happened.
+ *
+ * The fallback write is itself guarded: if the database is the thing that is
+ * broken, the second insert fails too, and there is nothing further to do but
+ * log it. It deliberately carries no tool calls and no token usage — replaying
+ * a tool_use block whose result was never stored throws
+ * AI_MissingToolResultsError on the next load.
+ */
+export async function persistAssistantTurn(params: {
+  conversationId: string;
+  text: string;
+  steps?: StepData[];
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+  finishReason?: string;
+  toolCalls?: ToolCallData[];
+  dbModelId: number;
+  metadata?: Record<string, unknown>;
+}): Promise<AssistantTurnPersistResult> {
+  const {
+    conversationId,
+    text,
+    steps,
+    usage,
+    finishReason,
+    toolCalls,
+    dbModelId,
+    metadata = {},
+  } = params;
+
+  try {
+    if (steps && steps.length > 1) {
+      // Multi-step agentic loop (MCP connectors): save each step as a separate
+      // assistant message to preserve the correct turn structure for replay.
+      // Consolidating into one message breaks convertToModelMessages — it cannot
+      // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
+      await saveConversationSteps({
+        conversationId,
+        steps,
+        dbModelId,
+        usage,
+        finishReason,
+        metadata,
+      });
+    } else {
+      await saveAssistantMessage({
+        conversationId,
+        text,
+        usage,
+        finishReason,
+        toolCalls,
+        dbModelId,
+        metadata,
+      });
+    }
+    return { persisted: true, fallbackPersisted: false };
+  } catch (saveError) {
+    log.error("Failed to save assistant message", {
+      error: saveError,
+      conversationId,
+    });
+  }
+
+  try {
+    await saveAssistantMessage({
+      conversationId,
+      text: ASSISTANT_SAVE_FAILED_NOTICE,
+      dbModelId,
+      finishReason: "error",
+      metadata: { ...metadata, assistantSaveFailed: true },
+    });
+    log.warn("Saved save-failure notice in place of the assistant reply", {
+      conversationId,
+    });
+    return { persisted: false, fallbackPersisted: true };
+  } catch (fallbackError) {
+    log.error("Failed to save the save-failure notice too", {
+      error: fallbackError,
+      conversationId,
+    });
+    return { persisted: false, fallbackPersisted: false };
+  }
 }

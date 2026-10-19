@@ -443,7 +443,9 @@ export class OpenAIAdapter extends BaseProviderAdapter {
           result,
           () => streamAborted || deadline.timedOut(),
           () => deadline.timedOut(),
-          options
+          // #1899: the step budget lets the notice distinguish "spent every tool
+          // step without answering" from "stopped after one tool call".
+          { ...options, ...(typeof enhancedConfig.maxSteps === 'number' ? { maxSteps: enhancedConfig.maxSteps } : {}) }
         );
 
       return {

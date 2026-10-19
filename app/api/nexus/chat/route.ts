@@ -80,10 +80,11 @@ import {
   saveUserMessage,
   convertMessagesToPartsFormat,
   saveAssistantMessage,
-  saveConversationSteps,
   type StepData,
   incompleteTurnReason,
+  persistAssistantTurn,
 } from './chat-helpers';
+import { EMPTY_TURN_PERSIST_NOTICE } from '@/lib/streaming/empty-turn-notice';
 
 import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
@@ -239,7 +240,7 @@ function createOnFinishCallback(params: {
     });
 
     const skipReason = incompleteTurnReason({ text, aborted, steps });
-    if (skipReason) {
+    if (skipReason === 'stream_aborted') {
       log.warn('Skipping assistant message persistence — incomplete turn', {
         conversationId,
         reason: skipReason,
@@ -248,35 +249,45 @@ function createOnFinishCallback(params: {
       // Still release MCP clients — the cleanup below is not reached on this
       // path, and an aborted turn would otherwise leak connector clients.
       await closeMcpClients(connectorToolResults, log, 'onFinish');
-      timer({
-        status: skipReason === 'stream_aborted' ? 'error' : 'success',
-        conversationId,
-        tokensUsed: usage?.totalTokens,
-      });
+      timer({ status: 'error', conversationId, tokensUsed: usage?.totalTokens });
       return;
     }
 
-    let assistantMessagePersisted = false;
-    try {
-      if (steps && steps.length > 1) {
-        // Multi-step agentic loop (MCP connectors): save each step as a separate
-        // assistant message to preserve the correct turn structure for replay.
-        // Consolidating into one message breaks convertToModelMessages — it cannot
-        // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
-        await saveConversationSteps({
-          conversationId, steps, dbModelId, usage, finishReason,
-          metadata: { routing: routingMetadata },
-        });
-      } else {
-        await saveAssistantMessage({
-          conversationId, text, usage, finishReason, toolCalls, dbModelId,
-          metadata: { routing: routingMetadata },
-        });
-      }
-      assistantMessagePersisted = true;
-    } catch (saveError) {
-      log.error('Failed to save assistant message', { error: saveError, conversationId });
+    if (skipReason === 'no_content') {
+      // #1899, cases 1 and 2: the stream has already told the user this turn
+      // produced no answer (`buildAbortAwareResponse`). Skipping the write made
+      // that notice vanish on reload, leaving the prompt looking unanswered —
+      // which is what drove people to resend the same message two to six times.
+      // Persist the notice instead, as a plain text row that replays safely
+      // (no tool_use block without its result).
+      log.warn('Persisting empty-turn notice — turn produced no answer', {
+        conversationId,
+        finishReason,
+      });
+      await persistAssistantTurn({
+        conversationId,
+        text: EMPTY_TURN_PERSIST_NOTICE,
+        dbModelId,
+        finishReason: finishReason || 'no_content',
+        metadata: { routing: routingMetadata, emptyTurn: true },
+      });
+      await closeMcpClients(connectorToolResults, log, 'onFinish');
+      timer({ status: 'success', conversationId, tokensUsed: usage?.totalTokens });
+      return;
     }
+
+    // Writes the real reply, or a notice row if that write fails, so a reload
+    // never shows a prompt with no reply at all (#1899, case 4).
+    const { persisted: assistantMessagePersisted } = await persistAssistantTurn({
+      conversationId,
+      text,
+      steps,
+      usage,
+      finishReason,
+      toolCalls,
+      dbModelId,
+      metadata: { routing: routingMetadata },
+    });
 
     if (assistantMessagePersisted) {
       // Deliberately fire-and-forget after persistence. Automatic memory must

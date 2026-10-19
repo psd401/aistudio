@@ -10,6 +10,12 @@ import {
 import { createLogger } from '@/lib/logger';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import { withSseKeepAliveResponse } from '../sse-keep-alive';
+import {
+  classifyChunkVisibility,
+  classifyEmptyTurn,
+  emptyTurnNotice,
+} from '../empty-turn-notice';
+import { sanitizeStreamErrorMessage } from '../stream-error-message';
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -491,7 +497,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
           result,
           () => streamAborted || deadline.timedOut(),
           () => deadline.timedOut(),
-          options
+          // #1899: the step budget lets the notice distinguish "spent every tool
+          // step without answering" from "stopped after one tool call".
+          { ...options, ...(typeof enhancedConfig.maxSteps === 'number' ? { maxSteps: enhancedConfig.maxSteps } : {}) }
         );
 
       return {
@@ -613,39 +621,8 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
-   * Does this UI chunk type put something in front of the user?
-   *
-   * Used only to decide whether a cleanly-finished run was genuinely blank, so it
-   * errs towards "visible": a false positive merely withholds the empty-response
-   * notice, while a false negative tells someone their rendered answer was empty.
-   * Beyond text and reasoning it covers every part type the thread renders on its
-   * own — tool activity (`tool-input-start`, `tool-output-available`, … — MCP
-   * tools stream through these same types with a `dynamic` flag), generated
-   * files, retrieved sources, and custom `data-*` parts. (PR #1686 review.)
-   *
-   * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`),
-   * which decides whether the turn is persisted from text and step history
-   * alone. The two answer different questions and are allowed to disagree, but
-   * a turn this method calls visible while that one calls `no_content` renders
-   * and then vanishes on reload with nothing said. No such turn is reachable
-   * today (Nexus streams generated images through `image-generation-handler`,
-   * not this path, and no `data-*` part is emitted through an adapter), so if a
-   * chunk type is ever added on one side, check the other.
-   */
-  protected static isVisibleChunkType(type: string): boolean {
-    return (
-      type === 'text-delta' ||
-      type === 'reasoning-delta' ||
-      type === 'file' ||
-      type.startsWith('tool-') ||
-      type.startsWith('source-') ||
-      type.startsWith('data-')
-    );
-  }
-
-  /**
    * Build the HTTP response, appending a terminal `error` chunk when the run was
-   * cut short.
+   * cut short or ended with nothing for the user to read.
    *
    * Verified against ai@6.0.208: an abort enqueues an `abort` UI chunk and sets an
    * internal flag, but raises NO client-side error — the browser simply sees the
@@ -657,16 +634,31 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    *
    * The chunk is appended at end-of-stream, so it neither reorders nor rewrites
    * any content the model already produced.
+   *
+   * #1899: the "is this turn blank?" test is anchored on a TEXT part, not on
+   * "some chunk arrived". `reasoning-delta` and `file` chunks used to count as
+   * visible, but the Nexus Thread registers no Reasoning and no File renderer,
+   * so a think-then-say-nothing turn rendered an empty bubble with no notice.
+   * Tool-only turns are covered too: `resolveMaxSteps` gives an ordinary turn
+   * three steps, so a turn can spend them all on `web_fetch` and end with tool
+   * cards and no answer. `classifyEmptyTurn` decides which of those happened
+   * and `emptyTurnNotice` says so. `source-*` / `data-*` parts still suppress
+   * the notice — the thread renders those itself, and telling someone their
+   * visible answer was empty is the one failure worse than staying quiet.
+   *
+   * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`):
+   * a turn this method calls blank is also the turn that route persists as a
+   * notice row, so the notice survives a reload instead of vanishing.
    */
   protected buildAbortAwareResponse(
     result: {
-      toUIMessageStream?: () => ReadableStream<UIMessageChunk>;
+      toUIMessageStream?: (options?: { onError?: (error: unknown) => string }) => ReadableStream<UIMessageChunk>;
       toUIMessageStreamResponse?: (options?: { headers?: Record<string, string> }) => Response;
       toTextStreamResponse: (options?: { headers?: Record<string, string> }) => Response;
     },
     wasAborted: () => boolean,
     didTimeOut: () => boolean,
-    options?: { headers?: Record<string, string> }
+    options?: { headers?: Record<string, string>; maxSteps?: number }
   ): Response {
     // Providers without the UI-message stream (plain text responses) keep the
     // previous behaviour — there is no chunk protocol to append to.
@@ -676,42 +668,77 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         : result.toTextStreamResponse(options);
     }
 
-    // Track whether the turn produced anything the user can actually see. A
-    // tool-only turn still renders (the thread shows tool output), so only a
-    // stream with neither text nor tool activity is genuinely blank.
-    let producedVisibleOutput = false;
+    // What the turn actually put in front of the user, by part kind (#1899).
+    const seen = {
+      sawText: false,
+      sawReasoning: false,
+      sawFile: false,
+      sawToolActivity: false,
+      sawOtherRendered: false,
+      completedSteps: 0,
+    };
+    const maxSteps = options?.maxSteps;
 
-    const stream = result.toUIMessageStream().pipeThrough(
-      new TransformStream<UIMessageChunk, UIMessageChunk>({
-        transform(chunk, controller) {
-          const type = (chunk as { type?: string }).type ?? '';
-          if (BaseProviderAdapter.isVisibleChunkType(type)) {
-            producedVisibleOutput = true;
-          }
-          controller.enqueue(chunk);
-        },
-        flush(controller) {
-          if (wasAborted()) {
-            controller.enqueue({
-              type: 'error',
-              errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
-            });
-            return;
-          }
-          // A run that ended cleanly having emitted nothing at all is still a
-          // dead end for the user: the route now refuses to persist it, so
-          // without this the stream would simply stop and reload as if the turn
-          // never happened. Say so instead. (PR #1686 review.)
-          if (!producedVisibleOutput) {
-            controller.enqueue({
-              type: 'error',
-              errorText:
-                'The model returned an empty response. Please try again, or rephrase your request.',
-            });
-          }
-        },
+    const stream = result
+      .toUIMessageStream({
+        // Without this the AI SDK default (`() => 'An error occurred.'`) is what
+        // the user sees for every mid-stream failure (#1899, case 3). The raw
+        // provider message is never passed through — it can carry request ids
+        // and prompt fragments — only an allow-listed explanation.
+        onError: (error: unknown) => sanitizeStreamErrorMessage(error),
       })
-    );
+      .pipeThrough(
+        new TransformStream<UIMessageChunk, UIMessageChunk>({
+          transform(chunk, controller) {
+            const type = (chunk as { type?: string }).type ?? '';
+            if (type === 'finish-step') {
+              seen.completedSteps += 1;
+            }
+            switch (classifyChunkVisibility(type)) {
+              case 'text':
+                seen.sawText = true;
+                break;
+              case 'reasoning':
+                seen.sawReasoning = true;
+                break;
+              case 'file':
+                seen.sawFile = true;
+                break;
+              case 'tool':
+                seen.sawToolActivity = true;
+                break;
+              case 'other':
+                seen.sawOtherRendered = true;
+                break;
+              default:
+                break;
+            }
+            controller.enqueue(chunk);
+          },
+          flush(controller) {
+            if (wasAborted()) {
+              controller.enqueue({
+                type: 'error',
+                errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
+              });
+              return;
+            }
+            // A run that ended cleanly with no answer is still a dead end for
+            // the user: without a notice the stream would simply stop, and the
+            // turn would reload as if it had never happened. Say what happened.
+            const emptyKind = classifyEmptyTurn({
+              ...seen,
+              ...(typeof maxSteps === 'number' ? { maxSteps } : {}),
+            });
+            if (emptyKind) {
+              controller.enqueue({
+                type: 'error',
+                errorText: emptyTurnNotice(emptyKind),
+              });
+            }
+          },
+        })
+      );
 
     // Keep the socket warm through a silent reasoning/tool stretch. Without
     // this the ALB's 300s idle timeout drops the connection at or before the

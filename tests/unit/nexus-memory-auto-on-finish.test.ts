@@ -26,7 +26,11 @@ describe("Nexus automatic memory onFinish wiring", () => {
       throw new TypeError("Expected createOnFinishCallback declaration")
     }
 
-    let persisted: ts.BinaryExpression | undefined
+    // Where `assistantMessagePersisted` gets its value. Since #1899 that is a
+    // binding element destructured from `persistAssistantTurn`, not an
+    // assignment inside a try block — either shape is accepted, because what
+    // matters is only that it is established BEFORE the extraction call.
+    let persisted: ts.Node | undefined
     let scheduled: ts.CallExpression | undefined
     let cleanup: ts.CallExpression | undefined
     const visit = (node: ts.Node): void => {
@@ -37,6 +41,13 @@ describe("Nexus automatic memory onFinish wiring", () => {
         ts.isIdentifier(node.left) &&
         node.left.text === "assistantMessagePersisted" &&
         node.right.kind === ts.SyntaxKind.TrueKeyword
+      ) {
+        persisted = node
+      }
+      if (
+        ts.isBindingElement(node) &&
+        ts.isIdentifier(node.name) &&
+        node.name.text === "assistantMessagePersisted"
       ) {
         persisted = node
       }
