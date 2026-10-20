@@ -109,6 +109,13 @@ test.describe("Nexus generated images survive a reload (#1900)", () => {
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires an authenticated host dev server — see docs/guides/e2e-authenticated-testing.md"
   );
+  // Every image model needs a Google or OpenAI key. Without one the app
+  // correctly refuses ("Image generation is not available…"), so this spec
+  // would fail the pre-push gate on any machine that has no image key.
+  test.skip(
+    !process.env.GOOGLE_API_KEY && !process.env.OPENAI_API_KEY,
+    "Requires GOOGLE_API_KEY or OPENAI_API_KEY so an image model is accessible"
+  );
 
   test("an image renders when generated and again after the page reloads", async ({
     browser,
