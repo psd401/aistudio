@@ -16,7 +16,9 @@ openwiki:
     - lib/tools/direct-render-tools.ts
     - app/api/nexus/chat/chat-helpers.ts
     - app/api/nexus/chat/route.ts
-  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse]
+    - app/api/nexus/chat/stream-headers.ts
+    - app/api/nexus/chat/image-generation-handler.ts
+  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH]
   test_paths:
     - lib/streaming/__tests__/sse-keepalive.test.ts
     - lib/streaming/__tests__/deferred-ui-message-stream.test.ts
