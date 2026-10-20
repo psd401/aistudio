@@ -71,10 +71,11 @@ import {
   buildNoImageMessage,
   createImageStreamResponse,
   createNoImageResponse,
+  getNoImageExplanation,
   handleImageGenerationError,
-  isNoImageError,
   persistNoImageExchange,
 } from './image-generation-handler';
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
 
 import {
   generateConversationTitle,
@@ -676,7 +677,7 @@ async function executeStreaming(params: {
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools &&
-    Object.hasOwn(attachmentTools, "searchNexusAttachments");
+    Object.hasOwn(attachmentTools, NEXUS_ATTACHMENT_SEARCH_TOOL_NAME);
   const systemPrompt = buildNexusSystemPrompt({
     skillInstructions,
     skillName,
@@ -1095,22 +1096,37 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
+    let failure: unknown = imageError;
     // A model that answered in words instead of pixels did NOT fail the turn
     // (#1900): keep the conversation, persist its explanation, and show it.
-    if (isNoImageError(imageError)) {
-      return await respondWithNoImage({
-        error: imageError,
-        conversationId,
-        conversationTitle,
-        existingConversationId,
-        imagePrompt,
-        persistenceMessages,
-        dbModelId,
-        routingMetadata,
-        requestId,
-        log,
-        timer,
-      });
+    // If that save fails the turn is lost exactly like a failed image save, so
+    // it falls through to the same rollback and error.
+    const explanation = getNoImageExplanation(imageError);
+    if (explanation) {
+      try {
+        return await respondWithNoImage({
+          explanation,
+          conversationId,
+          conversationTitle,
+          existingConversationId,
+          imagePrompt,
+          persistenceMessages,
+          dbModelId,
+          routingMetadata,
+          requestId,
+          log,
+          timer,
+        });
+      } catch (persistError) {
+        log.error("Failed to persist a no-image image turn", {
+          conversationId,
+          error:
+            persistError instanceof Error
+              ? persistError.message
+              : "Unknown persistence error",
+        });
+        failure = persistError;
+      }
     }
     const rollbackError = await rollbackFailedImageConversation({
       attachmentReferences,
@@ -1122,19 +1138,20 @@ async function handleImageGeneration(params: {
       timer,
     });
     if (rollbackError) return rollbackError;
-    return handleImageGenerationError(imageError, conversationId, requestId);
+    return handleImageGenerationError(failure, conversationId, requestId);
   }
 }
 
 /**
- * Turn a `NO_IMAGE` result into an ordinary assistant reply (#1900).
+ * Turn a model's text-instead-of-image answer into an ordinary assistant
+ * reply (#1900).
  *
- * Persistence failing must not swallow the explanation, so the stream is
- * returned either way; the user reads the answer even if only this response
- * carries it.
+ * Throws if the exchange cannot be saved: a reply that vanishes on reload,
+ * over a new conversation left with no messages, is worse than an error, so
+ * the caller rolls back exactly as it does for a failed image save.
  */
 async function respondWithNoImage(params: {
-  error: unknown;
+  explanation: string;
   conversationId: string;
   conversationTitle: string;
   existingConversationId?: string;
@@ -1146,7 +1163,7 @@ async function respondWithNoImage(params: {
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
 }): Promise<Response> {
-  const text = buildNoImageMessage(params.error);
+  const text = buildNoImageMessage(params.explanation);
   const lastMessage =
     params.persistenceMessages[params.persistenceMessages.length - 1];
   const persistedUser =
@@ -1156,21 +1173,14 @@ async function respondWithNoImage(params: {
           content: params.imagePrompt,
           parts: [{ type: "text", text: params.imagePrompt }],
         };
-  try {
-    await persistNoImageExchange({
-      conversationId: params.conversationId,
-      userContent: persistedUser.content,
-      userParts: persistedUser.parts,
-      assistantText: text,
-      dbModelId: params.dbModelId,
-      routingMetadata: { ...params.routingMetadata },
-    });
-  } catch (error) {
-    params.log.error("Failed to persist a no-image image turn", {
-      conversationId: params.conversationId,
-      error: error instanceof Error ? error.message : "Unknown persistence error",
-    });
-  }
+  await persistNoImageExchange({
+    conversationId: params.conversationId,
+    userContent: persistedUser.content,
+    userParts: persistedUser.parts,
+    assistantText: text,
+    dbModelId: params.dbModelId,
+    routingMetadata: { ...params.routingMetadata },
+  });
   params.log.info("Image generation returned no image; returning the model's text", {
     conversationId: params.conversationId,
     requestId: params.requestId,
@@ -2564,7 +2574,7 @@ async function buildRoutingEnabledTools(params: {
   return [
     ...new Set([
       ...params.enabledTools,
-      ...(requiresAttachmentTools ? ["searchNexusAttachments"] : []),
+      ...(requiresAttachmentTools ? [NEXUS_ATTACHMENT_SEARCH_TOOL_NAME] : []),
       ...(hasDurableRepositoryBinding
         ? ["searchConversationRepositories"]
         : []),

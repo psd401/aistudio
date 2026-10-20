@@ -16,6 +16,7 @@ import {
   generatedImageProxyPath,
 } from '@/lib/ai/generated-image-bucket'
 import { decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer'
+import { generatedImageMarkdown } from '@/lib/nexus/generated-image-markdown'
 import {
   buildTemporaryAttachmentMarker,
   parseTemporaryAttachmentMarkers,
@@ -45,7 +46,7 @@ const MAX_CONTENT_LENGTH = 50000
 function isKeyForConversation(s3Key: string, conversationId: string): boolean {
   return (
     s3Key.startsWith(`conversations/${conversationId}/`) ||
-    s3Key.startsWith(`v2/generated-images/${conversationId}/`)
+    s3Key.startsWith(generatedImageKeyPrefix(conversationId))
   )
 }
 
@@ -130,13 +131,13 @@ async function convertImagePart(
   if (s3Key && s3Key.startsWith(generatedImageKeyPrefix(conversationId))) {
     return {
       type: 'text',
-      text: `![Generated Image](${generatedImageProxyPath(s3Key)})`,
+      text: generatedImageMarkdown(generatedImageProxyPath(s3Key), part.altText),
     }
   }
   if (s3Key && isKeyForConversation(s3Key, conversationId)) {
     try {
       const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
-      return { type: 'text', text: `![Generated Image](${freshUrl})` }
+      return { type: 'text', text: generatedImageMarkdown(freshUrl, part.altText) }
     } catch (error) {
       const log = createLogger({ context: 'convertPartToTextContent' })
       log.warn('Failed to refresh presigned URL from s3Key', {
@@ -149,7 +150,7 @@ async function convertImagePart(
     log.warn('Refusing to presign s3Key outside the conversation prefix', { conversationId })
   }
   return part.imageUrl
-    ? { type: 'text', text: `![Generated Image](${part.imageUrl})` }
+    ? { type: 'text', text: generatedImageMarkdown(part.imageUrl, part.altText) }
     : null
 }
 

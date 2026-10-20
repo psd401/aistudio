@@ -73,4 +73,17 @@ describe("MarkdownImage", () => {
     expect(screen.getByAltText("A kitten")).toBeInTheDocument()
     expect(screen.queryByText(/Image unavailable/)).not.toBeInTheDocument()
   })
+
+  it("retries the same URL when the user asks", () => {
+    render(<MarkdownImage src="https://s3.example.test/flaky" alt="A kitten" />)
+    fireEvent.error(screen.getByAltText("A kitten"))
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+
+    expect(screen.getByAltText("A kitten")).toHaveAttribute(
+      "src",
+      "https://s3.example.test/flaky",
+    )
+    expect(screen.queryByText(/Image unavailable/)).not.toBeInTheDocument()
+  })
 })

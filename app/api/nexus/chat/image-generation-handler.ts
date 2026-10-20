@@ -13,10 +13,12 @@ import { nexusConversations, nexusMessages } from "@/lib/db/schema";
 import { getAttachmentFromS3 } from "@/lib/services/attachment-storage-service";
 import { getObjectStream } from "@/lib/aws/s3-client";
 import {
+  generatedImageKeyPrefix,
   generatedImageProxyPath,
   getGeneratedImageBucket,
 } from "@/lib/ai/generated-image-bucket";
 import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
+import { generatedImageMarkdown } from "@/lib/nexus/generated-image-markdown";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
 import { deleteDocumentVersions } from "@/lib/aws/s3-client";
@@ -181,7 +183,7 @@ function isGeneratedImageKeyForConversation(
   s3Key: string,
   conversationId: string,
 ): boolean {
-  return s3Key.startsWith(`v2/generated-images/${conversationId}/`);
+  return s3Key.startsWith(generatedImageKeyPrefix(conversationId));
 }
 
 /**
@@ -482,7 +484,8 @@ export async function persistImageExchange(params: {
     type: "image",
     imageUrl: imageResult.imageUrl,
     s3Key: imageResult.s3Key,
-    altText: "Generated image",
+    // The reload path renders this as the image's alt text (#1900).
+    altText: imageResult.altText?.trim() || "Generated image",
   });
 
   const assistantMessageContent = JSON.stringify({
@@ -944,7 +947,7 @@ export function createImageStreamResponse(params: {
   const renderedUrl = imageResult.s3Key
     ? generatedImageProxyPath(imageResult.s3Key)
     : imageResult.imageUrl;
-  responseContent += `![Generated Image](${renderedUrl})`;
+  responseContent += generatedImageMarkdown(renderedUrl, imageResult.altText);
 
   return createAssistantTextStreamResponse({
     text: responseContent,
@@ -1009,35 +1012,41 @@ function createAssistantTextStreamResponse(params: {
   });
 }
 
-/** The label that tells the user no image came back, however good the text is. */
-export const NO_IMAGE_LABEL = "**No image was produced.**";
+/**
+ * The label that tells the user no image came back, however good the text is.
+ * Same vocabulary as the "Image unavailable" fallback in `markdown-text.tsx`.
+ */
+export const NO_IMAGE_LABEL = "**Image not generated.**";
 
-/** Whether image generation failed specifically by returning no image. */
-export function isNoImageError(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "type" in error &&
-    (error as { type?: unknown }).type === "NO_IMAGE"
-  );
+/**
+ * The model's own words when it answered an image request with text (#1900).
+ *
+ * Only a `NO_IMAGE` that carries `providerText` qualifies. `NO_IMAGE` is also
+ * thrown for a reference image that is too large, a blocked or failing
+ * reference URL, and an empty provider response; those are failures, not
+ * answers, so they return `null` and keep the error path and its rollback.
+ */
+export function getNoImageExplanation(error: unknown): string | null {
+  if (
+    !(error instanceof Error) ||
+    !("type" in error) ||
+    (error as { type?: unknown }).type !== "NO_IMAGE" ||
+    !("providerText" in error)
+  ) {
+    return null;
+  }
+  const text = String((error as { providerText?: unknown }).providerText ?? "").trim();
+  return text || null;
 }
 
 /**
- * The user-facing text for a `NO_IMAGE` result (#1900).
+ * The user-facing text for a model that explained instead of drawing (#1900).
  *
- * The model's own explanation is the valuable part — "I can't render
- * recognisable people", "that photo is too small to upscale" — so it is shown
- * verbatim under a label that makes the missing image unambiguous. When the
- * provider said nothing, the error's own message carries the explanation.
+ * The explanation is the valuable part — "I can't render recognisable
+ * people", "that photo is too small to upscale" — so it is shown verbatim
+ * under a label that makes the missing image unambiguous.
  */
-export function buildNoImageMessage(error: unknown): string {
-  const providerText =
-    error instanceof Error && "providerText" in error
-      ? String((error as { providerText?: unknown }).providerText ?? "").trim()
-      : "";
-  const explanation =
-    providerText ||
-    (error instanceof Error ? error.message : String(error)).trim() ||
-    "The model did not return an image and gave no explanation.";
+export function buildNoImageMessage(explanation: string): string {
   return `${NO_IMAGE_LABEL}\n\n${explanation}`;
 }
 

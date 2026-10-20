@@ -3,6 +3,7 @@ import { filterAccessibleResourceIds } from "@/lib/db/drizzle/resource-access"
 import { createLogger } from "@/lib/logger"
 import { hasCapability } from "@/lib/ai/capability-utils"
 import { getConfiguredChatProviders } from "@/lib/ai/provider-credentials"
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search-tool-name"
 import {
   inferModelFamily,
   inferModelTier,
@@ -89,7 +90,7 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
  * Every OTHER required tool (repository, project, skill, web search) really
  * does need a caller, so those turns keep the existing tier-aware text routing.
  */
-const IMAGE_PATH_SATISFIED_TOOLS = new Set(["searchNexusAttachments"])
+const IMAGE_PATH_SATISFIED_TOOLS = new Set([NEXUS_ATTACHMENT_SEARCH_TOOL_NAME])
 
 /**
  * Whether `selectModel` takes its image-specialist branch for this turn.

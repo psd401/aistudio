@@ -104,13 +104,25 @@ export const MarkdownImage: FC<ComponentPropsWithoutRef<"img">> = ({
 
   if (srcKey !== null && failedSrc === srcKey) {
     return (
-      <span
-        role="img"
-        aria-label={alt ? `Image unavailable: ${alt}` : "Image unavailable"}
-        className="text-muted-foreground bg-muted my-5 inline-flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-sm"
-      >
-        <ImageOffIcon className="size-4 shrink-0" aria-hidden="true" />
-        <span>Image unavailable{alt ? ` — ${alt}` : ""}</span>
+      <span className="text-muted-foreground bg-muted my-5 inline-flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-sm">
+        {/* role="img" hides its children from assistive tech, so the Retry
+            button sits beside the labelled region rather than inside it. */}
+        <span
+          role="img"
+          aria-label={alt ? `Image unavailable: ${alt}` : "Image unavailable"}
+          className="inline-flex items-center gap-2"
+        >
+          <ImageOffIcon className="size-4 shrink-0" aria-hidden="true" />
+          <span>Image unavailable{alt ? ` — ${alt}` : ""}</span>
+        </span>
+        {/* A load can fail transiently; one click re-requests the same URL. */}
+        <button
+          type="button"
+          onClick={() => setFailedSrc(null)}
+          className="text-primary text-xs font-medium underline underline-offset-4"
+        >
+          Retry
+        </button>
       </span>
     );
   }
