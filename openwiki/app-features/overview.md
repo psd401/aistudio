@@ -338,6 +338,8 @@ See `/docs/features/nexus-model-routing.md` for full configuration.
 
 **Streaming Reliability**: Long-running AI turns use SSE keep-alive to prevent ALB idle timeout during silent reasoning phases. Provider adapters automatically inject `: keep-alive\n\n` comment frames at 15-second intervals. See **[architecture/streaming.md](../architecture/streaming.md)** for implementation details.
 
+**Answer-less Turns (#1899)**: A turn that ends with reasoning, files, or tool calls but no written text gets an explicit notice rather than a blank bubble, and that notice is persisted so it survives a reload. A turn that produced a chart or a generated document is exempt, because that output is the answer. The classification rules, the persistence branches, and the sanitized stream-error text are documented in **[architecture/streaming.md](../architecture/streaming.md#answer-less-turns-and-error-notices-1899)**. Generated files are described in **[generated-documents.md](generated-documents.md)**.
+
 **Critical**: Read `/docs/features/nexus-conversation-architecture.md` before modifying any conversation code. This system has broken multiple times—follow documented patterns exactly.
 
 #### Repository Readiness Gate
