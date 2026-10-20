@@ -35,6 +35,8 @@ import { validatedFs } from "@/lib/filesystem/validated-fs";
  * PREREQUISITES (why this is gated — it is NOT run in CI):
  *  - Host dev server (`bun run server.ts`) with PLAYWRIGHT_AUTH_ENABLED=true and
  *    an accessible image model configured (docs/guides/e2e-authenticated-testing.md).
+ *  - GOOGLE_API_KEY or OPENAI_API_KEY in the runner's env, or
+ *    E2E_IMAGE_GENERATION=true when the server reads the key from settings.
  *  - DOCUMENTS_BUCKET_NAME set and writable by the app's AWS credentials.
  */
 
@@ -111,10 +113,14 @@ test.describe("Nexus generated images survive a reload (#1900)", () => {
   );
   // Every image model needs a Google or OpenAI key. Without one the app
   // correctly refuses ("Image generation is not available…"), so this spec
-  // would fail the pre-push gate on any machine that has no image key.
+  // would fail the pre-push gate on any machine that has no image key. The
+  // server may hold the key in database settings, which this runner cannot
+  // see, so E2E_IMAGE_GENERATION=true runs it regardless.
   test.skip(
-    !process.env.GOOGLE_API_KEY && !process.env.OPENAI_API_KEY,
-    "Requires GOOGLE_API_KEY or OPENAI_API_KEY so an image model is accessible"
+    process.env.E2E_IMAGE_GENERATION !== "true" &&
+      !process.env.GOOGLE_API_KEY &&
+      !process.env.OPENAI_API_KEY,
+    "Requires an accessible image model: set GOOGLE_API_KEY or OPENAI_API_KEY, or E2E_IMAGE_GENERATION=true when the key is in database settings"
   );
 
   test("an image renders when generated and again after the page reloads", async ({
