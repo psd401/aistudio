@@ -7,8 +7,9 @@ import { test, expect } from './fixtures'
  * own by supplying an arbitrary conversationId in the request body. Before the
  * fix, any authenticated user could inject messages into any conversation.
  *
- * Both the standard chat path and the image-generation path are covered;
- * both now go through setupConversation.
+ * Covers cross-user ownership rejection on the standard chat path and the
+ * image-generation path (both go through setupConversation). Successful
+ * Project-bound image turns: nexus-bound-image.functional.spec.ts.
  *
  * Auth requirement: Two distinct authenticated sessions are needed. Set
  * PLAYWRIGHT_AUTH_ENABLED=true and configure storage-state files for each

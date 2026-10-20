@@ -1013,7 +1013,17 @@ async function setupImageConversation(params: {
     skillId: convResult.skillId,
     requestId: params.requestId,
   });
-  if (repositoryBindingError) return { error: repositoryBindingError };
+  if (repositoryBindingError) {
+    // A conversation this turn just created never reaches the client; leave
+    // no empty row in the list, exactly as the standard path compensates.
+    if (convResult.created) {
+      await rollbackNewNexusAttachmentConversation({
+        ownerId: params.userId,
+        conversationId: convResult.conversationId,
+      });
+    }
+    return { error: repositoryBindingError };
+  }
   return {
     conversationId: convResult.conversationId,
     conversationTitle: convResult.conversationTitle,
