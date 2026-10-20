@@ -23,8 +23,10 @@ import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
 import { deleteDocumentVersions } from "@/lib/aws/s3-client";
 import { createLogger } from "@/lib/logger";
+import { describeQueryErrorCause } from "@/lib/db/query-error";
 import type { NexusAttachmentImageSource } from "@/lib/nexus/ephemeral-repository-service";
 import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
+import { buildNexusStreamHeaders } from "./stream-headers";
 
 /**
  * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
@@ -974,26 +976,15 @@ function createAssistantTextStreamResponse(params: {
 }): Response {
   const messageId = `${params.messageIdPrefix}-${Date.now()}`;
 
-  const responseHeaders: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Conversation-Id": params.conversationId,
-  };
-  if (params.imageGenerated) {
-    responseHeaders["X-Image-Generated"] = "true";
-  }
-
-  if (params.isNewConversation) {
-    responseHeaders["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle,
-    );
-  }
-  if (params.routingMetadata) {
-    const encodedRouting = encodeURIComponent(
-      JSON.stringify(params.routingMetadata),
-    );
-    if (encodedRouting.length <= 4096)
-      responseHeaders["X-Nexus-Routing"] = encodedRouting;
-  }
+  const responseHeaders = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: params.conversationId,
+    conversationTitle: params.isNewConversation
+      ? params.conversationTitle
+      : undefined,
+    extraHeaders: params.imageGenerated ? { "X-Image-Generated": "true" } : undefined,
+  });
 
   return createUIMessageStreamResponse({
     status: 200,
@@ -1074,6 +1065,46 @@ export function createNoImageResponse(params: {
     requestId: params.requestId,
     routingMetadata: params.routingMetadata,
   });
+}
+
+/**
+ * Decide the response for an image turn whose generation threw (#1900).
+ *
+ * A model that answered in words instead of pixels did NOT fail the turn: its
+ * explanation is saved and shown. Everything else — a `NO_IMAGE` the model did
+ * not explain, any other error, or an explanation that could not be saved (a
+ * reply that would vanish on reload, over a new conversation left with no
+ * messages) — rolls back a newly created conversation and returns the error
+ * response. The route supplies the side effects so this decision is testable.
+ */
+export async function respondToImageFailure(params: {
+  error: unknown;
+  /** Saves and streams the explanation; throws if it cannot be saved. */
+  replyWithExplanation: (explanation: string) => Promise<Response>;
+  /** Compensates a new conversation; returns a response only if that fails. */
+  rollback: () => Promise<Response | null>;
+  toErrorResponse: (error: unknown) => Response;
+  conversationId: string;
+}): Promise<Response> {
+  let failure: unknown = params.error;
+  const explanation = getNoImageExplanation(params.error);
+  if (explanation) {
+    try {
+      return await params.replyWithExplanation(explanation);
+    } catch (persistError) {
+      log.error("Failed to persist a no-image image turn", {
+        conversationId: params.conversationId,
+        error:
+          persistError instanceof Error
+            ? persistError.message
+            : "Unknown persistence error",
+        ...describeQueryErrorCause(persistError),
+      });
+      failure = persistError;
+    }
+  }
+  const rollbackError = await params.rollback();
+  return rollbackError ?? params.toErrorResponse(failure);
 }
 
 /**

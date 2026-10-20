@@ -71,8 +71,8 @@ import {
   buildNoImageMessage,
   createImageStreamResponse,
   createNoImageResponse,
-  getNoImageExplanation,
   handleImageGenerationError,
+  respondToImageFailure,
   persistNoImageExchange,
 } from './image-generation-handler';
 import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
@@ -153,6 +153,7 @@ import {
   repositoryBindingErrorResponse,
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
+import { buildNexusStreamHeaders } from './stream-headers';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -522,23 +523,19 @@ function buildStreamingResponseHeaders(params: {
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
 }): Record<string, string> {
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Unified-Streaming": "true",
-    "X-Supports-Reasoning": params.supportsReasoning.toString(),
-  };
-  const encodedRouting = encodeURIComponent(
-    JSON.stringify(params.routingMetadata),
-  );
-  if (encodedRouting.length <= 4096) {
-    headers["X-Nexus-Routing"] = encodedRouting;
-  }
-  if (!params.conversationIdValue && params.conversationId) {
-    headers["X-Conversation-Id"] = params.conversationId;
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle || "New Conversation",
-    );
-  }
+  const isNewConversation = !params.conversationIdValue && !!params.conversationId;
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: isNewConversation ? params.conversationId : undefined,
+    conversationTitle: isNewConversation
+      ? params.conversationTitle || "New Conversation"
+      : undefined,
+    extraHeaders: {
+      "X-Unified-Streaming": "true",
+      "X-Supports-Reasoning": params.supportsReasoning.toString(),
+    },
+  });
   const safeIds = params.failedConnectorIds.filter((id) =>
     /^[\da-f-]{36}$/i.test(id),
   );
@@ -1097,15 +1094,11 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
-    let failure: unknown = imageError;
-    // A model that answered in words instead of pixels did NOT fail the turn
-    // (#1900): keep the conversation, persist its explanation, and show it.
-    // If that save fails the turn is lost exactly like a failed image save, so
-    // it falls through to the same rollback and error.
-    const explanation = getNoImageExplanation(imageError);
-    if (explanation) {
-      try {
-        return await respondWithNoImage({
+    return respondToImageFailure({
+      error: imageError,
+      conversationId,
+      replyWithExplanation: (explanation) =>
+        respondWithNoImage({
           explanation,
           conversationId,
           conversationTitle,
@@ -1117,29 +1110,20 @@ async function handleImageGeneration(params: {
           requestId,
           log,
           timer,
-        });
-      } catch (persistError) {
-        log.error("Failed to persist a no-image image turn", {
+        }),
+      rollback: () =>
+        rollbackFailedImageConversation({
+          attachmentReferences,
           conversationId,
-          error:
-            persistError instanceof Error
-              ? persistError.message
-              : "Unknown persistence error",
-        });
-        failure = persistError;
-      }
-    }
-    const rollbackError = await rollbackFailedImageConversation({
-      attachmentReferences,
-      conversationId,
-      existingConversationId,
-      userId,
-      requestId,
-      log,
-      timer,
+          existingConversationId,
+          userId,
+          requestId,
+          log,
+          timer,
+        }),
+      toErrorResponse: (failure) =>
+        handleImageGenerationError(failure, conversationId, requestId),
     });
-    if (rollbackError) return rollbackError;
-    return handleImageGenerationError(failure, conversationId, requestId);
   }
 }
 
@@ -1270,19 +1254,15 @@ interface DeepResearchResponseParams {
 
 function createDeepResearchResponse(params: DeepResearchResponseParams): Response {
   const messageId = `dr-${Date.now()}`;
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Conversation-Id": params.conversationId,
-    "X-Deep-Research": "true",
-    "X-Nexus-Routing": encodeURIComponent(
-      JSON.stringify(params.routingMetadata),
-    ),
-  };
-  if (params.isNewConversation) {
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle,
-    );
-  }
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: params.conversationId,
+    conversationTitle: params.isNewConversation
+      ? params.conversationTitle
+      : undefined,
+    extraHeaders: { "X-Deep-Research": "true" },
+  });
   return params.createUIMessageStreamResponse({
     status: 200,
     headers,

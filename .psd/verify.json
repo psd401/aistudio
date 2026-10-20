@@ -24,16 +24,11 @@
     "atrium-share-grants"
   ],
   "strictness": "block",
-  "reviewers": [
-    "chatgpt-codex-connector[bot]",
-    "copilot-pull-request-reviewer[bot]"
-  ],
+  "reviewers": ["chatgpt-codex-connector[bot]", "copilot-pull-request-reviewer[bot]"],
   "commit_learnings": true,
   "auto_worktree": true,
   "screenshot_dir": ".verification",
-  "baseline": {
-    "allow_preexisting_failures": true
-  },
+  "baseline": { "allow_preexisting_failures": true },
   "review_agents": {
     "alwaysOn": {
       "architecture-strategist": true,

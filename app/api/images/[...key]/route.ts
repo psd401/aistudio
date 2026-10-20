@@ -5,10 +5,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getConversationById } from '@/lib/db/drizzle';
-import {
-  generatedImageKeyPrefix,
-  getGeneratedImageBucket,
-} from '@/lib/ai/generated-image-bucket';
+import { getGeneratedImageBucket } from '@/lib/ai/generated-image-bucket';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -85,10 +82,12 @@ export async function GET(
     }
     
     // Defence in depth: the ownership check above only proves the user owns
-    // `conversationId`. Re-derive the prefix from it so a key such as
-    // `v2/generated-images/<ownedId>/../<otherId>/x.png` cannot slip through.
-    if (!s3Key.startsWith(generatedImageKeyPrefix(conversationId))) {
-      log.warn('Image key does not match its own conversation prefix', { s3Key });
+    // `conversationId` (segment 2 of the key). S3 keys are literal, so
+    // `v2/generated-images/<ownedId>/../<otherId>/x.png` names no other
+    // conversation's object today — but nothing the server writes contains a
+    // dot or empty segment, so refuse them outright rather than rely on that.
+    if (pathParts.some((part) => part === '' || part === '.' || part === '..')) {
+      log.warn('Image key contains a relative or empty path segment', { s3Key });
       return new Response('Not Found', { status: 404 });
     }
 

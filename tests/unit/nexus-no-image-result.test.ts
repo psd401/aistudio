@@ -25,6 +25,7 @@ import {
   NO_IMAGE_LABEL,
   buildNoImageMessage,
   getNoImageExplanation,
+  respondToImageFailure,
 } from "@/app/api/nexus/chat/image-generation-handler"
 
 function imageError(
@@ -90,5 +91,81 @@ describe("buildNoImageMessage", () => {
       `${NO_IMAGE_LABEL}\n\nI can't create images of identifiable real people.`,
     )
     expect(NO_IMAGE_LABEL).toBe("**Image not generated.**")
+  })
+})
+
+/**
+ * What the route returns once generation threw. The model's explanation is
+ * a saved reply; anything else, including an explanation that could not be
+ * saved, rolls back a new conversation and returns the error.
+ */
+describe("respondToImageFailure", () => {
+  function harness() {
+    const reply = new Response("reply")
+    const errorResponse = new Response("error", { status: 500 })
+    return {
+      reply,
+      errorResponse,
+      replyWithExplanation: jest.fn().mockResolvedValue(reply),
+      rollback: jest.fn().mockResolvedValue(null),
+      toErrorResponse: jest.fn().mockReturnValue(errorResponse),
+    }
+  }
+
+  it("saves and returns the model's explanation without rolling back", async () => {
+    const h = harness()
+
+    const response = await respondToImageFailure({
+      error: imageError("NO_IMAGE", "no image", "I can't draw real people."),
+      conversationId: "c1",
+      ...h,
+    })
+
+    expect(response).toBe(h.reply)
+    expect(h.replyWithExplanation).toHaveBeenCalledWith("I can't draw real people.")
+    expect(h.rollback).not.toHaveBeenCalled()
+  })
+
+  it("rolls back and returns the save error when the explanation cannot be saved", async () => {
+    const h = harness()
+    const saveError = new Error("connection reset")
+    h.replyWithExplanation.mockRejectedValue(saveError)
+
+    const response = await respondToImageFailure({
+      error: imageError("NO_IMAGE", "no image", "I can't draw real people."),
+      conversationId: "c1",
+      ...h,
+    })
+
+    expect(h.rollback).toHaveBeenCalledTimes(1)
+    expect(h.toErrorResponse).toHaveBeenCalledWith(saveError)
+    expect(response).toBe(h.errorResponse)
+  })
+
+  it("rolls back an unexplained NO_IMAGE without a friendly reply", async () => {
+    const h = harness()
+    const error = imageError("NO_IMAGE", "Reference image exceeds maximum allowed size")
+
+    const response = await respondToImageFailure({ error, conversationId: "c1", ...h })
+
+    expect(h.replyWithExplanation).not.toHaveBeenCalled()
+    expect(h.rollback).toHaveBeenCalledTimes(1)
+    expect(h.toErrorResponse).toHaveBeenCalledWith(error)
+    expect(response).toBe(h.errorResponse)
+  })
+
+  it("returns the rollback's own error when compensation fails", async () => {
+    const h = harness()
+    const cleanupError = new Response("cleanup", { status: 500 })
+    h.rollback.mockResolvedValue(cleanupError)
+
+    const response = await respondToImageFailure({
+      error: imageError("CONTENT_POLICY", "blocked"),
+      conversationId: "c1",
+      ...h,
+    })
+
+    expect(response).toBe(cleanupError)
+    expect(h.toErrorResponse).not.toHaveBeenCalled()
   })
 })

@@ -129,6 +129,7 @@ function defineNexusModelRouterSuite1Part1() {
       text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
       experienceMode: "standard", requestedFamily: "auto",
       enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true,
       userId: 7,
     })
     expect(result.modelId).toBe("gemini-3.1-flash-image")
@@ -149,6 +150,7 @@ function defineNexusModelRouterSuite1Part1() {
       text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
       experienceMode: "standard", requestedFamily: "auto",
       enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true,
       userId: 7,
     })).rejects.toThrow("Image generation is not available")
   })
@@ -261,7 +263,6 @@ function defineNexusModelRouterSuite1Part2() {it("enforces attachment tools when
     expect(result.modelId).toBe("gpt-terra")
     expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
   })
-
 
   it("automatically attaches the database-backed PSD-data MCP server", async () => {
     mockClassify.mockResolvedValue({
@@ -446,10 +447,34 @@ function defineNexusModelRouterBoundImageSuite() {
   })
 }
 
+/**
+ * The #1900 attachment carve-out applies only to an attached IMAGE. The same
+ * tool is required for a PDF or an earlier turn's document, which the image
+ * path cannot read; sending that turn straight to an image model would skip
+ * retrieval and generate an image that ignores the document.
+ */
+function defineNexusModelRouterImageAttachmentSuite() {
+  it("keeps an image request about a non-image attachment on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a diagram of the attached report", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: false,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+}
+
 const defineNexusModelRouterSuite1 = () => {
   defineNexusModelRouterSuite1Part1()
   defineNexusModelRouterSuite1Part2()
   defineNexusModelRouterSuite1Part3()
+  defineNexusModelRouterImageAttachmentSuite()
   defineNexusModelRouterBoundImageSuite()
 };
 
