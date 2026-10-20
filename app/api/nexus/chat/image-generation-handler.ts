@@ -20,6 +20,7 @@ import { deleteDocumentVersions } from "@/lib/aws/s3-client";
 import { createLogger } from "@/lib/logger";
 import type { NexusAttachmentImageSource } from "@/lib/nexus/ephemeral-repository-service";
 import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
+import { buildNexusStreamHeaders } from "./stream-headers";
 
 /**
  * A client-supplied reference `s3Key` (or `s3://` URL) must live under the
@@ -882,21 +883,13 @@ export function createImageStreamResponse(params: {
 
   const messageId = `img-${Date.now()}`;
 
-  const responseHeaders: Record<string, string> = {
-    "X-Request-Id": requestId,
-    "X-Conversation-Id": conversationId,
-    "X-Image-Generated": "true",
-  };
-
-  if (isNewConversation) {
-    responseHeaders["X-Conversation-Title"] =
-      encodeURIComponent(conversationTitle);
-  }
-  if (routingMetadata) {
-    const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
-    if (encodedRouting.length <= 4096)
-      responseHeaders["X-Nexus-Routing"] = encodedRouting;
-  }
+  const responseHeaders = buildNexusStreamHeaders({
+    requestId,
+    routingMetadata,
+    conversationId,
+    conversationTitle: isNewConversation ? conversationTitle : undefined,
+    extraHeaders: { "X-Image-Generated": "true" },
+  });
 
   return createUIMessageStreamResponse({
     status: 200,

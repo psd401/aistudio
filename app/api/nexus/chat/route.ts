@@ -147,6 +147,7 @@ import {
   repositoryBindingErrorResponse,
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
+import { buildNexusStreamHeaders } from './stream-headers';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -516,23 +517,19 @@ function buildStreamingResponseHeaders(params: {
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
 }): Record<string, string> {
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Unified-Streaming": "true",
-    "X-Supports-Reasoning": params.supportsReasoning.toString(),
-  };
-  const encodedRouting = encodeURIComponent(
-    JSON.stringify(params.routingMetadata),
-  );
-  if (encodedRouting.length <= 4096) {
-    headers["X-Nexus-Routing"] = encodedRouting;
-  }
-  if (!params.conversationIdValue && params.conversationId) {
-    headers["X-Conversation-Id"] = params.conversationId;
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle || "New Conversation",
-    );
-  }
+  const isNewConversation = !params.conversationIdValue && !!params.conversationId;
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: isNewConversation ? params.conversationId : undefined,
+    conversationTitle: isNewConversation
+      ? params.conversationTitle || "New Conversation"
+      : undefined,
+    extraHeaders: {
+      "X-Unified-Streaming": "true",
+      "X-Supports-Reasoning": params.supportsReasoning.toString(),
+    },
+  });
   const safeIds = params.failedConnectorIds.filter((id) =>
     /^[\da-f-]{36}$/i.test(id),
   );
@@ -1178,19 +1175,15 @@ interface DeepResearchResponseParams {
 
 function createDeepResearchResponse(params: DeepResearchResponseParams): Response {
   const messageId = `dr-${Date.now()}`;
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Conversation-Id": params.conversationId,
-    "X-Deep-Research": "true",
-    "X-Nexus-Routing": encodeURIComponent(
-      JSON.stringify(params.routingMetadata),
-    ),
-  };
-  if (params.isNewConversation) {
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle,
-    );
-  }
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: params.conversationId,
+    conversationTitle: params.isNewConversation
+      ? params.conversationTitle
+      : undefined,
+    extraHeaders: { "X-Deep-Research": "true" },
+  });
   return params.createUIMessageStreamResponse({
     status: 200,
     headers,
