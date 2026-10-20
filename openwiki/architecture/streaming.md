@@ -35,6 +35,7 @@ openwiki:
     - Non-Nexus callers (`source` other than `nexus`) keep the pre-#1899 rule: only a run that emitted nothing at all is called empty
     - Mid-stream errors reach the client only as one of six fixed sanitized explanations; the raw provider message is never echoed
     - "`enhanceStreamConfig` must carry `source` through, or the Nexus policy silently falls back to the non-Nexus rule"
+    - Every Nexus chat response (streaming, deep-research, image-generation) builds its headers through `buildNexusStreamHeaders`; an oversized X-Nexus-Routing value is dropped on its own while the other headers stay (#1947)
     - An answer-less Nexus turn is persisted as a notice row rather than dropped, so the prompt does not reload unanswered
     - Persisted notice rows carry no tool calls, because replaying a tool_use block without its tool_result throws on the next load
     - ALB idle timeout is 300s; keep-alive interval is 15s (well under common proxy timeouts)
@@ -352,6 +353,56 @@ The Nexus streaming service orchestrates:
 
 All responses flow through the provider adapter layer and receive keep-alive.
 
+## Nexus Stream Response Headers (#1947)
+
+The Nexus chat route answers with a UI-message stream through three paths, and each sets its own call-site headers on top of a shared core:
+
+- **Standard streaming**: `buildStreamingResponseHeaders()` in `app/api/nexus/chat/route.ts` adds `X-Unified-Streaming` and `X-Supports-Reasoning`.
+- **Deep Research**: `createDeepResearchResponse()` in `app/api/nexus/chat/route.ts` adds `X-Deep-Research`.
+- **Image generation**: `createImageStreamResponse()` in `app/api/nexus/chat/image-generation-handler.ts` adds `X-Image-Generated`.
+
+All three call `buildNexusStreamHeaders()` in `app/api/nexus/chat/stream-headers.ts`. Callers pass the conversation and routing facts, and the builder owns the header shape:
+
+| Header | Set when |
+|--------|----------|
+| `X-Request-Id` | Always |
+| Call-site `extraHeaders` | Always, spread after `X-Request-Id` |
+| `X-Nexus-Routing` | `routingMetadata` is not `undefined` and its URL-encoded JSON is at most `MAX_NEXUS_ROUTING_HEADER_LENGTH` (4096) characters |
+| `X-Conversation-Id` | `conversationId` is not `undefined` |
+| `X-Conversation-Title` | `conversationTitle` is not `undefined`; the value is URL-encoded |
+
+```mermaid
+flowchart TD
+    A[buildNexusStreamHeaders] --> B[X-Request-Id plus extraHeaders]
+    B --> C{routingMetadata defined?}
+    C -- yes --> D{encoded length at most 4096?}
+    C -- no --> E{conversationId defined?}
+    D -- yes --> D1[set X-Nexus-Routing]
+    D -- no --> E
+    D1 --> E
+    E -- yes --> E1[set X-Conversation-Id]
+    E -- no --> F{conversationTitle defined?}
+    E1 --> F
+    F -- yes --> F1[set URL-encoded X-Conversation-Title]
+    F -- no --> G[return headers]
+    F1 --> G
+```
+
+Caption: the builder omits a header by passing `undefined`; only the routing value is also size-checked.
+
+**Callers decide what counts as a new conversation.** The title is passed only for a new conversation: the standard path uses `!conversationIdValue && conversationId` and falls back to `"New Conversation"`, while the deep-research and image paths use their `isNewConversation` flag. An existing conversation still gets `X-Conversation-Id` where the call site sends it, but no title.
+
+**Why the cap is shared.** Before #1947, the standard and image paths dropped an oversized `X-Nexus-Routing`, but the deep-research path wrote it unconditionally. An oversized header can make the response fail before the stream reaches the browser, so the cap now applies to every Nexus stream response. Dropping the routing header never drops the other headers.
+
+**Change guidance**:
+- To add a Nexus stream response, call `buildNexusStreamHeaders` with `extraHeaders` for call-site flags. Do not write `X-Nexus-Routing` by hand, or the cap is bypassed.
+- To change the cap, change `MAX_NEXUS_ROUTING_HEADER_LENGTH` and keep the exact-cap test in sync.
+- The image path's routing check changed from a truthiness check to an `undefined` check. Only a `null` or falsy `routingMetadata` would behave differently, and the current callers never pass one.
+
+**Focused test**: `app/api/nexus/chat/__tests__/stream-headers.test.ts` covers the new-conversation title, the existing-conversation omission, the oversized-routing drop, the exact-cap keep (`keeps X-Nexus-Routing at exactly the cap length`), the image-generation headers, and the streaming headers without conversation fields.
+
+**Minimal validation**: `bunx jest --silent app/api/nexus/chat/__tests__/stream-headers.test.ts`. Run the route-level checks only when the route's header call sites change, using the `incomplete-turn` and `assistant-turn-persistence` suites listed above.
+
 ## Change Guidance
 
 ### When to Modify Keep-Alive
@@ -413,4 +464,6 @@ controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
 - **[app-features/overview.md](../app-features/overview.md)** — Nexus Chat, Assistant Architect features
 - **[api-integration/overview.md](../api-integration/overview.md)** — REST API endpoints using streaming
 - `/lib/streaming/README.md` — Developer reference for streaming service
+- `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
+ streaming service
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
