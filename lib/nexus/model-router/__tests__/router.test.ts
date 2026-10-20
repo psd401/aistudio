@@ -172,6 +172,7 @@ function defineNexusModelRouterSuite1Part1() {
     expect(result.modelId).toBe("gpt-terra")
   })
 
+
   it("keeps attachment retrieval on a function-calling text model", async () => {
     const attachmentConfig = nexusRouterConfigSchema.parse({
       auto: {
@@ -386,10 +387,70 @@ function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family w
   })
 }
 
+function defineNexusModelRouterBoundImageSuite() {
+  /**
+   * A Project/Skill/Assistant binding adds its repository tools to EVERY turn,
+   * so in a bound conversation "draw a cat" carried required tools the image
+   * path cannot serve and went to a text model that cannot draw. Tools present
+   * only because of the binding are dropped for an image intent.
+   */
+  it("routes an image request in a Project-bound conversation to the image specialist", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const bindingTools = ["searchConversationRepositories", "searchProjectRepositories"]
+    const result = await routeNexusRequest({
+      text: "Draw a cat", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: bindingTools,
+      bindingToolNames: bindingTools,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+  })
+
+  it("keeps a binding-only tool required for a non-image turn", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+    const result = await routeNexusRequest({
+      text: "Summarise the project brief", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchSkillRepositories"],
+      bindingToolNames: ["searchSkillRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).not.toBe("gemini-3.1-flash-image")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+  })
+
+  it("keeps a user-chosen repository required even in a bound conversation", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a chart of the repo I picked", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchConversationRepositories", "searchProjectRepositories"],
+      // A direct pick makes searchConversationRepositories NOT binding-only.
+      bindingToolNames: ["searchProjectRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+}
+
 const defineNexusModelRouterSuite1 = () => {
   defineNexusModelRouterSuite1Part1()
   defineNexusModelRouterSuite1Part2()
   defineNexusModelRouterSuite1Part3()
+  defineNexusModelRouterBoundImageSuite()
 };
 
 describe("Nexus model router", defineNexusModelRouterSuite1)

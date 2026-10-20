@@ -76,6 +76,7 @@ import {
   persistNoImageExchange,
 } from './image-generation-handler';
 import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
+import { splitRoutingToolNames } from '@/lib/nexus/routing-tool-names';
 
 import {
   generateConversationTitle,
@@ -1729,6 +1730,7 @@ async function resolveRequestRouting(args: {
   modelFamily: z.infer<typeof nexusModelFamilySchema>;
   manuallyEnabledConnectors: string[];
   manuallyEnabledTools: string[];
+  bindingToolNames: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -1754,6 +1756,7 @@ async function resolveRequestRouting(args: {
     requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
     enabledConnectorIds: args.manuallyEnabledConnectors,
     enabledToolNames: args.manuallyEnabledTools,
+    bindingToolNames: args.bindingToolNames,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
@@ -2499,6 +2502,7 @@ interface PreparedChatRequest {
   safePersistenceMessages: ChatMessages;
   safeModelMessages: ChatMessages;
   routingEnabledTools: string[];
+  routingBindingTools: string[];
 }
 
 type PreparedChatResult =
@@ -2542,6 +2546,7 @@ type ConversationRepositoryResult =
   | { ok: true; context: ConversationRepositoryContext }
   | { ok: false; response: Response };
 
+/** Routing tools for this turn; see `splitRoutingToolNames`. */
 async function buildRoutingEnabledTools(params: {
   conversationId?: string;
   userId: number;
@@ -2550,7 +2555,7 @@ async function buildRoutingEnabledTools(params: {
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
   requestedRepositoryIds: number[];
-}): Promise<string[]> {
+}): Promise<{ tools: string[]; bindingTools: string[] }> {
   const attachmentRepositoryIds = params.conversationId
     ? await resolveNexusConversationRepositoryIds({
         ownerId: params.userId,
@@ -2571,17 +2576,16 @@ async function buildRoutingEnabledTools(params: {
     params.requestedRepositoryIds.length > 0 ||
     params.hasProjectBinding ||
     params.hasSkillBinding;
-  return [
-    ...new Set([
-      ...params.enabledTools,
-      ...(requiresAttachmentTools ? [NEXUS_ATTACHMENT_SEARCH_TOOL_NAME] : []),
-      ...(hasDurableRepositoryBinding
-        ? ["searchConversationRepositories"]
-        : []),
-      ...(params.hasProjectBinding ? ["searchProjectRepositories"] : []),
-      ...(params.hasSkillBinding ? ["searchSkillRepositories"] : []),
-    ]),
-  ];
+  return splitRoutingToolNames({
+    enabledTools: params.enabledTools,
+    requiresAttachmentTools,
+    hasDurableRepositoryBinding,
+    hasUserChosenRepository:
+      params.requestedRepositoryIds.length > 0 ||
+      durableBindings.some((binding) => binding.source === "direct"),
+    hasProjectBinding: params.hasProjectBinding,
+    hasSkillBinding: params.hasSkillBinding,
+  });
 }
 
 async function prepareChatRequest(params: {
@@ -2655,7 +2659,7 @@ async function prepareChatRequest(params: {
     })),
   );
   const enabledTools = data.enabledTools ?? [];
-  const routingEnabledTools = await buildRoutingEnabledTools({
+  const routingTools = await buildRoutingEnabledTools({
     conversationId: conversationIdValue,
     userId: auth.userId,
     attachmentPreflight: preflight.preflight,
@@ -2703,7 +2707,8 @@ async function prepareChatRequest(params: {
       safeModelMessages: pruneStaleWorkspaceToolPayloads(
         prepared.modelMessages as UIMessage[]
       ) as ChatMessages,
-      routingEnabledTools,
+      routingEnabledTools: routingTools.tools,
+      routingBindingTools: routingTools.bindingTools,
     },
   };
 }
@@ -2766,6 +2771,7 @@ async function resolveChatModel(params: {
     modelFamily: prepared.validationData.modelFamily,
     manuallyEnabledConnectors: prepared.manuallyEnabledConnectors,
     manuallyEnabledTools: prepared.routingEnabledTools,
+    bindingToolNames: prepared.routingBindingTools,
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,

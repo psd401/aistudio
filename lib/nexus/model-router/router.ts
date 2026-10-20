@@ -407,6 +407,13 @@ interface RouteNexusRequestArgs {
   requestedFamily: NexusModelFamily
   enabledConnectorIds: string[]
   enabledToolNames?: string[]
+  /**
+   * The subset of `enabledToolNames` present only because the conversation is
+   * bound to a Project, Skill or Assistant — added to every turn, so not a
+   * statement of what this request needs. Dropped from an image turn's
+   * required tools (see `dropBindingToolsForImage`).
+   */
+  bindingToolNames?: string[]
   userId: number
   hasImageInput?: boolean
   hasPreviousGeneratedImage?: boolean
@@ -795,6 +802,32 @@ function selectWithFetchOnlyFallback(options: {
   }
 }
 
+/**
+ * An image request in a bound conversation must still reach an image model.
+ *
+ * A Project/Skill/Assistant binding adds its repository search tools to every
+ * turn, so "draw a cat" there arrived with required tools the image path
+ * cannot serve, fell through to tier-aware text routing, and a text model told
+ * the user it cannot make images. The image model never reads the repository,
+ * and a text model cannot draw, so for an image intent those binding-only
+ * tools are dropped before anything consults the list. Mutates in place:
+ * `requiredTools` is the turn's single live list.
+ *
+ * A repository the user chose directly is never binding-only, so "draw a chart
+ * of the attached repo" keeps the text route #1840's review round 5 required.
+ */
+function dropBindingToolsForImage(
+  decision: NexusClassifierDecision,
+  requiredTools: string[],
+  bindingToolNames: string[] | undefined
+): void {
+  if (decision.intent !== "image" || !bindingToolNames?.length) return
+  const binding = new Set(bindingToolNames)
+  for (let index = requiredTools.length - 1; index >= 0; index--) {
+    if (binding.has(requiredTools[index])) requiredTools.splice(index, 1)
+  }
+}
+
 async function routeWithConfiguredRouter(options: {
   args: RouteNexusRequestArgs
   config: NexusRouterConfig
@@ -817,6 +850,7 @@ async function routeWithConfiguredRouter(options: {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
+  dropBindingToolsForImage(rawDecision, requiredTools, args.bindingToolNames)
   // The classifier sees the latest message only. An open editable artifact is a
   // routing input it cannot know about, so the floor is applied to its verdict
   // before anything reads `tier` (#1840) — unless doing so would change what
