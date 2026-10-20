@@ -1,16 +1,14 @@
 import { NextRequest } from 'next/server';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getConversationById } from '@/lib/db/drizzle';
-import { getGeneratedImageBucket } from '@/lib/ai/generated-image-bucket';
-
-// Initialize S3 client
-const s3Client = new S3Client({
-  region: process.env.NEXT_PUBLIC_AWS_REGION || process.env.AWS_REGION || 'us-east-1'
-});
+import {
+  getGeneratedImageBucket,
+  getGeneratedImageS3Client,
+} from '@/lib/ai/generated-image-bucket';
 
 /**
  * Secure Image Proxy API
@@ -102,6 +100,8 @@ export async function GET(
       Key: s3Key
     });
     
+    // Same client (and so the same region) the image was written with.
+    const s3Client = await getGeneratedImageS3Client();
     const presignedUrl = await getSignedUrl(s3Client, getObjectCommand, {
       expiresIn: 60 * 60 // 1 hour in seconds
     });

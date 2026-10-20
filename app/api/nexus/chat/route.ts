@@ -1722,6 +1722,8 @@ async function resolveRequestRouting(args: {
   manuallyEnabledConnectors: string[];
   manuallyEnabledTools: string[];
   bindingToolNames: string[];
+  /** `itemType` of each canonical attachment on the latest message. */
+  attachmentItemTypes: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -1750,6 +1752,11 @@ async function resolveRequestRouting(args: {
     bindingToolNames: args.bindingToolNames,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
+    // The image path reads only image attachments; a PDF or document in the
+    // same message needs the text route's retrieval loop.
+    hasOnlyImageAttachments:
+      !imageContext.hasNonImageFileInput &&
+      args.attachmentItemTypes.every((itemType) => itemType === "image"),
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
     workspace: args.workspace,
   });
@@ -2754,6 +2761,7 @@ async function resolveChatModel(params: {
     manuallyEnabledConnectors: prepared.manuallyEnabledConnectors,
     manuallyEnabledTools: prepared.routingEnabledTools,
     bindingToolNames: prepared.routingBindingTools,
+    attachmentItemTypes: prepared.attachmentPreflight.resolutions.map((r) => r.itemType),
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,

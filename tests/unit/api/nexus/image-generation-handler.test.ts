@@ -243,8 +243,25 @@ describe('getImageRoutingContext', () => {
       userId: 42,
     });
 
-    expect(result).toEqual({ hasImageInput: true, hasPreviousGeneratedImage: false });
+    expect(result).toEqual({ hasImageInput: true, hasNonImageFileInput: false, hasPreviousGeneratedImage: false });
     expect(mockExecuteQuery).not.toHaveBeenCalled();
+  });
+
+  it('flags a PDF sent beside the image so routing keeps retrieval', async () => {
+    const result = await getImageRoutingContext({
+      messages: [{
+        id: '1',
+        role: 'user',
+        parts: [
+          { type: 'file', mediaType: 'image/png' },
+          { type: 'file', mediaType: 'application/pdf' },
+        ],
+      }],
+      conversationId: CONVO,
+      userId: 42,
+    });
+
+    expect(result).toEqual({ hasImageInput: true, hasNonImageFileInput: true, hasPreviousGeneratedImage: false });
   });
 
   it('preserves persisted generated-image context for an elliptical follow-up edit', async () => {
@@ -258,7 +275,7 @@ describe('getImageRoutingContext', () => {
       userId: 42,
     });
 
-    expect(result).toEqual({ hasImageInput: false, hasPreviousGeneratedImage: true });
+    expect(result).toEqual({ hasImageInput: false, hasNonImageFileInput: false, hasPreviousGeneratedImage: true });
     expect(mockExecuteQuery).toHaveBeenCalledTimes(1);
   });
 
@@ -271,7 +288,7 @@ describe('getImageRoutingContext', () => {
       userId: 42,
     });
 
-    expect(result).toEqual({ hasImageInput: false, hasPreviousGeneratedImage: false });
+    expect(result).toEqual({ hasImageInput: false, hasNonImageFileInput: false, hasPreviousGeneratedImage: false });
   });
 
   it('degrades to no prior image context when the optional history lookup fails', async () => {
@@ -281,7 +298,7 @@ describe('getImageRoutingContext', () => {
       messages: [{ id: '4', role: 'user', parts: [{ type: 'text', text: 'Make it brighter' }] }],
       conversationId: CONVO,
       userId: 42,
-    })).resolves.toEqual({ hasImageInput: false, hasPreviousGeneratedImage: false });
+    })).resolves.toEqual({ hasImageInput: false, hasNonImageFileInput: false, hasPreviousGeneratedImage: false });
   });
 });
 

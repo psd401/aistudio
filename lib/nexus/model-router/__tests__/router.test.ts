@@ -129,7 +129,7 @@ function defineNexusModelRouterSuite1Part1() {
       text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
       experienceMode: "standard", requestedFamily: "auto",
       enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
-      hasImageInput: true,
+      hasImageInput: true, hasOnlyImageAttachments: true,
       userId: 7,
     })
     expect(result.modelId).toBe("gemini-3.1-flash-image")
@@ -150,7 +150,7 @@ function defineNexusModelRouterSuite1Part1() {
       text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
       experienceMode: "standard", requestedFamily: "auto",
       enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
-      hasImageInput: true,
+      hasImageInput: true, hasOnlyImageAttachments: true,
       userId: 7,
     })).rejects.toThrow("Image generation is not available")
   })
@@ -464,6 +464,21 @@ function defineNexusModelRouterImageAttachmentSuite() {
       experienceMode: "advanced", requestedFamily: "openai",
       enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
       hasImageInput: false,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("keeps an image plus a PDF in one message on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Turn this photo and report into a poster", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true, hasOnlyImageAttachments: false,
       userId: 7,
     })
     expect(result.modelId).toBe("gpt-terra")

@@ -85,8 +85,9 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
  * presence as "this turn needs a tool loop" is what sent "make this photo into
  * a cartoon" to a text model that cannot produce an image at all, which then
  * told the user images were impossible. Only when the message itself carries
- * an image (`hasImageInput`): the tool is also required for a PDF or an earlier
- * turn's document, which the image path cannot read, so "draw a diagram of the
+ * an image (`hasImageInput`) and nothing else (`hasOnlyImageAttachments`): the
+ * tool is also required for a PDF or a document — attached earlier or beside
+ * the image — which the image path cannot read, so "draw a diagram of the
  * attached report" keeps the text route and its retrieval loop.
  *
  * Tools present only because the conversation is bound to a Project, Skill or
@@ -102,11 +103,17 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
 function dropImagePathSatisfiedTools(
   decision: NexusClassifierDecision,
   requiredTools: string[],
-  context: { hasImageInput?: boolean; bindingToolNames?: string[] }
+  context: {
+    hasImageInput?: boolean
+    hasOnlyImageAttachments?: boolean
+    bindingToolNames?: string[]
+  }
 ): void {
   if (decision.intent !== "image") return
   const satisfied = new Set(context.bindingToolNames ?? [])
-  if (context.hasImageInput) satisfied.add(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
+  if (context.hasImageInput && context.hasOnlyImageAttachments) {
+    satisfied.add(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
+  }
   for (let index = requiredTools.length - 1; index >= 0; index--) {
     if (satisfied.has(requiredTools[index])) requiredTools.splice(index, 1)
   }
@@ -431,6 +438,11 @@ interface RouteNexusRequestArgs {
   bindingToolNames?: string[]
   userId: number
   hasImageInput?: boolean
+  /**
+   * Every attachment on the latest message is an image the image path can
+   * read. False when a PDF or document rides along with the image.
+   */
+  hasOnlyImageAttachments?: boolean
   hasPreviousGeneratedImage?: boolean
   /**
    * The object open in the workspace panel beside the chat, already resolved

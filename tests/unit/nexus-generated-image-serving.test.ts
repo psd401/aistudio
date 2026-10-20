@@ -48,6 +48,11 @@ jest.mock("@/lib/db/drizzle", () => ({
   DEFAULT_MESSAGE_LIMIT: 50,
   MAX_MESSAGE_LIMIT: 100,
 }))
+/** The region `storeImageInS3` writes in — from settings, not the env. */
+const SETTINGS_REGION = "us-west-2"
+jest.mock("@/lib/settings-manager", () => ({
+  Settings: { getS3: async () => ({ region: SETTINGS_REGION }) },
+}))
 jest.mock("@/lib/aws/s3-client", () => ({
   getDocumentSignedUrl: (...args: unknown[]) => mockGetDocumentSignedUrl(...args),
 }))
@@ -158,6 +163,30 @@ describe("GET /api/images/[...key]", () => {
     expect(response.status).toBe(302)
     expect(signedBucket()).toBe(GENERATED_BUCKET)
     expect(signedBucket()).not.toBe(SETTINGS_BUCKET)
+  })
+
+  /**
+   * The proxy used to sign with its own env-built client (default us-east-1)
+   * while the writer used the settings region; where they differed every
+   * proxied image got a redirect signed for the wrong region.
+   */
+  it("signs in the region the image was written in", async () => {
+    const previousRegion = process.env.AWS_REGION
+    process.env.AWS_REGION = "us-east-1"
+    try {
+      await getImage(
+        request(`https://app.test/api/images/${S3_KEY}`),
+        { params: Promise.resolve({ key: S3_KEY.split("/") }) },
+      )
+    } finally {
+      if (previousRegion === undefined) delete process.env.AWS_REGION
+      else process.env.AWS_REGION = previousRegion
+    }
+
+    const client = mockGetSignedUrl.mock.calls[0]?.[0] as
+      | { config: { region: () => Promise<string> } }
+      | undefined
+    expect(await client?.config.region()).toBe(SETTINGS_REGION)
   })
 
   it("refuses a key belonging to another conversation", async () => {

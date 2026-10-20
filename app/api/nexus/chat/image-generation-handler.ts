@@ -787,23 +787,32 @@ export async function getImageRoutingContext(params: {
   messages: ImageGenerationParams["messages"];
   conversationId?: string;
   userId: number;
-}): Promise<{ hasImageInput: boolean; hasPreviousGeneratedImage: boolean }> {
+}): Promise<{
+  hasImageInput: boolean;
+  hasNonImageFileInput: boolean;
+  hasPreviousGeneratedImage: boolean;
+}> {
   const lastUserMessage = [...params.messages]
     .reverse()
     .find((message) => message.role === "user");
-  const hasImageInput =
-    lastUserMessage?.parts?.some((part) => {
-      const mimeType = part.mimeType ?? part.mediaType;
-      return (
-        part.type === "image" ||
-        (part.type === "file" &&
-          typeof mimeType === "string" &&
-          mimeType.startsWith("image/"))
-      );
-    }) ?? false;
+  const parts = lastUserMessage?.parts ?? [];
+  const isImagePart = (part: (typeof parts)[number]): boolean => {
+    const mimeType = part.mimeType ?? part.mediaType;
+    return (
+      part.type === "image" ||
+      (part.type === "file" &&
+        typeof mimeType === "string" &&
+        mimeType.startsWith("image/"))
+    );
+  };
+  const hasImageInput = parts.some(isImagePart);
+  // An inline PDF or document beside the image: the image path cannot read it.
+  const hasNonImageFileInput = parts.some(
+    (part) => part.type === "file" && !isImagePart(part),
+  );
 
   if (hasImageInput || !params.conversationId) {
-    return { hasImageInput, hasPreviousGeneratedImage: false };
+    return { hasImageInput, hasNonImageFileInput, hasPreviousGeneratedImage: false };
   }
 
   try {
@@ -813,6 +822,7 @@ export async function getImageRoutingContext(params: {
     );
     return {
       hasImageInput: false,
+      hasNonImageFileInput,
       hasPreviousGeneratedImage: previousImages.length > 0,
     };
   } catch (error) {
@@ -823,7 +833,11 @@ export async function getImageRoutingContext(params: {
       conversationId: params.conversationId,
       error: error instanceof Error ? error.message : String(error),
     });
-    return { hasImageInput: false, hasPreviousGeneratedImage: false };
+    return {
+      hasImageInput: false,
+      hasNonImageFileInput,
+      hasPreviousGeneratedImage: false,
+    };
   }
 }
 
