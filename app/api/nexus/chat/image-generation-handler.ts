@@ -12,7 +12,10 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { nexusConversations, nexusMessages } from "@/lib/db/schema";
 import { getAttachmentFromS3 } from "@/lib/services/attachment-storage-service";
 import { getObjectStream } from "@/lib/aws/s3-client";
-import { getGeneratedImageBucket } from "@/lib/ai/generated-image-bucket";
+import {
+  generatedImageProxyPath,
+  getGeneratedImageBucket,
+} from "@/lib/ai/generated-image-bucket";
 import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
@@ -492,13 +495,50 @@ export async function persistImageExchange(params: {
     dimensions: imageResult.dimensions,
   });
 
+  await persistExchangeRows({
+    conversationId,
+    userContent,
+    userParts,
+    assistantContent: assistantMessageContent,
+    assistantParts: messageParts,
+    assistantMetadata: {
+      generationType: "image",
+      estimatedCost: imageResult.estimatedCost,
+      routing: routingMetadata,
+    },
+    dbModelId,
+    label: "persistImageExchange",
+  });
+}
+
+/**
+ * Insert the user turn, the assistant turn, and the conversation-stats bump as
+ * ONE transaction.
+ *
+ * These previously ran as three independent queries with a hardcoded
+ * `message_count + 2`, so a failure between them left the counter out of sync
+ * with the actual rows. Both rows are inserted in this same unit, so the `+ 2`
+ * is guaranteed correct. Image generation and S3 access are side effects and
+ * stay OUTSIDE this transaction — only the DB writes are inside.
+ */
+async function persistExchangeRows(params: {
+  conversationId: string;
+  userContent: string;
+  userParts: unknown[];
+  assistantContent: string;
+  assistantParts: unknown[];
+  assistantMetadata: Record<string, unknown>;
+  dbModelId: number;
+  label: string;
+}): Promise<void> {
+  const { conversationId, dbModelId } = params;
   await executeTransaction(async (tx) => {
     await tx.insert(nexusMessages).values({
       id: crypto.randomUUID(),
       conversationId,
       role: "user",
-      content: userContent,
-      parts: sql`${safeJsonbStringify(userParts)}::jsonb`,
+      content: params.userContent,
+      parts: sql`${safeJsonbStringify(params.userParts)}::jsonb`,
       modelId: dbModelId,
       metadata: sql`${safeJsonbStringify({})}::jsonb`,
       createdAt: new Date(),
@@ -507,14 +547,10 @@ export async function persistImageExchange(params: {
     await tx.insert(nexusMessages).values({
       conversationId,
       role: "assistant",
-      content: assistantMessageContent,
-      parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
+      content: params.assistantContent,
+      parts: sql`${safeJsonbStringify(params.assistantParts)}::jsonb`,
       modelId: dbModelId,
-      metadata: sql`${safeJsonbStringify({
-        generationType: "image",
-        estimatedCost: imageResult.estimatedCost,
-        routing: routingMetadata,
-      })}::jsonb`,
+      metadata: sql`${safeJsonbStringify(params.assistantMetadata)}::jsonb`,
       createdAt: new Date(),
     });
 
@@ -527,7 +563,37 @@ export async function persistImageExchange(params: {
         updatedAt: new Date(),
       })
       .where(eq(nexusConversations.id, conversationId));
-  }, "persistImageExchange");
+  }, params.label);
+}
+
+/**
+ * Persist a turn where the model answered in words instead of pixels (#1900).
+ *
+ * Stored as an ordinary assistant text message so the explanation survives a
+ * reload exactly like any other reply, rather than being a toast the user
+ * cannot get back.
+ */
+export async function persistNoImageExchange(params: {
+  conversationId: string;
+  userContent: string;
+  userParts: unknown[];
+  assistantText: string;
+  dbModelId: number;
+  routingMetadata?: Record<string, unknown>;
+}): Promise<void> {
+  await persistExchangeRows({
+    conversationId: params.conversationId,
+    userContent: params.userContent,
+    userParts: params.userParts,
+    assistantContent: params.assistantText,
+    assistantParts: [{ type: "text", text: params.assistantText }],
+    assistantMetadata: {
+      generationType: "image-no-image",
+      routing: params.routingMetadata ?? {},
+    },
+    dbModelId: params.dbModelId,
+    label: "persistNoImageExchange",
+  });
 }
 
 /**
@@ -858,42 +924,70 @@ export async function getImageRoutingContext(params: {
  * Create streaming response for image generation
  */
 export function createImageStreamResponse(params: {
-  imageResult: { imageUrl: string; altText?: string };
+  imageResult: { imageUrl: string; s3Key?: string; altText?: string };
   conversationId: string;
   conversationTitle: string;
   isNewConversation: boolean;
   requestId: string;
   routingMetadata?: Record<string, unknown>;
 }): Response {
-  const {
-    imageResult,
-    conversationId,
-    conversationTitle,
-    isNewConversation,
-    requestId,
-    routingMetadata,
-  } = params;
+  const { imageResult } = params;
 
   let responseContent = "";
   if (imageResult.altText && imageResult.altText.trim()) {
     responseContent += imageResult.altText.trim() + "\n\n";
   }
-  responseContent += `![Generated Image](${imageResult.imageUrl})`;
+  // Render through the authenticated proxy, not the raw presigned URL the
+  // provider call returned: the proxy is what still works after this hour and
+  // after a reload, so the live turn and the reloaded turn show the same URL
+  // (#1900). Pre-#1900 rows carry no `s3Key`, so they keep the presigned link.
+  const renderedUrl = imageResult.s3Key
+    ? generatedImageProxyPath(imageResult.s3Key)
+    : imageResult.imageUrl;
+  responseContent += `![Generated Image](${renderedUrl})`;
 
-  const messageId = `img-${Date.now()}`;
+  return createAssistantTextStreamResponse({
+    text: responseContent,
+    messageIdPrefix: "img",
+    imageGenerated: true,
+    conversationId: params.conversationId,
+    conversationTitle: params.conversationTitle,
+    isNewConversation: params.isNewConversation,
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+  });
+}
+
+/** Stream one complete assistant text message as a normal Nexus turn. */
+function createAssistantTextStreamResponse(params: {
+  text: string;
+  messageIdPrefix: string;
+  imageGenerated: boolean;
+  conversationId: string;
+  conversationTitle: string;
+  isNewConversation: boolean;
+  requestId: string;
+  routingMetadata?: Record<string, unknown>;
+}): Response {
+  const messageId = `${params.messageIdPrefix}-${Date.now()}`;
 
   const responseHeaders: Record<string, string> = {
-    "X-Request-Id": requestId,
-    "X-Conversation-Id": conversationId,
-    "X-Image-Generated": "true",
+    "X-Request-Id": params.requestId,
+    "X-Conversation-Id": params.conversationId,
   };
-
-  if (isNewConversation) {
-    responseHeaders["X-Conversation-Title"] =
-      encodeURIComponent(conversationTitle);
+  if (params.imageGenerated) {
+    responseHeaders["X-Image-Generated"] = "true";
   }
-  if (routingMetadata) {
-    const encodedRouting = encodeURIComponent(JSON.stringify(routingMetadata));
+
+  if (params.isNewConversation) {
+    responseHeaders["X-Conversation-Title"] = encodeURIComponent(
+      params.conversationTitle,
+    );
+  }
+  if (params.routingMetadata) {
+    const encodedRouting = encodeURIComponent(
+      JSON.stringify(params.routingMetadata),
+    );
     if (encodedRouting.length <= 4096)
       responseHeaders["X-Nexus-Routing"] = encodedRouting;
   }
@@ -907,11 +1001,69 @@ export function createImageStreamResponse(params: {
         writer.write({
           type: "text-delta",
           id: messageId,
-          delta: responseContent,
+          delta: params.text,
         });
         writer.write({ type: "text-end", id: messageId });
       },
     }),
+  });
+}
+
+/** The label that tells the user no image came back, however good the text is. */
+export const NO_IMAGE_LABEL = "**No image was produced.**";
+
+/** Whether image generation failed specifically by returning no image. */
+export function isNoImageError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "type" in error &&
+    (error as { type?: unknown }).type === "NO_IMAGE"
+  );
+}
+
+/**
+ * The user-facing text for a `NO_IMAGE` result (#1900).
+ *
+ * The model's own explanation is the valuable part — "I can't render
+ * recognisable people", "that photo is too small to upscale" — so it is shown
+ * verbatim under a label that makes the missing image unambiguous. When the
+ * provider said nothing, the error's own message carries the explanation.
+ */
+export function buildNoImageMessage(error: unknown): string {
+  const providerText =
+    error instanceof Error && "providerText" in error
+      ? String((error as { providerText?: unknown }).providerText ?? "").trim()
+      : "";
+  const explanation =
+    providerText ||
+    (error instanceof Error ? error.message : String(error)).trim() ||
+    "The model did not return an image and gave no explanation.";
+  return `${NO_IMAGE_LABEL}\n\n${explanation}`;
+}
+
+/**
+ * Return a `NO_IMAGE` result as a readable assistant turn instead of a 500.
+ *
+ * A generic "Image generation failed. Please try again." threw away a reply
+ * that already told the user exactly why retrying would not help.
+ */
+export function createNoImageResponse(params: {
+  text: string;
+  conversationId: string;
+  conversationTitle: string;
+  isNewConversation: boolean;
+  requestId: string;
+  routingMetadata?: Record<string, unknown>;
+}): Response {
+  return createAssistantTextStreamResponse({
+    text: params.text,
+    messageIdPrefix: "no-img",
+    imageGenerated: false,
+    conversationId: params.conversationId,
+    conversationTitle: params.conversationTitle,
+    isNewConversation: params.isNewConversation,
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
   });
 }
 

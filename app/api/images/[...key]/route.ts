@@ -5,6 +5,10 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getConversationById } from '@/lib/db/drizzle';
+import {
+  generatedImageKeyPrefix,
+  getGeneratedImageBucket,
+} from '@/lib/ai/generated-image-bucket';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -80,12 +84,19 @@ export async function GET(
       return new Response('Not Found', { status: 404 });
     }
     
-    // 6. Generate presigned URL for the image (valid for 1 hour)
-    const bucketName = process.env.DOCUMENTS_BUCKET_NAME;
-    if (!bucketName) {
-      log.error('S3 bucket name not configured - missing DOCUMENTS_BUCKET_NAME');
-      return new Response('Internal Server Error', { status: 500 });
+    // Defence in depth: the ownership check above only proves the user owns
+    // `conversationId`. Re-derive the prefix from it so a key such as
+    // `v2/generated-images/<ownedId>/../<otherId>/x.png` cannot slip through.
+    if (!s3Key.startsWith(generatedImageKeyPrefix(conversationId))) {
+      log.warn('Image key does not match its own conversation prefix', { s3Key });
+      return new Response('Not Found', { status: 404 });
     }
+
+    // 6. Generate presigned URL for the image (valid for 1 hour).
+    // Signed against the SAME resolver `storeImageInS3` wrote with: the generic
+    // S3 client resolves its bucket from the database `S3_BUCKET` setting
+    // instead, which is not guaranteed to match (#1900).
+    const bucketName = getGeneratedImageBucket();
     
     const getObjectCommand = new GetObjectCommand({
       Bucket: bucketName,

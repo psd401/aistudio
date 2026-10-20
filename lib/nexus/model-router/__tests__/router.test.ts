@@ -112,6 +112,66 @@ function defineNexusModelRouterSuite1Part1() {
     expect(result.modelId).toBe("gemini-3.1-flash-image")
   })
 
+  /**
+   * #1900: "make this photo into a cartoon" attaches an image, which adds
+   * `searchNexusAttachments` to the turn's required tools. Treating that as
+   * "this turn needs a tool loop" sent the request to a text model that cannot
+   * produce an image at all, and the user was told images were impossible. The
+   * image route reads the attached bytes itself, so nothing has to call the
+   * tool.
+   */
+  it("routes an image request WITH an attachment to the image specialist", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
+      experienceMode: "standard", requestedFamily: "auto",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+  })
+
+  /**
+   * The paired refusal: with no accessible image model the turn fails with a
+   * message that says so, rather than silently landing on a text model that
+   * will claim it cannot make images.
+   */
+  it("refuses an attachment image request rather than falling back to text", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1", "2", "3", "4", "6"])
+    await expect(routeNexusRequest({
+      text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
+      experienceMode: "standard", requestedFamily: "auto",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      userId: 7,
+    })).rejects.toThrow("Image generation is not available")
+  })
+
+  /**
+   * The carve-out stays narrow: repository retrieval genuinely needs a model
+   * that can CALL the tool, so those turns keep tier-aware text routing.
+   */
+  it("keeps an image turn needing repository retrieval on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a chart of the attached repo", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchConversationRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
   it("keeps attachment retrieval on a function-calling text model", async () => {
     const attachmentConfig = nexusRouterConfigSchema.parse({
       auto: {
@@ -201,24 +261,6 @@ function defineNexusModelRouterSuite1Part2() {it("enforces attachment tools when
     expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
   })
 
-  it("does not route an attachment request to a specialist-only image model", async () => {
-    mockClassify.mockResolvedValue({
-      intent: "image", tier: "medium", confidence: 0.99,
-      reasonCodes: ["explicit_image_request"], source: "deterministic",
-    })
-
-    const result = await routeNexusRequest({
-      text: "Create an image based on my attachment",
-      fallbackModelId: "gpt-terra",
-      experienceMode: "standard",
-      requestedFamily: "auto",
-      enabledConnectorIds: [],
-      enabledToolNames: ["searchNexusAttachments"],
-      userId: 7,
-    })
-
-    expect(result.modelId).toBe("gpt-terra")
-  })
 
   it("automatically attaches the database-backed PSD-data MCP server", async () => {
     mockClassify.mockResolvedValue({
@@ -1208,10 +1250,11 @@ describe("Nexus model router artifact floor with no medium model accessible", ()
   })
 
   /**
-   * `selectModel` takes its image-specialist branch only while no input tool is
-   * required. An image turn WITH one falls through to ordinary tier-aware text
-   * routing, so treating every image intent as tier-independent would drop the
-   * floor exactly where it still applies.
+   * `selectModel` takes its image-specialist branch only while every required
+   * tool is one the image path serves itself. An image turn needing a real tool
+   * caller — repository retrieval here, NOT an attachment (#1900) — falls
+   * through to ordinary tier-aware text routing, so treating every image intent
+   * as tier-independent would drop the floor exactly where it still applies.
    */
   it("applies the floor to an image turn that falls through to text routing", async () => {
     mockClassify.mockResolvedValue({
@@ -1221,7 +1264,7 @@ describe("Nexus model router artifact floor with no medium model accessible", ()
 
     const result = await routeNexusRequest({
       ...shortFollowUp,
-      enabledToolNames: ["searchNexusAttachments"],
+      enabledToolNames: ["searchConversationRepositories"],
       workspace: editableArtifact,
     })
 

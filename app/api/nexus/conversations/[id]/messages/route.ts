@@ -11,6 +11,10 @@ import {
   type MessagePart,
 } from '@/lib/db/drizzle'
 import { getDocumentSignedUrl } from '@/lib/aws/s3-client'
+import {
+  generatedImageKeyPrefix,
+  generatedImageProxyPath,
+} from '@/lib/ai/generated-image-bucket'
 import { decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer'
 import {
   buildTemporaryAttachmentMarker,
@@ -101,11 +105,34 @@ function convertTextPart(part: MessagePart): ContentPart {
   return { type: 'text', text }
 }
 
+/**
+ * Re-point a stored image part at a URL the browser can still load (#1900).
+ *
+ * A generated image goes to the authenticated proxy, NOT to a freshly signed
+ * URL. `getDocumentSignedUrl` resolves its bucket from the database `S3_BUCKET`
+ * setting, which `generated-image-bucket.ts` warns may differ from the
+ * `DOCUMENTS_BUCKET_NAME` the image was written to — so on a mismatched
+ * deployment every reloaded image was signed against the wrong bucket and 404'd
+ * (#1804 fixed only the edit path). `/api/images/[...key]` signs with
+ * `getGeneratedImageBucket()`, the same resolver `storeImageInS3` uses, and
+ * re-checks ownership on every load instead of handing out a raw presigned URL
+ * that expires in an hour.
+ *
+ * Attachment keys keep the presigned path: the proxy serves generated images
+ * only, and rows stored before this change carry no `s3Key` at all, so their
+ * legacy `imageUrl` remains the fallback.
+ */
 async function convertImagePart(
   part: MessagePart,
   conversationId: string
 ): Promise<ContentPart | null> {
   const s3Key = part.s3Key
+  if (s3Key && s3Key.startsWith(generatedImageKeyPrefix(conversationId))) {
+    return {
+      type: 'text',
+      text: `![Generated Image](${generatedImageProxyPath(s3Key)})`,
+    }
+  }
   if (s3Key && isKeyForConversation(s3Key, conversationId)) {
     try {
       const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })

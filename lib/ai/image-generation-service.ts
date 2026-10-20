@@ -216,6 +216,16 @@ export interface ImageGenerationError {
   message: string;
   retryAfter?: number;
   details?: string;
+  /**
+   * What the model said INSTEAD of producing an image (#1900).
+   *
+   * A Gemini image turn can come back with a perfectly good explanation and no
+   * file — "I can't render recognisable people", "that photo is too low
+   * resolution to upscale". Discarding it turned a usable answer into a generic
+   * 500, so the reply the model actually wrote travels with the error and is
+   * shown to the user.
+   */
+  providerText?: string;
 }
 
 /**
@@ -699,9 +709,13 @@ function extractGeminiImage(
       hasText: Boolean(result.text),
       textLength: result.text?.length ?? 0
     });
+    // The model's own words travel with the error so the user reads its
+    // explanation rather than a generic failure (#1900).
     throw createImageError(
       'NO_IMAGE',
-      'Gemini did not generate an image. Try a different prompt.'
+      'Gemini did not generate an image. Try a different prompt.',
+      undefined,
+      result.text
     );
   }
   for (const file of files) {
@@ -876,13 +890,17 @@ async function storeImageInS3(params: {
 function createImageError(
   type: ImageGenerationError['type'],
   message: string,
-  retryAfter?: number
+  retryAfter?: number,
+  providerText?: string
 ): Error & ImageGenerationError {
   const error = new Error(message) as Error & ImageGenerationError;
   error.type = type;
   error.message = message;
   if (retryAfter) {
     error.retryAfter = retryAfter;
+  }
+  if (providerText && providerText.trim()) {
+    error.providerText = providerText.trim();
   }
   return error;
 }

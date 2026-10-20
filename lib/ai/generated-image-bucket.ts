@@ -18,3 +18,25 @@ export function getGeneratedImageBucket(): string {
 
   return process.env.DOCUMENTS_BUCKET_NAME;
 }
+
+/** Server-written key prefix for a conversation's generated images. */
+export function generatedImageKeyPrefix(conversationId: string): string {
+  return `v2/generated-images/${conversationId}/`;
+}
+
+/**
+ * The authenticated path a browser should load a generated image from (#1900).
+ *
+ * Browsers must NOT be handed the raw S3 presigned URL: those expire an hour
+ * after generation and fail intermittently with `InvalidToken`, which is why
+ * exports already go through a proxy route. `/api/images/[...key]` re-checks
+ * the session and the conversation's ownership on every load and re-signs
+ * against `getGeneratedImageBucket()`, so a reloaded conversation renders from
+ * a URL that is still valid and still authorized.
+ *
+ * Each path segment is encoded because the catch-all route decodes them again
+ * before rejoining the key.
+ */
+export function generatedImageProxyPath(s3Key: string): string {
+  return `/api/images/${s3Key.split('/').map(encodeURIComponent).join('/')}`;
+}

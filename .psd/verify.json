@@ -12,6 +12,7 @@
     "nexus-chat-slow-stream-visible-error",
     "nexus-empty-turn-notice",
     "nexus-download-file",
+    "nexus-image-reload",
     "nexus-workspace-artifact-tier-floor",
     "atrium-library-search",
     "atrium-library-bulk",
@@ -23,11 +24,16 @@
     "atrium-share-grants"
   ],
   "strictness": "block",
-  "reviewers": ["chatgpt-codex-connector[bot]", "copilot-pull-request-reviewer[bot]"],
+  "reviewers": [
+    "chatgpt-codex-connector[bot]",
+    "copilot-pull-request-reviewer[bot]"
+  ],
   "commit_learnings": true,
   "auto_worktree": true,
   "screenshot_dir": ".verification",
-  "baseline": { "allow_preexisting_failures": true },
+  "baseline": {
+    "allow_preexisting_failures": true
+  },
   "review_agents": {
     "alwaysOn": {
       "architecture-strategist": true,

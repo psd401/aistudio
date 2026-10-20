@@ -68,8 +68,12 @@ import {
   getImageRoutingContext,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
+  buildNoImageMessage,
   createImageStreamResponse,
+  createNoImageResponse,
   handleImageGenerationError,
+  isNoImageError,
+  persistNoImageExchange,
 } from './image-generation-handler';
 
 import {
@@ -1091,6 +1095,23 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
+    // A model that answered in words instead of pixels did NOT fail the turn
+    // (#1900): keep the conversation, persist its explanation, and show it.
+    if (isNoImageError(imageError)) {
+      return await respondWithNoImage({
+        error: imageError,
+        conversationId,
+        conversationTitle,
+        existingConversationId,
+        imagePrompt,
+        persistenceMessages,
+        dbModelId,
+        routingMetadata,
+        requestId,
+        log,
+        timer,
+      });
+    }
     const rollbackError = await rollbackFailedImageConversation({
       attachmentReferences,
       conversationId,
@@ -1103,6 +1124,66 @@ async function handleImageGeneration(params: {
     if (rollbackError) return rollbackError;
     return handleImageGenerationError(imageError, conversationId, requestId);
   }
+}
+
+/**
+ * Turn a `NO_IMAGE` result into an ordinary assistant reply (#1900).
+ *
+ * Persistence failing must not swallow the explanation, so the stream is
+ * returned either way; the user reads the answer even if only this response
+ * carries it.
+ */
+async function respondWithNoImage(params: {
+  error: unknown;
+  conversationId: string;
+  conversationTitle: string;
+  existingConversationId?: string;
+  imagePrompt: string;
+  persistenceMessages: z.infer<typeof ChatRequestSchema>["messages"];
+  dbModelId: number;
+  routingMetadata: NexusRoutingMetadata;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  timer: (data: Record<string, unknown>) => void;
+}): Promise<Response> {
+  const text = buildNoImageMessage(params.error);
+  const lastMessage =
+    params.persistenceMessages[params.persistenceMessages.length - 1];
+  const persistedUser =
+    lastMessage?.role === "user"
+      ? extractUserContent(lastMessage as UIMessage)
+      : {
+          content: params.imagePrompt,
+          parts: [{ type: "text", text: params.imagePrompt }],
+        };
+  try {
+    await persistNoImageExchange({
+      conversationId: params.conversationId,
+      userContent: persistedUser.content,
+      userParts: persistedUser.parts,
+      assistantText: text,
+      dbModelId: params.dbModelId,
+      routingMetadata: { ...params.routingMetadata },
+    });
+  } catch (error) {
+    params.log.error("Failed to persist a no-image image turn", {
+      conversationId: params.conversationId,
+      error: error instanceof Error ? error.message : "Unknown persistence error",
+    });
+  }
+  params.log.info("Image generation returned no image; returning the model's text", {
+    conversationId: params.conversationId,
+    requestId: params.requestId,
+  });
+  params.timer({ status: "success", reason: "no_image", conversationId: params.conversationId });
+  return createNoImageResponse({
+    text,
+    conversationId: params.conversationId,
+    conversationTitle: params.conversationTitle,
+    isNewConversation: !params.existingConversationId,
+    requestId: params.requestId,
+    routingMetadata: { ...params.routingMetadata },
+  });
 }
 
 /**

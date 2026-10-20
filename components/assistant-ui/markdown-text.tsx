@@ -12,8 +12,8 @@ import {
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import { type FC, memo, useState } from "react";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { type ComponentPropsWithoutRef, type FC, memo, useState } from "react";
+import { CheckIcon, CopyIcon, ImageOffIcon } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { SyntaxHighlighter } from "@/components/assistant-ui/shiki-highlighter";
@@ -82,7 +82,54 @@ const useCopyToClipboard = ({
   return { isCopied, copyToClipboard };
 };
 
+/**
+ * A markdown image that says so when it cannot load (#1900).
+ *
+ * Generated images used to be raw S3 presigned URLs, which expire and fail
+ * intermittently with `InvalidToken`; a broken `<img>` renders as nothing at
+ * all, so staff saw a reply that had simply lost its picture with no hint that
+ * anything had gone wrong. The failure is now visible and named.
+ *
+ * The failed URL is tracked rather than a boolean, so a retry with a different
+ * `src` renders instead of inheriting the previous one's failure.
+ */
+export const MarkdownImage: FC<ComponentPropsWithoutRef<"img">> = ({
+  className,
+  alt,
+  src,
+  ...props
+}) => {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const srcKey = typeof src === "string" ? src : null;
+
+  if (srcKey !== null && failedSrc === srcKey) {
+    return (
+      <span
+        role="img"
+        aria-label={alt ? `Image unavailable: ${alt}` : "Image unavailable"}
+        className="text-muted-foreground bg-muted my-5 inline-flex items-center gap-2 rounded-lg border border-dashed px-4 py-3 text-sm"
+      >
+        <ImageOffIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span>Image unavailable{alt ? ` — ${alt}` : ""}</span>
+      </span>
+    );
+  }
+
+  return (
+    <img
+      {...props}
+      src={src}
+      alt={alt ?? ""}
+      className={cn("my-5 max-w-full rounded-lg", className)}
+      onError={() => {
+        if (srcKey !== null) setFailedSrc(srcKey);
+      }}
+    />
+  );
+};
+
 const defaultComponents = memoizeMarkdownComponents({
+  img: MarkdownImage,
   SyntaxHighlighter: (props) => (
     <SyntaxHighlighter
       {...props}

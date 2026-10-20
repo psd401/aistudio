@@ -75,22 +75,61 @@ function firstAccessibleModel(
 const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
 
 /**
- * True only when selection genuinely cannot consult `tier`, so there is no tier
- * for a floor to govern or to miss.
+ * Required tools the Nexus image path serves WITHOUT a model-driven tool loop
+ * (#1900).
  *
- * That is the image-specialist branch of `selectModel` alone, which returns a
- * capability-matched model or throws without ever reaching the tier-aware path.
+ * An attachment on an image turn is not a retrieval problem. The image route
+ * reads the attached bytes itself (`resolveImageReferences`) and hands them to
+ * the specialist as a reference image, so `searchNexusAttachments` is required
+ * only in the bookkeeping sense — nothing has to CALL it. Treating its presence
+ * as "this turn needs a tool loop" is what sent "make this photo into a
+ * cartoon" to a text model that cannot produce an image at all, which then told
+ * the user images were impossible.
  *
- * NOT every image turn: that branch is taken only while no input tool is
- * required, and an image turn WITH one falls through to ordinary tier-aware text
- * routing (the case #1840's review round 5 caught). And not `web-search` either —
- * its specialist list is consulted first, but when nothing there is eligible the
- * tier-aware sweep decides, so the floor still matters. A false "tier is
- * irrelevant here" silently drops the floor; a false negative only costs one
- * discarded preference attempt, which the caller retries without it.
+ * Every OTHER required tool (repository, project, skill, web search) really
+ * does need a caller, so those turns keep the existing tier-aware text routing.
  */
-function selectionIgnoresTier(intent: NexusRouterIntent, requiredToolCount: number): boolean {
-  return intent === "image" && requiredToolCount === 0
+const IMAGE_PATH_SATISFIED_TOOLS = new Set(["searchNexusAttachments"])
+
+/**
+ * Whether `selectModel` takes its image-specialist branch for this turn.
+ *
+ * That branch returns a capability-matched image model or throws
+ * `NexusSpecialistUnavailableError` — it never reaches the tier-aware path, so
+ * it is also the one case where selection genuinely cannot consult `tier` and
+ * there is no tier for the artifact floor to govern or to miss.
+ *
+ * NOT every image turn: an image turn requiring a tool the image path cannot
+ * serve still falls through to ordinary tier-aware text routing (the case
+ * #1840's review round 5 caught). And not `web-search` either — its specialist
+ * list is consulted first, but when nothing there is eligible the tier-aware
+ * sweep decides, so the floor still matters. A false "tier is irrelevant here"
+ * silently drops the floor; a false negative only costs one discarded
+ * preference attempt, which the caller retries without it.
+ */
+function selectsImageSpecialist(
+  intent: NexusRouterIntent,
+  requiredTools: string[]
+): boolean {
+  return intent === "image"
+    && requiredTools.every(tool => IMAGE_PATH_SATISFIED_TOOLS.has(tool))
+}
+
+/**
+ * Whether shadow mode may keep executing the legacy fallback model.
+ *
+ * Shadow mode is supposed to change nothing, so it keeps the fallback whenever
+ * routing would not have had to override it for correctness. A server-required
+ * input tool IS such an override (an authorization/correctness boundary), but
+ * an image turn whose only required tools the image path serves itself is not:
+ * routing proposes an image specialist there precisely because no tool loop is
+ * involved, and executing it would be shadow mode changing live traffic.
+ */
+function shadowMayRetainFallback(
+  intent: NexusRouterIntent,
+  requiredTools: string[]
+): boolean {
+  return requiredTools.length === 0 || selectsImageSpecialist(intent, requiredTools)
 }
 
 /**
@@ -154,16 +193,16 @@ function meetsMinTier(
  * The artifact tier floor to pass to `selectModel`, or undefined when this turn
  * has none (#1840).
  *
- * Skipped when `selectionIgnoresTier`: filtering the image specialists by tier
- * could only discard the very model the intent requires.
+ * Skipped when `selectsImageSpecialist`: filtering the image specialists by
+ * tier could only discard the very model the intent requires.
  */
 function workspaceArtifactMinTier(options: {
   workspaceWantsPsdData: boolean
   intent: NexusRouterIntent
-  requiredToolCount: number
+  requiredTools: string[]
 }): NexusRouterTier | undefined {
   if (!options.workspaceWantsPsdData) return undefined
-  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return undefined
+  if (selectsImageSpecialist(options.intent, options.requiredTools)) return undefined
   return WORKSPACE_ARTIFACT_MIN_TIER
 }
 
@@ -192,10 +231,11 @@ function selectModel(args: {
   minTier?: NexusRouterTier
 }): { model: NexusModelRow; fallbackUsed: boolean } {
   const configuredIds = configuredCandidates(args.config, args.family, args.tier, args.intent)
-  // A specialist-only image model cannot first call server-side input tools.
-  // When attachments or other tools are required, keep the request on a text
-  // model that can retrieve context and participate in the normal tool loop.
-  if (args.intent === "image" && args.requiredTools.length === 0) {
+  // A specialist-only image model cannot first call server-side input tools, so
+  // a turn that needs one stays on a text model that can retrieve context and
+  // participate in the normal tool loop. An attached image is NOT such a turn:
+  // the image route reads those bytes itself (see IMAGE_PATH_SATISFIED_TOOLS).
+  if (selectsImageSpecialist(args.intent, args.requiredTools)) {
     const configured = configuredIds
       .map(id => args.models.find(model => model.modelId === id || String(model.id) === id))
       .filter((model): model is NexusModelRow => model !== undefined)
@@ -354,9 +394,9 @@ function selectModelForToolUse(
       })
     }
   }
-  return unconstrained.requiredTools.length > 0
-    ? selectModel(unconstrained)
-    : selectModelForRuntime(unconstrained, mode, fallback)
+  return shadowMayRetainFallback(unconstrained.intent, unconstrained.requiredTools)
+    ? selectModelForRuntime(unconstrained, mode, fallback)
+    : selectModel(unconstrained)
 }
 
 interface RouteNexusRequestArgs {
@@ -486,11 +526,12 @@ async function buildRouterOffResult(options: {
 
 function selectedRuntimeModel(
   mode: Exclude<NexusRouterRuntimeMode, "off">,
+  intent: NexusRouterIntent,
   requiredTools: string[],
   fallback: NexusModelRow,
   selection: { model: NexusModelRow }
 ): NexusModelRow {
-  if (mode === "shadow" && requiredTools.length === 0) return fallback
+  if (mode === "shadow" && shadowMayRetainFallback(intent, requiredTools)) return fallback
   return selection.model
 }
 
@@ -503,7 +544,7 @@ function selectedRuntimeModel(
  * already sufficient tier carries no extra reason code and routes exactly as
  * before.
  *
- * INERT where `selectionIgnoresTier` holds: the image-specialist branch returns a
+ * INERT where `selectsImageSpecialist` holds: the image-specialist branch returns a
  * capability-matched model without consulting `tier`, so a raise there cannot
  * change which model is selected. The code is still recorded — it describes the
  * DECISION, and `metadata.tier` did change — but do not read it as evidence of a
@@ -540,14 +581,14 @@ function workspaceArtifactTierUnmet(options: {
    *  recomputed: `requiredTools` is mutated during routing, so a second
    *  evaluation here could disagree with the one that governed the tier. */
   floorApplied: boolean
-  requiredToolCount: number
+  requiredTools: string[]
 }): boolean {
   if (!options.workspaceWantsPsdData) return false
   // Only meaningful when the floor was actually asked for: a shadow turn with a
   // required tool never applies it, so "unmet" would report a miss on a turn that
   // never aimed.
   if (!options.floorApplied) return false
-  if (selectionIgnoresTier(options.intent, options.requiredToolCount)) return false
+  if (selectsImageSpecialist(options.intent, options.requiredTools)) return false
   return TIER_RANK[inferTier(options.routedModel)] < TIER_RANK[WORKSPACE_ARTIFACT_MIN_TIER]
 }
 
@@ -610,9 +651,11 @@ async function buildRoutedResult(options: {
     psdConnectorId,
     requiredTools,
   } = options
-  const retainFallback = mode === "shadow" && requiredTools.length === 0
+  const retainFallback =
+    mode === "shadow" && shadowMayRetainFallback(decision.intent, requiredTools)
   const selected = selectedRuntimeModel(
     mode,
+    decision.intent,
     requiredTools,
     fallback,
     selection
@@ -646,7 +689,7 @@ async function buildRoutedResult(options: {
       // `refloor` re-applies the gate after the fetch-only retry removes the tool,
       // so this evaluation and the tier can no longer disagree.
       floorApplied: artifactFloorMayApply(mode, requiredTools.length),
-      requiredToolCount: requiredTools.length,
+      requiredTools,
     }),
   })
 
@@ -818,7 +861,7 @@ async function routeWithConfiguredRouter(options: {
           ? workspaceArtifactMinTier({
             workspaceWantsPsdData: workspaceNeedsPsdData(args.workspace),
             intent: current.intent,
-            requiredToolCount: requiredTools.length,
+            requiredTools,
           })
           : undefined,
       },
@@ -840,6 +883,7 @@ async function routeWithConfiguredRouter(options: {
   const autoEnabledWebSearch = mode === "active" && decision.intent === "web-search"
   const selected = selectedRuntimeModel(
     mode,
+    decision.intent,
     requiredTools,
     fallback,
     selection
