@@ -30,6 +30,7 @@ import {
   extractImagePrompt,
   validateImagePrompt,
   extractReferenceImages,
+  buildBoundImagePrompt,
   getImageRoutingContext,
   hasOnlyImageAttachments,
   persistImageExchange,
@@ -652,5 +653,47 @@ describe('hasOnlyImageAttachments', () => {
       imageContext: imageOnly, attachmentItemTypes: ['image'],
       conversationId: OWNED_CONVO, userId: 42,
     })).resolves.toBe(true);
+  });
+});
+
+/**
+ * An image model has no system prompt, so a Project's instructions or a
+ * Skill's SKILL.md must travel in the prompt itself (Codex, #1950).
+ */
+describe('buildBoundImagePrompt', () => {
+  it('returns the prompt unchanged with no instructions', () => {
+    expect(buildBoundImagePrompt('A cat', [])).toBe('A cat');
+    expect(buildBoundImagePrompt('A cat', [{ label: 'Project "P"', instructions: '  ' }]))
+      .toBe('A cat');
+  });
+
+  it('appends Project and Skill instructions after the request', () => {
+    const prompt = buildBoundImagePrompt('A cat', [
+      { label: 'Project "Brand"', instructions: 'Use navy and gold.' },
+      { label: 'Skill "Posters"', instructions: 'Portrait layout.' },
+    ]);
+
+    expect(prompt.startsWith('A cat\n\nApply these instructions')).toBe(true);
+    expect(prompt).toContain('Project "Brand":\nUse navy and gold.');
+    expect(prompt).toContain('Skill "Posters":\nPortrait layout.');
+  });
+
+  it('keeps the request whole and clips instructions to the provider limit', () => {
+    const request = 'A cat '.repeat(100).trim();
+    const prompt = buildBoundImagePrompt(request, [
+      { label: 'Skill "Long"', instructions: '👩‍👩‍👧 rule. '.repeat(1000) },
+    ]);
+
+    expect(prompt.startsWith(request)).toBe(true);
+    expect(prompt.length).toBeLessThanOrEqual(4000);
+    expect(prompt.endsWith('…')).toBe(true);
+    // Never cut through the family emoji's zero-width joiners.
+    expect(prompt).not.toMatch(/\u200D…$/);
+  });
+
+  it('sends the request alone when it already fills the limit', () => {
+    const request = 'x'.repeat(4000);
+    expect(buildBoundImagePrompt(request, [{ label: 'Project "P"', instructions: 'Rule.' }]))
+      .toBe(request);
   });
 });

@@ -64,6 +64,7 @@ import {
   extractReferenceImages,
   extractCanonicalRepositoryImages,
   resolvePreviousGeneratedImageReferences,
+  buildBoundImagePrompt,
   getImageRoutingContext,
   hasOnlyImageAttachments,
   persistImageExchange,
@@ -988,7 +989,10 @@ async function setupImageConversation(params: {
   bindings: ConversationBindings;
   requestId: string;
   log: ReturnType<typeof createLogger>;
-}): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
+}): Promise<
+  | { conversationId: string; conversationTitle: string; skillId?: string }
+  | { error: Response }
+> {
   const convResult = await setupConversation({
     conversationIdValue: params.existingConversationId,
     messages: params.messages,
@@ -1013,7 +1017,28 @@ async function setupImageConversation(params: {
   return {
     conversationId: convResult.conversationId,
     conversationTitle: convResult.conversationTitle,
+    skillId: convResult.skillId,
   };
+}
+
+/**
+ * The image prompt with the conversation's Project instructions and Skill
+ * SKILL.md applied; see `buildBoundImagePrompt`. The persisted user message
+ * stays the user's own words — only the provider sees the combined prompt.
+ */
+async function boundImagePrompt(
+  imagePrompt: string,
+  projectBinding: SuccessfulProjectBinding,
+  skillId: string | undefined,
+  log: ReturnType<typeof createLogger>,
+): Promise<string> {
+  const skill = await loadBoundSkill(skillId, log);
+  return buildBoundImagePrompt(imagePrompt, [
+    ...(projectBinding
+      ? [{ label: `Project "${projectBinding.name}"`, instructions: projectBinding.instructions }]
+      : []),
+    ...(skill ? [{ label: `Skill "${skill.name}"`, instructions: skill.instructions }] : []),
+  ]);
 }
 
 async function handleImageGeneration(params: {
@@ -1098,16 +1123,19 @@ async function handleImageGeneration(params: {
     // Generate the image
     const { generateImageForNexus } =
       await import("@/lib/ai/image-generation-service");
+    const generationPrompt = await boundImagePrompt(
+      imagePrompt, params.bindings.projectBinding, convResult.skillId, log,
+    );
 
     log.info("Starting image generation", {
       provider: imageProvider,
       modelId: modelConfig.model_id,
-      promptLength: imagePrompt.length,
+      promptLength: generationPrompt.length,
       referenceImageCount: referenceImages.length,
     });
 
     const imageResult = await generateImageForNexus({
-      prompt: imagePrompt,
+      prompt: generationPrompt,
       modelId: modelConfig.model_id,
       provider: imageProvider as "openai" | "google",
       conversationId,
@@ -2603,6 +2631,7 @@ async function buildRoutingEnabledTools(params: {
   enabledTools: string[];
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
+  skillId?: string;
   /** This request's picker selection; undefined when the client sent none. */
   requestedRepositoryIds?: number[];
 }): Promise<{ tools: string[]; bindingTools: string[] }> {
@@ -2637,6 +2666,9 @@ async function buildRoutingEnabledTools(params: {
     ),
     hasProjectBinding: params.hasProjectBinding,
     hasSkillBinding: params.hasSkillBinding,
+    skillPinnedTools: params.skillId
+      ? ((await getApprovedSkillSession(params.skillId))?.allowedTools ?? [])
+      : [],
   });
 }
 
@@ -2718,6 +2750,7 @@ async function prepareChatRequest(params: {
     enabledTools,
     hasProjectBinding: !!projectBinding,
     hasSkillBinding: !!data.skillId,
+    skillId: data.skillId,
     requestedRepositoryIds: data.repositoryIds,
   });
   // #1786: routing needs to know an artifact is open BEFORE the classifier runs,

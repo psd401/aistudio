@@ -14,6 +14,7 @@ const none = {
   hasStoredDirectBinding: false,
   hasProjectBinding: false,
   hasSkillBinding: false,
+  skillPinnedTools: [] as string[],
 }
 
 describe("splitRoutingToolNames", () => {
@@ -104,5 +105,26 @@ describe("splitRoutingToolNames", () => {
 
   it("adds nothing for an unbound conversation", () => {
     expect(splitRoutingToolNames(none)).toEqual({ tools: [], bindingTools: [] })
+  })
+
+  /**
+   * The Skill "Use in chat" link sends its pinned tools as enabledTools, so
+   * they look hand-picked. They are the Skill's; an image turn must still be
+   * able to drop them (Codex, #1950).
+   */
+  it("marks a Skill's pinned tools binding-only even though they arrive as enabledTools", () => {
+    const result = splitRoutingToolNames({
+      ...none,
+      enabledTools: ["webSearch", "codeInterpreter"],
+      hasDurableRepositoryBinding: true,
+      hasSkillBinding: true,
+      skillPinnedTools: ["webSearch"],
+    })
+
+    expect(result.bindingTools).toEqual([
+      "searchConversationRepositories",
+      "searchSkillRepositories",
+      "webSearch",
+    ])
   })
 })

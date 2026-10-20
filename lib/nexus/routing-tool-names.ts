@@ -11,6 +11,11 @@ import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search
  * which cannot produce an image at all. A repository the user chose directly,
  * and any tool the user enabled by hand, is never binding-only.
  *
+ * A Skill's pinned `allowed-tools` reach the request as `enabledTools` (the
+ * "Use in chat" link serializes them), so they look hand-picked. They are
+ * the Skill's, not this request's: `skillPinnedTools` (from the approved
+ * skill record, never the URL) marks them binding-only too.
+ *
  * "Chose directly" is this request's picker selection when the client sent
  * one — it replaces the stored `direct` binding later in the turn, so an EMPTY
  * selection means the user just cleared it. The stored `direct` binding
@@ -24,6 +29,8 @@ export function splitRoutingToolNames(input: {
   hasStoredDirectBinding: boolean;
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
+  /** The approved Skill's `allowed-tools`; empty with no Skill. */
+  skillPinnedTools: string[];
 }): { tools: string[]; bindingTools: string[] } {
   const projectTools = input.hasProjectBinding ? ["searchProjectRepositories"] : [];
   const skillTools = input.hasSkillBinding ? ["searchSkillRepositories"] : [];
@@ -43,10 +50,17 @@ export function splitRoutingToolNames(input: {
     input.requestedRepositoryIds !== undefined
       ? input.requestedRepositoryIds.length > 0
       : input.hasStoredDirectBinding;
+  const skillPinned = new Set(input.skillPinnedTools);
+  const handPicked = new Set(
+    input.enabledTools.filter((tool) => !skillPinned.has(tool))
+  );
   const bindingTools = [
-    ...(hasUserChosenRepository ? [] : conversationTools),
-    ...projectTools,
-    ...skillTools,
-  ].filter((tool) => !input.enabledTools.includes(tool));
+    ...new Set([
+      ...(hasUserChosenRepository ? [] : conversationTools),
+      ...projectTools,
+      ...skillTools,
+      ...input.enabledTools.filter((tool) => skillPinned.has(tool)),
+    ]),
+  ].filter((tool) => !handPicked.has(tool));
   return { tools, bindingTools };
 }

@@ -868,6 +868,43 @@ export async function hasOnlyImageAttachments(params: {
   }));
 }
 
+/** Longest prompt any configured image provider accepts (DALL·E 3). */
+const MAX_IMAGE_PROMPT_CHARS = 4000;
+
+const promptGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * The prompt an image model receives in a Project or Skill conversation.
+ *
+ * The text path puts the Project's instructions and the Skill's SKILL.md in
+ * the system prompt; an image model has no system prompt, so without this an
+ * image request silently ignored brand style, audience or format rules. The
+ * user's own request comes first and is never cut. The instructions follow
+ * and are clipped (by grapheme, never mid-emoji) to the room left under the
+ * smallest provider limit, so a long SKILL.md cannot make the request fail.
+ */
+export function buildBoundImagePrompt(
+  prompt: string,
+  sources: Array<{ label: string; instructions?: string | null }>,
+): string {
+  const blocks = sources
+    .map(({ label, instructions }) => ({ label, text: instructions?.trim() ?? "" }))
+    .filter(({ text }) => text.length > 0)
+    .map(({ label, text }) => `${label}:\n${text}`);
+  if (blocks.length === 0) return prompt;
+  const header = "\n\nApply these instructions where they affect the image.\n\n";
+  const room = MAX_IMAGE_PROMPT_CHARS - prompt.length - header.length;
+  if (room <= 0) return prompt;
+  const instructions = blocks.join("\n\n");
+  if (instructions.length <= room) return `${prompt}${header}${instructions}`;
+  let clipped = "";
+  for (const { segment } of promptGraphemes.segment(instructions)) {
+    if (clipped.length + segment.length > room - 1) break;
+    clipped += segment;
+  }
+  return `${prompt}${header}${clipped.trimEnd()}…`;
+}
+
 /**
  * Create streaming response for image generation
  */
