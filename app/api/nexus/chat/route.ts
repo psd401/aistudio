@@ -65,6 +65,7 @@ import {
   extractCanonicalRepositoryImages,
   resolvePreviousGeneratedImageReferences,
   getImageRoutingContext,
+  hasOnlyImageAttachments,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
   buildNoImageMessage,
@@ -971,6 +972,50 @@ async function rollbackFailedImageConversation(params: {
  * Handle image generation models
  */
 
+/**
+ * Create or reuse the conversation for an image turn. The standard setup, not
+ * an image-only insert: an image request in a Project or Skill conversation
+ * reaches this path, and the conversation must keep those bindings, pass the
+ * same ownership, project-match and approved-skill checks as any turn, and
+ * store the repository bindings its next text turn routes and searches from.
+ */
+async function setupImageConversation(params: {
+  existingConversationId?: string;
+  messages: z.infer<typeof ChatRequestSchema>["messages"];
+  userId: number;
+  provider: string;
+  modelId: string;
+  bindings: ConversationBindings;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
+  const convResult = await setupConversation({
+    conversationIdValue: params.existingConversationId,
+    messages: params.messages,
+    userId: params.userId,
+    provider: params.provider,
+    modelId: params.modelId,
+    requestId: params.requestId,
+    log: params.log,
+    projectId: params.bindings.projectBinding?.projectId,
+    skillId: params.bindings.skillId,
+  });
+  if ("error" in convResult) return convResult;
+  const repositoryBindingError = await persistConversationRepositoryBindings({
+    conversationId: convResult.conversationId,
+    userId: params.userId,
+    requestedRepositoryIds: params.bindings.requestedRepositoryIds,
+    projectBinding: params.bindings.projectBinding,
+    skillId: convResult.skillId,
+    requestId: params.requestId,
+  });
+  if (repositoryBindingError) return { error: repositoryBindingError };
+  return {
+    conversationId: convResult.conversationId,
+    conversationTitle: convResult.conversationTitle,
+  };
+}
+
 async function handleImageGeneration(params: {
   messages: z.infer<typeof ChatRequestSchema>["messages"];
   persistenceMessages: z.infer<typeof ChatRequestSchema>["messages"];
@@ -980,8 +1025,7 @@ async function handleImageGeneration(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
-  projectId?: string;
-  skillId?: string;
+  bindings: ConversationBindings;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -1011,27 +1055,20 @@ async function handleImageGeneration(params: {
     return validation.error;
   }
 
-  // Determine provider and create/get conversation. The standard setup, not an
-  // image-only insert: an image request in a Project or Skill conversation now
-  // reaches this path, and the conversation must keep those bindings and pass
-  // the same ownership, project-match and approved-skill checks as any turn.
   const imageProvider = modelConfig.provider === "google" ? "google" : "openai";
-  const convResult = await setupConversation({
-    conversationIdValue: existingConversationId,
+  const convResult = await setupImageConversation({
+    existingConversationId,
     messages,
     userId,
     provider: imageProvider,
     modelId,
+    bindings: params.bindings,
     requestId,
     log,
-    projectId: params.projectId,
-    skillId: params.skillId,
   });
-
   if ("error" in convResult) {
     return convResult.error;
   }
-
   const { conversationId, conversationTitle } = convResult;
 
   try {
@@ -1577,8 +1614,7 @@ async function routeSpecialModel(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
-  projectId?: string;
-  skillId?: string;
+  bindings: ConversationBindings;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -1599,8 +1635,7 @@ async function routeSpecialModel(params: {
       dbModelId: params.dbModelId,
       userId: params.userId,
       existingConversationId: params.existingConversationId,
-      projectId: params.projectId,
-      skillId: params.skillId,
+      bindings: params.bindings,
       requestId: params.requestId,
       timer: params.timer,
       log: params.log,
@@ -1752,11 +1787,12 @@ async function resolveRequestRouting(args: {
     bindingToolNames: args.bindingToolNames,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
-    // The image path reads only image attachments; a PDF or document in the
-    // same message needs the text route's retrieval loop.
-    hasOnlyImageAttachments:
-      !imageContext.hasNonImageFileInput &&
-      args.attachmentItemTypes.every((itemType) => itemType === "image"),
+    hasOnlyImageAttachments: await hasOnlyImageAttachments({
+      imageContext,
+      attachmentItemTypes: args.attachmentItemTypes,
+      conversationId: args.existingConversationId,
+      userId: args.userId,
+    }),
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
     workspace: args.workspace,
   });
@@ -2479,6 +2515,21 @@ type SuccessfulProjectBinding = Exclude<
   { error: Response }
 >;
 
+/** The request's Project, Skill and picked repositories, for turn setup. */
+interface ConversationBindings {
+  projectBinding: SuccessfulProjectBinding;
+  skillId?: string;
+  requestedRepositoryIds?: number[];
+}
+
+function conversationBindingsOf(prepared: PreparedChatRequest): ConversationBindings {
+  return {
+    projectBinding: prepared.projectBinding,
+    skillId: prepared.skillId,
+    requestedRepositoryIds: prepared.validationData.repositoryIds,
+  };
+}
+
 interface PreparedChatRequest {
   validationData: ChatRequestData;
   conversationIdValue?: string;
@@ -2859,8 +2910,7 @@ async function resolveChatModel(params: {
     dbModelId,
     userId: prepared.userId,
     existingConversationId: prepared.conversationIdValue,
-    projectId: prepared.projectBinding?.projectId,
-    skillId: prepared.skillId,
+    bindings: conversationBindingsOf(prepared),
     requestId,
     timer,
     log,
@@ -2898,6 +2948,74 @@ async function resolveChatModel(params: {
   };
 }
 
+/**
+ * Store the conversation's durable repository bindings: the user's direct
+ * picks, its Project's repositories, and its Skill's. Later turns route and
+ * search from these rows, so every path that runs a turn must write them —
+ * an image turn that skipped this left an image-first Skill or Project
+ * conversation with nothing to search on its next text turn.
+ *
+ * Returns an error response for a binding the user can fix; rethrows
+ * anything else.
+ */
+async function persistConversationRepositoryBindings(params: {
+  conversationId: string;
+  userId: number;
+  requestedRepositoryIds?: number[];
+  projectBinding: SuccessfulProjectBinding;
+  skillId?: string;
+  requestId: string;
+}): Promise<Response | null> {
+  try {
+    if (params.requestedRepositoryIds !== undefined) {
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: params.requestedRepositoryIds,
+        source: "direct",
+      });
+    }
+    if (params.projectBinding) {
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: params.projectBinding.repositoryIds,
+        source: "project",
+        sourceId: params.projectBinding.projectId,
+      });
+    }
+    if (params.skillId) {
+      const skill = await getApprovedSkillSession(params.skillId);
+      if (!skill) {
+        return Response.json(
+          {
+            error: "The skill bound to this conversation is unavailable",
+            code: "SKILL_NOT_AVAILABLE",
+            requestId: params.requestId,
+          },
+          { status: 409 }
+        );
+      }
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: skill.repositoryIds,
+        source: "skill",
+        sourceId: params.skillId,
+      });
+    }
+    return null;
+  } catch (error) {
+    if (
+      error instanceof ConversationRepositoryBindingError ||
+      error instanceof RepositoryReadinessError
+    ) {
+      return repositoryBindingErrorResponse(error, params.requestId);
+    }
+    throw error;
+  }
+}
+
 async function prepareConversationRepositories(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2919,58 +3037,16 @@ async function prepareConversationRepositories(params: {
   if (bindingError) {
     return { ok: false, response: bindingError };
   }
-  try {
-    if (prepared.validationData.repositoryIds !== undefined) {
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: prepared.validationData.repositoryIds,
-        source: "direct",
-      });
-    }
-    if (prepared.projectBinding) {
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: prepared.projectBinding.repositoryIds,
-        source: "project",
-        sourceId: prepared.projectBinding.projectId,
-      });
-    }
-    if (conversation.skillId) {
-      const skill = await getApprovedSkillSession(conversation.skillId);
-      if (!skill) {
-        return {
-          ok: false,
-          response: Response.json(
-            {
-              error: "The skill bound to this conversation is unavailable",
-              code: "SKILL_NOT_AVAILABLE",
-              requestId,
-            },
-            { status: 409 }
-          ),
-        };
-      }
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: skill.repositoryIds,
-        source: "skill",
-        sourceId: conversation.skillId,
-      });
-    }
-  } catch (error) {
-    if (
-      error instanceof ConversationRepositoryBindingError ||
-      error instanceof RepositoryReadinessError
-    ) {
-      return {
-        ok: false,
-        response: repositoryBindingErrorResponse(error, requestId),
-      };
-    }
-    throw error;
+  const repositoryBindingError = await persistConversationRepositoryBindings({
+    conversationId: conversation.conversationId,
+    userId: prepared.userId,
+    requestedRepositoryIds: prepared.validationData.repositoryIds,
+    projectBinding: prepared.projectBinding,
+    skillId: conversation.skillId,
+    requestId,
+  });
+  if (repositoryBindingError) {
+    return { ok: false, response: repositoryBindingError };
   }
   const attachmentRepositoryIds = await resolveNexusConversationRepositoryIds({
     ownerId: prepared.userId,

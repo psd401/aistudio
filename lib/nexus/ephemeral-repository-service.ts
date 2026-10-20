@@ -5,6 +5,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  ne,
   or,
   sql,
 } from "drizzle-orm";
@@ -586,6 +587,56 @@ export async function resolveNexusConversationRepositoryIds(
     "nexus.resolveConversationRepositoryIds"
   );
   return rows.map((row) => row.id);
+}
+
+/**
+ * Whether any live attachment on this conversation is something other than
+ * an image (a PDF, document, spreadsheet…). The image path reads only image
+ * attachments, so an image request in such a conversation keeps the text
+ * route and its retrieval loop: "edit this photo to match the report I
+ * attached earlier" must still be able to read the report.
+ */
+export async function nexusConversationHasNonImageAttachments(
+  input: ResolveNexusRepositoriesInput
+): Promise<boolean> {
+  assertPositiveId(input.ownerId, "Owner id");
+  assertUuid(input.conversationId, "Conversation id");
+  const now = input.now ?? new Date();
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ id: repositoryItems.id })
+        .from(nexusRepositoryBindings)
+        .innerJoin(
+          knowledgeRepositories,
+          eq(knowledgeRepositories.id, nexusRepositoryBindings.repositoryId)
+        )
+        .innerJoin(
+          repositoryItems,
+          eq(repositoryItems.repositoryId, knowledgeRepositories.id)
+        )
+        .where(
+          and(
+            eq(nexusRepositoryBindings.ownerId, input.ownerId),
+            eq(nexusRepositoryBindings.conversationId, input.conversationId),
+            eq(knowledgeRepositories.ownerId, input.ownerId),
+            eq(knowledgeRepositories.lifecycleStatus, "active"),
+            inArray(knowledgeRepositories.repositoryKind, [
+              "durable",
+              "ephemeral",
+            ]),
+            or(
+              isNull(knowledgeRepositories.expiresAt),
+              gt(knowledgeRepositories.expiresAt, now)
+            ),
+            eq(repositoryItems.lifecycleStatus, "active"),
+            ne(repositoryItems.type, "image")
+          )
+        )
+        .limit(1),
+    "nexus.conversationHasNonImageAttachments"
+  );
+  return rows.length > 0;
 }
 
 /**

@@ -23,7 +23,10 @@ import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
 import { deleteDocumentVersions } from "@/lib/aws/s3-client";
 import { createLogger } from "@/lib/logger";
 import { describeQueryErrorCause } from "@/lib/db/query-error";
-import type { NexusAttachmentImageSource } from "@/lib/nexus/ephemeral-repository-service";
+import {
+  nexusConversationHasNonImageAttachments,
+  type NexusAttachmentImageSource,
+} from "@/lib/nexus/ephemeral-repository-service";
 import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
 import { buildNexusStreamHeaders } from "./stream-headers";
 
@@ -839,6 +842,30 @@ export async function getImageRoutingContext(params: {
       hasPreviousGeneratedImage: false,
     };
   }
+}
+
+/**
+ * Whether every attachment an image turn could need is an image the image
+ * path can read. A PDF or document — beside the image in this message, or
+ * attached in an earlier turn — needs the text route's retrieval loop. Only
+ * queried for a turn that carries an image; nothing else consults it.
+ */
+export async function hasOnlyImageAttachments(params: {
+  imageContext: { hasImageInput: boolean; hasNonImageFileInput: boolean };
+  attachmentItemTypes: string[];
+  conversationId?: string;
+  userId: number;
+}): Promise<boolean> {
+  if (!params.imageContext.hasImageInput) return false;
+  if (params.imageContext.hasNonImageFileInput) return false;
+  if (!params.attachmentItemTypes.every((itemType) => itemType === "image")) {
+    return false;
+  }
+  if (!params.conversationId) return true;
+  return !(await nexusConversationHasNonImageAttachments({
+    ownerId: params.userId,
+    conversationId: params.conversationId,
+  }));
 }
 
 /**
