@@ -1,6 +1,6 @@
 # Nexus Conversation Architecture
 
-**Last Updated:** July 2026
+**Last Updated:** October 2026
 **Critical:** Read this before modifying conversation handling code
 
 ## Table of Contents
@@ -763,6 +763,34 @@ await saveConversationSteps(conversationId, event.steps)
 ```
 
 Additionally, every tool-call part must carry `state: 'output-available'` and `input: Record<string,unknown>`. Without both fields the SDK emits `tool_use` with no paired `tool_result`, causing Anthropic to reject the next user turn. See `app/api/nexus/chat/chat-helpers.ts` and `docs/guides/silent-failure-patterns.md` for the full patterns.
+
+### ❌ Pitfall 6b: Letting a turn end with nothing for the user to read (#1899)
+
+A turn can finish cleanly and still leave the thread blank. The Thread's
+`DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS` registers **no** Reasoning and
+**no** File component, so `reasoning-*` and `file` parts render nothing at all;
+and `resolveMaxSteps` gives an ordinary turn three steps, so one can be spent
+entirely on `web_fetch` calls with no answer written. Treating "a chunk
+arrived" as "the user has an answer" is what suppressed the notice.
+
+```typescript
+// WRONG — no text, but chunks arrived, so nothing is said and nothing is saved
+if (!producedVisibleOutput) notice()
+if (incompleteTurnReason(...)) return   // drops the turn → blank on reload
+
+// CORRECT — classify the shape, say which one it was, and persist a notice row
+const kind = classifyEmptyTurn(seen)          // lib/streaming/empty-turn-notice.ts
+if (kind) enqueue({ type: 'error', errorText: emptyTurnNotice(kind) })
+// onFinish: a `no_content` turn persists EMPTY_TURN_PERSIST_NOTICE rather than
+// being dropped, so the notice is still under the prompt after a reload.
+```
+
+Two companion rules on the same path: `toUIMessageStream()` must be given an
+`onError` (`sanitizeStreamErrorMessage`) or every mid-stream failure renders as
+the SDK default "An error occurred."; and a failed assistant-message write must
+fall back to a notice row (`persistAssistantTurn`) — the user message is saved
+*before* streaming, so a logged-and-swallowed failure reloads as a prompt with
+no reply.
 
 ### ❌ Pitfall 7: Session object reference in useEffect deps
 

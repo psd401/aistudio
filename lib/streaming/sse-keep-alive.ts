@@ -26,10 +26,10 @@
  * supply, so the frame is discarded before it can reach
  * `processUIMessageStream`. The parsed chunk sequence is therefore unchanged.
  *
- * A `data-*` UIMessageChunk would NOT do: `BaseProviderAdapter.isVisibleChunkType`
- * counts `data-*` as visible output, so a keep-alive built that way would set
- * `producedVisibleOutput` and suppress the "model returned an empty response"
- * notice added in #1686.
+ * A `data-*` UIMessageChunk would NOT do: `classifyChunkVisibility`
+ * (`lib/streaming/empty-turn-notice.ts`) buckets `data-*` as rendered output, so
+ * a keep-alive built that way would suppress the empty-turn notice added in
+ * #1686 and widened in #1899.
  *
  * @see lib/streaming/provider-adapters/base-adapter.ts — the single call site
  * @see lib/voice/constants.ts — the same ALB constraint, on the WebSocket path
