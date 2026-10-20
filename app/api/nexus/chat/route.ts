@@ -2666,10 +2666,48 @@ async function buildRoutingEnabledTools(params: {
     ),
     hasProjectBinding: params.hasProjectBinding,
     hasSkillBinding: params.hasSkillBinding,
-    skillPinnedTools: params.skillId
-      ? ((await getApprovedSkillSession(params.skillId))?.allowedTools ?? [])
-      : [],
+    skillPinnedTools: await skillPinnedTools({
+      skillId: params.skillId,
+      conversationId: params.conversationId,
+      userId: params.userId,
+    }),
   });
+}
+
+/**
+ * The `allowed-tools` of the Skill this turn runs under, from the approved
+ * skill record. After the first turn the client drops `skillId` from the URL
+ * but keeps sending the pinned tools, so the conversation's STORED skill is
+ * used when the request names none — otherwise those tools look hand-picked
+ * again and an image request goes back to a text model. Used only to tell
+ * pinned tools from picked ones; it adds no tool to the turn.
+ */
+async function skillPinnedTools(params: {
+  skillId?: string;
+  conversationId?: string;
+  userId: number;
+}): Promise<string[]> {
+  let skillId = params.skillId;
+  if (!skillId && params.conversationId) {
+    const conversationId = params.conversationId;
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ skillId: nexusConversations.skillId })
+          .from(nexusConversations)
+          .where(
+            and(
+              eq(nexusConversations.id, conversationId),
+              eq(nexusConversations.userId, params.userId),
+            ),
+          )
+          .limit(1),
+      "routingStoredConversationSkill",
+    );
+    skillId = rows[0]?.skillId ?? undefined;
+  }
+  if (!skillId) return [];
+  return (await getApprovedSkillSession(skillId))?.allowedTools ?? [];
 }
 
 async function prepareChatRequest(params: {
