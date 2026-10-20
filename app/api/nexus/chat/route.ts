@@ -987,7 +987,9 @@ async function setupImageConversation(params: {
   provider: string;
   modelId: string;
   bindings: ConversationBindings;
+  attachmentReferences: NexusAttachmentReference[];
   requestId: string;
+  timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
 }): Promise<
   | { conversationId: string; conversationTitle: string; skillId?: string }
@@ -1005,6 +1007,18 @@ async function setupImageConversation(params: {
     skillId: params.bindings.skillId,
   });
   if ("error" in convResult) return convResult;
+  // Attachments first, as `prepareConversationRepositories` does: a rejected
+  // attachment must not leave this turn's repository selections committed.
+  const attachmentError = await bindAttachmentReferencesOrError({
+    ownerId: params.userId,
+    conversationId: convResult.conversationId,
+    references: params.attachmentReferences,
+    conversationCreated: convResult.created,
+    requestId: params.requestId,
+    timer: params.timer,
+    log: params.log,
+  });
+  if (attachmentError) return { error: attachmentError };
   const repositoryBindingError = await persistConversationRepositoryBindings({
     conversationId: convResult.conversationId,
     userId: params.userId,
@@ -1098,7 +1112,9 @@ async function handleImageGeneration(params: {
     provider: imageProvider,
     modelId,
     bindings: params.bindings,
+    attachmentReferences,
     requestId,
+    timer,
     log,
   });
   if ("error" in convResult) {
@@ -1107,17 +1123,6 @@ async function handleImageGeneration(params: {
   const { conversationId, conversationTitle } = convResult;
 
   try {
-    const bindingError = await bindAttachmentReferencesOrError({
-      ownerId: userId,
-      conversationId,
-      references: attachmentReferences,
-      conversationCreated: !existingConversationId,
-      requestId,
-      timer,
-      log,
-    });
-    if (bindingError) return bindingError;
-
     const referenceImages = await resolveImageReferences({
       messages,
       attachmentReferences,
