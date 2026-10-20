@@ -1709,6 +1709,8 @@ async function resolveRequestRouting(args: {
   modelFamily: z.infer<typeof nexusModelFamilySchema>;
   manuallyEnabledConnectors: string[];
   manuallyEnabledTools: string[];
+  /** `itemType` of each canonical attachment on the latest message. */
+  attachmentItemTypes: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -1736,6 +1738,11 @@ async function resolveRequestRouting(args: {
     enabledToolNames: args.manuallyEnabledTools,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
+    // The image path reads only image attachments; a PDF or document in the
+    // same message needs the text route's retrieval loop.
+    hasOnlyImageAttachments:
+      !imageContext.hasNonImageFileInput &&
+      args.attachmentItemTypes.every((itemType) => itemType === "image"),
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
     workspace: args.workspace,
   });
@@ -2746,6 +2753,9 @@ async function resolveChatModel(params: {
     modelFamily: prepared.validationData.modelFamily,
     manuallyEnabledConnectors: prepared.manuallyEnabledConnectors,
     manuallyEnabledTools: prepared.routingEnabledTools,
+    attachmentItemTypes: prepared.attachmentPreflight.resolutions.map(
+      (resolution) => resolution.itemType,
+    ),
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,

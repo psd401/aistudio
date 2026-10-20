@@ -86,10 +86,11 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
  * a cartoon" to a text model that cannot produce an image at all, which then
  * told the user images were impossible.
  *
- * Only when the message itself carries an image (`hasImageInput`): the tool is
- * also required for a PDF or a document attached in an earlier turn, which the
- * image path cannot read, so "draw a diagram of the attached report" keeps the
- * text route and its retrieval loop. Every OTHER required tool (repository,
+ * Only when the message itself carries an image (`hasImageInput`) and nothing
+ * else (`hasOnlyImageAttachments`): the tool is also required for a PDF or a
+ * document — attached earlier or beside the image — which the image path
+ * cannot read, so "draw a diagram of the attached report" keeps the text route
+ * and its retrieval loop. Every OTHER required tool (repository,
  * project, skill, web search) really does need a caller and is never dropped.
  *
  * Runs once, right after classification and before anything reads the list.
@@ -98,9 +99,13 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
 function dropImagePathSatisfiedTools(
   decision: NexusClassifierDecision,
   requiredTools: string[],
-  hasImageInput: boolean | undefined
+  input: { hasImageInput?: boolean; hasOnlyImageAttachments?: boolean }
 ): void {
-  if (decision.intent !== "image" || !hasImageInput) return
+  if (
+    decision.intent !== "image" ||
+    !input.hasImageInput ||
+    !input.hasOnlyImageAttachments
+  ) return
   const index = requiredTools.indexOf(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
   if (index !== -1) requiredTools.splice(index, 1)
 }
@@ -417,6 +422,11 @@ interface RouteNexusRequestArgs {
   enabledToolNames?: string[]
   userId: number
   hasImageInput?: boolean
+  /**
+   * Every attachment on the latest message is an image the image path can
+   * read. False when a PDF or document rides along with the image.
+   */
+  hasOnlyImageAttachments?: boolean
   hasPreviousGeneratedImage?: boolean
   /**
    * The object open in the workspace panel beside the chat, already resolved
@@ -825,7 +835,7 @@ async function routeWithConfiguredRouter(options: {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
-  dropImagePathSatisfiedTools(rawDecision, requiredTools, args.hasImageInput)
+  dropImagePathSatisfiedTools(rawDecision, requiredTools, args)
   // The classifier sees the latest message only. An open editable artifact is a
   // routing input it cannot know about, so the floor is applied to its verdict
   // before anything reads `tier` (#1840) — unless doing so would change what
