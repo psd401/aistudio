@@ -173,6 +173,19 @@ describe("GET /api/images/[...key]", () => {
     expect(mockGetSignedUrl).not.toHaveBeenCalled()
   })
 
+  it("refuses a key with a relative segment even inside an owned conversation", async () => {
+    const dottedKey = `v2/generated-images/${CONVERSATION_ID}/../${OTHER_CONVERSATION_ID}/x.png`
+    mockGetConversationById.mockResolvedValue({ id: CONVERSATION_ID })
+
+    const response = await getImage(
+      request(`https://app.test/api/images/${dottedKey}`),
+      { params: Promise.resolve({ key: dottedKey.split("/") }) },
+    )
+
+    expect(response.status).toBe(404)
+    expect(mockGetSignedUrl).not.toHaveBeenCalled()
+  })
+
   it("refuses an unauthenticated request before touching S3", async () => {
     mockGetServerSession.mockResolvedValue(null)
 

@@ -71,8 +71,8 @@ import {
   buildNoImageMessage,
   createImageStreamResponse,
   createNoImageResponse,
-  getNoImageExplanation,
   handleImageGenerationError,
+  respondToImageFailure,
   persistNoImageExchange,
 } from './image-generation-handler';
 import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
@@ -1093,15 +1093,11 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
-    let failure: unknown = imageError;
-    // A model that answered in words instead of pixels did NOT fail the turn
-    // (#1900): keep the conversation, persist its explanation, and show it.
-    // If that save fails the turn is lost exactly like a failed image save, so
-    // it falls through to the same rollback and error.
-    const explanation = getNoImageExplanation(imageError);
-    if (explanation) {
-      try {
-        return await respondWithNoImage({
+    return respondToImageFailure({
+      error: imageError,
+      conversationId,
+      replyWithExplanation: (explanation) =>
+        respondWithNoImage({
           explanation,
           conversationId,
           conversationTitle,
@@ -1113,29 +1109,20 @@ async function handleImageGeneration(params: {
           requestId,
           log,
           timer,
-        });
-      } catch (persistError) {
-        log.error("Failed to persist a no-image image turn", {
+        }),
+      rollback: () =>
+        rollbackFailedImageConversation({
+          attachmentReferences,
           conversationId,
-          error:
-            persistError instanceof Error
-              ? persistError.message
-              : "Unknown persistence error",
-        });
-        failure = persistError;
-      }
-    }
-    const rollbackError = await rollbackFailedImageConversation({
-      attachmentReferences,
-      conversationId,
-      existingConversationId,
-      userId,
-      requestId,
-      log,
-      timer,
+          existingConversationId,
+          userId,
+          requestId,
+          log,
+          timer,
+        }),
+      toErrorResponse: (failure) =>
+        handleImageGenerationError(failure, conversationId, requestId),
     });
-    if (rollbackError) return rollbackError;
-    return handleImageGenerationError(failure, conversationId, requestId);
   }
 }
 

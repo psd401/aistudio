@@ -76,21 +76,34 @@ function firstAccessibleModel(
 const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 3 }
 
 /**
- * Required tools the Nexus image path serves WITHOUT a model-driven tool loop
- * (#1900).
+ * Drop the required tools the Nexus image path serves itself (#1900).
  *
- * An attachment on an image turn is not a retrieval problem. The image route
- * reads the attached bytes itself (`resolveImageReferences`) and hands them to
- * the specialist as a reference image, so `searchNexusAttachments` is required
- * only in the bookkeeping sense — nothing has to CALL it. Treating its presence
- * as "this turn needs a tool loop" is what sent "make this photo into a
- * cartoon" to a text model that cannot produce an image at all, which then told
- * the user images were impossible.
+ * An attached IMAGE on an image turn is not a retrieval problem. The image
+ * route reads the attached bytes itself (`resolveImageReferences`) and hands
+ * them to the specialist as a reference image, so `searchNexusAttachments` is
+ * required only in the bookkeeping sense — nothing has to CALL it. Treating its
+ * presence as "this turn needs a tool loop" is what sent "make this photo into
+ * a cartoon" to a text model that cannot produce an image at all, which then
+ * told the user images were impossible.
  *
- * Every OTHER required tool (repository, project, skill, web search) really
- * does need a caller, so those turns keep the existing tier-aware text routing.
+ * Only when the message itself carries an image (`hasImageInput`): the tool is
+ * also required for a PDF or a document attached in an earlier turn, which the
+ * image path cannot read, so "draw a diagram of the attached report" keeps the
+ * text route and its retrieval loop. Every OTHER required tool (repository,
+ * project, skill, web search) really does need a caller and is never dropped.
+ *
+ * Runs once, right after classification and before anything reads the list.
+ * Mutates in place: `requiredTools` is the turn's single live list.
  */
-const IMAGE_PATH_SATISFIED_TOOLS = new Set([NEXUS_ATTACHMENT_SEARCH_TOOL_NAME])
+function dropImagePathSatisfiedTools(
+  decision: NexusClassifierDecision,
+  requiredTools: string[],
+  hasImageInput: boolean | undefined
+): void {
+  if (decision.intent !== "image" || !hasImageInput) return
+  const index = requiredTools.indexOf(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
+  if (index !== -1) requiredTools.splice(index, 1)
+}
 
 /**
  * Whether `selectModel` takes its image-specialist branch for this turn.
@@ -112,8 +125,7 @@ function selectsImageSpecialist(
   intent: NexusRouterIntent,
   requiredTools: string[]
 ): boolean {
-  return intent === "image"
-    && requiredTools.every(tool => IMAGE_PATH_SATISFIED_TOOLS.has(tool))
+  return intent === "image" && requiredTools.length === 0
 }
 
 /**
@@ -121,16 +133,12 @@ function selectsImageSpecialist(
  *
  * Shadow mode is supposed to change nothing, so it keeps the fallback whenever
  * routing would not have had to override it for correctness. A server-required
- * input tool IS such an override (an authorization/correctness boundary), but
- * an image turn whose only required tools the image path serves itself is not:
- * routing proposes an image specialist there precisely because no tool loop is
- * involved, and executing it would be shadow mode changing live traffic.
+ * input tool IS such an override (an authorization/correctness boundary); the
+ * tools `dropImagePathSatisfiedTools` removed are not, because the image path
+ * serves them without a tool loop.
  */
-function shadowMayRetainFallback(
-  intent: NexusRouterIntent,
-  requiredTools: string[]
-): boolean {
-  return requiredTools.length === 0 || selectsImageSpecialist(intent, requiredTools)
+function shadowMayRetainFallback(requiredTools: string[]): boolean {
+  return requiredTools.length === 0
 }
 
 /**
@@ -235,7 +243,7 @@ function selectModel(args: {
   // A specialist-only image model cannot first call server-side input tools, so
   // a turn that needs one stays on a text model that can retrieve context and
   // participate in the normal tool loop. An attached image is NOT such a turn:
-  // the image route reads those bytes itself (see IMAGE_PATH_SATISFIED_TOOLS).
+  // the image route reads those bytes itself (see dropImagePathSatisfiedTools).
   if (selectsImageSpecialist(args.intent, args.requiredTools)) {
     const configured = configuredIds
       .map(id => args.models.find(model => model.modelId === id || String(model.id) === id))
@@ -395,7 +403,7 @@ function selectModelForToolUse(
       })
     }
   }
-  return shadowMayRetainFallback(unconstrained.intent, unconstrained.requiredTools)
+  return shadowMayRetainFallback(unconstrained.requiredTools)
     ? selectModelForRuntime(unconstrained, mode, fallback)
     : selectModel(unconstrained)
 }
@@ -532,7 +540,7 @@ function selectedRuntimeModel(
   fallback: NexusModelRow,
   selection: { model: NexusModelRow }
 ): NexusModelRow {
-  if (mode === "shadow" && shadowMayRetainFallback(intent, requiredTools)) return fallback
+  if (mode === "shadow" && shadowMayRetainFallback(requiredTools)) return fallback
   return selection.model
 }
 
@@ -653,7 +661,7 @@ async function buildRoutedResult(options: {
     requiredTools,
   } = options
   const retainFallback =
-    mode === "shadow" && shadowMayRetainFallback(decision.intent, requiredTools)
+    mode === "shadow" && shadowMayRetainFallback(requiredTools)
   const selected = selectedRuntimeModel(
     mode,
     decision.intent,
@@ -817,6 +825,7 @@ async function routeWithConfiguredRouter(options: {
     hasImageInput: args.hasImageInput,
     hasPreviousGeneratedImage: args.hasPreviousGeneratedImage,
   })
+  dropImagePathSatisfiedTools(rawDecision, requiredTools, args.hasImageInput)
   // The classifier sees the latest message only. An open editable artifact is a
   // routing input it cannot know about, so the floor is applied to its verdict
   // before anything reads `tier` (#1840) — unless doing so would change what

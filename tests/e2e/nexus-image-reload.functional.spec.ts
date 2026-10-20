@@ -147,7 +147,7 @@ test.describe("Nexus generated images survive a reload (#1900)", () => {
       // Nexus keeps a new conversation's id in React state rather than the URL,
       // so re-visiting `page.url()` would start a BLANK conversation and this
       // test would pass for the wrong reason. The id is in the image key.
-      const conversationId = before.split("/")[4];
+      const conversationId = before.split("/")[5];
       expect(conversationId).toMatch(UUID);
       await page.goto(`/nexus?id=${conversationId}`);
 
