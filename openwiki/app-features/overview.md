@@ -13,6 +13,11 @@ openwiki:
     - app/api/nexus/chat/image-generation-handler.ts
     - lib/ai/generated-image-bucket.ts
     - lib/ai/image-generation-service.ts
+    - lib/nexus/generated-image-markdown.ts
+    - lib/nexus/attachment-search-tool-name.ts
+    - app/api/images/[...key]/route.ts
+    - app/api/nexus/conversations/[id]/messages/route.ts
+    - components/assistant-ui/markdown-text.tsx
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/workspace-panel.ts
@@ -158,6 +163,8 @@ openwiki:
     - Generated image bucket resolver is separate from generic S3 client — getGeneratedImageBucket() reads DOCUMENTS_BUCKET_NAME directly; storeImageInS3 and resolvePreviousGeneratedImageReferences must use the same bucket (#1804)
     - Generated images use key prefix v2/generated-images/{conversationId}/ — only keys under this prefix are readable for edits, preventing cross-conversation access (#1804)
     - Edit-after-persistence reads by S3 key, not presigned URL — presigned URLs expire after one hour; edits work indefinitely by hydrating image bytes from durable storage (#1804)
+    - Reloaded generated images render through `/api/images/[...key]`, not a presigned URL — the proxy re-checks ownership and re-signs with the same bucket and region resolver that wrote the image (#1900)
+    - A model that answers an image request in text is not a failed turn — its explanation is saved as an assistant reply, and rollback applies only to an unexplained failure or a save that fails (#1900)
     - Bridge failures are typed — `err.code` is one of a closed set (unauthenticated, forbidden, not_query_mode, rate_limited, timeout, query_error, too_many_requests, unavailable); wrap every AtriumData call in try/catch and branch on the code (#1787)
     - query_error message is viewer-gated — the database error message is attached only when the requester can EDIT the artifact; plain readers get the code with a generic message (#1787)
     - Error messages are bounded and flattened — multi-line Postgres errors collapse to one line; length capped at 500 characters; never grow without bound or smuggle line structure into prompts (#1787)
@@ -270,7 +277,7 @@ openwiki:
     - tests/unit/use-toast-sonner-adapter.test.ts
     - tests/e2e/assistant-architect-create-add-field.functional.spec.ts
     - tests/unit/lib/tools/web-fetch-tool.test.ts
-    - tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts
+    - lib/nexus/model-router/__tests__/url-detection.test.ts
     - tests/e2e/nexus-url-access.functional.spec.ts
     - tests/unit/atrium-artifact-query-route.test.ts
     - tests/unit/atrium-artifact-record-transport-failure.test.tsx
@@ -294,7 +301,7 @@ openwiki:
     - tests/unit/atrium-rollback.test.ts
     - tests/e2e/atrium-group-visibility.functional.spec.ts
     - tests/e2e/atrium-share-live-follows-save.functional.spec.ts
-    - tests/unit/lib/nexus/model-router/__tests__/router.test.ts
+    - lib/nexus/model-router/__tests__/router.test.ts
     - tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts
 ---
 
@@ -426,9 +433,9 @@ Nexus chat can open a specific URL when the user pastes one. This closes a gap w
 
 **Focused Tests**:
 - `tests/unit/lib/tools/web-fetch-tool.test.ts` — 34 test cases covering tool behavior, fencing, neutralization, error handling
-- `tests/unit/lib/nexus/model-router/__tests__/classifier.test.ts` — URL routing classifier tests
-- `tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts` — URL detection patterns including IPv6
-- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Model selection preferences for URL messages
+- `lib/nexus/model-router/__tests__/classifier.test.ts` — URL routing classifier tests
+- `lib/nexus/model-router/__tests__/url-detection.test.ts` — URL detection patterns including IPv6
+- `lib/nexus/model-router/__tests__/router.test.ts` — Model selection preferences for URL messages
 - `tests/unit/lib/nexus/chat-step-budget.test.ts` — Step budget floor tests
 - `tests/e2e/nexus-url-access.functional.spec.ts` — E2E test for URL opening flow
 
@@ -457,14 +464,58 @@ Generated images can be edited hours or days after creation, not just within the
 
 **Security**: Only images under the conversation's own generated-images prefix (`v2/generated-images/{conversationId}/`) are readable. Keys outside this prefix point to another conversation's images and are rejected before any S3 read (enforced by `isGeneratedImageKeyForConversation`).
 
+#### Reload Rendering and the Image Proxy (#1900)
+
+A generated image must still render after a page reload, and the browser must be able to tell when it cannot. Stored image parts are re-pointed on load by `convertImagePart()` in `app/api/nexus/conversations/[id]/messages/route.ts`:
+
+- A part whose `s3Key` is under `generatedImageKeyPrefix(conversationId)` becomes markdown pointing at `generatedImageProxyPath(s3Key)`, which is `/api/images/...` with each segment encoded. It is not a presigned URL.
+- `/api/images/[...key]` (`app/api/images/[...key]/route.ts`) checks the session and the conversation's ownership on every load. It refuses keys with empty, `.` or `..` segments, then signs with `getGeneratedImageBucket()` and the client from `getGeneratedImageS3Client()`. That client reads its region from `Settings.getS3()`, so it signs with the same region that wrote the object. The proxy previously built its own client from environment variables, which defaulted to `us-east-1`.
+- Attachment keys and legacy rows without an `s3Key` keep the earlier presigned or stored `imageUrl` path. The proxy serves generated images only.
+
+**Alt text** comes from the stored `altText`, not from the fixed label `Generated Image`. `generatedImageMarkdown()` in `lib/nexus/generated-image-markdown.ts` collapses whitespace, clips to 125 graphemes without splitting an emoji, and escapes `[`, `]` and `\`. The `Generated Image` placeholder applies only when `altText` is empty. `persistImageExchange()` stores the provider's description, or `Generated image` when there is none, so older rows show that stored label. `lib/nexus/history-adapter.ts` uses the same helper for client-side history.
+
+`MarkdownImage` in `components/assistant-ui/markdown-text.tsx` replaces a failed `<img>` with an "Image unavailable — {alt}" chip and a Retry button. The failure is tracked per `src`, so a different URL renders normally. A broken `<img>` previously rendered nothing, and staff saw a reply that had silently lost its picture.
+
+**Invariant:** the reload URL and the write path must agree on bucket and region. A change to `getGeneratedImageS3Client()`, `getGeneratedImageBucket()`, or the proxy's ownership check affects every reloaded image.
+
+#### Explained Refusals Are Replies, Not Failures (#1900)
+
+A Gemini image turn can return text and no file, for example "I can't render recognisable people". `extractGeminiImage()` in `lib/ai/image-generation-service.ts` throws `NO_IMAGE` and attaches the model's text as `providerText`. `getNoImageExplanation()` in `app/api/nexus/chat/image-generation-handler.ts` returns that text only when `providerText` is present. Other `NO_IMAGE` errors, such as an oversized or blocked reference image or an empty provider response, stay failures.
+
+```mermaid
+flowchart TD
+    A[image generation throws] --> B{NO_IMAGE with providerText?}
+    B -- yes --> C[persistNoImageExchange, then createNoImageResponse]
+    B -- no --> R[rollback a newly created conversation]
+    C -- save fails --> R
+    C -- saved --> D[model text streamed under NO_IMAGE_LABEL, no X-Image-Generated]
+    R -- rollback fails --> F[return rollback error]
+    R -- rollback ok --> G[handleImageGenerationError]
+```
+
+Caption: `respondToImageFailure()` makes this decision. The route supplies the side effects, so the policy can be tested without a database.
+
+The saved reply is an ordinary assistant text message with `generationType: "image-no-image"`. It is shown as `buildNoImageMessage()` output: `**Image not generated.**`, a blank line, then the model's explanation. A reply that cannot be saved is rolled back, because a reply that vanishes on reload is worse than an error.
+
 **Key Sources**:
-- `/lib/ai/generated-image-bucket.ts` — Bucket resolver for generated images
-- `/lib/ai/image-generation-service.ts` — Provider-agnostic image generation with S3 storage
-- `/app/api/nexus/chat/image-generation-handler.ts` — Nexus integration, edit-after-persistence logic, reference hydration
-- `/app/api/nexus/chat/route.ts` — Routing classification for image generation
+- `/lib/ai/generated-image-bucket.ts` — Bucket resolver, `getGeneratedImageS3Client()`, `generatedImageKeyPrefix()`, `generatedImageProxyPath()`
+- `/lib/ai/image-generation-service.ts` — Provider-agnostic image generation with S3 storage; `providerText` on `NO_IMAGE`
+- `/lib/nexus/generated-image-markdown.ts` — Alt text and markdown for stored generated images
+- `/app/api/images/[...key]/route.ts` — Authenticated proxy that re-signs generated images on each load
+- `/app/api/nexus/conversations/[id]/messages/route.ts` — `convertImagePart()` re-points reloaded image parts at the proxy
+- `/components/assistant-ui/markdown-text.tsx` — `MarkdownImage` fallback
+- `/app/api/nexus/chat/image-generation-handler.ts` — Nexus integration, edit-after-persistence logic, reference hydration, no-image replies
+- `/app/api/nexus/chat/route.ts` — Routing classification for image generation; `respondWithNoImage()` persists the explanation
 
 **Focused Tests**:
 - `tests/unit/api/nexus/image-generation-handler.test.ts` — Handler behavior including reference hydration
+- `tests/unit/nexus-generated-image-serving.test.ts` — `generatedImageProxyPath` encoding, the proxy's bucket, region and ownership checks, and reloaded-message rewriting. Its `describe` blocks are `generatedImageProxyPath`, `GET /api/images/[...key]`, and `GET /api/nexus/conversations/[id]/messages`.
+- `tests/unit/nexus-generated-image-markdown.test.ts` — Alt text, placeholder fallback, escaping, and grapheme clipping
+- `tests/unit/markdown-image-fallback.test.tsx` — `MarkdownImage` fallback, labelling, and retry behavior
+- `tests/unit/nexus-no-image-result.test.ts` — `getNoImageExplanation`, `buildNoImageMessage`, and `respondToImageFailure` rollback decisions
+- `tests/e2e/nexus-image-reload.functional.spec.ts` — Browser check that an image renders on generation and again after reload. It needs the full app stack, so run it only when the rendering path changes.
+
+**Minimal validation**: `bunx jest --silent tests/unit/nexus-generated-image-serving.test.ts tests/unit/nexus-no-image-result.test.ts tests/unit/nexus-generated-image-markdown.test.ts tests/unit/markdown-image-fallback.test.tsx`
 
 ### Attachments (#1735)
 
@@ -573,6 +624,10 @@ While an **editable artifact** is bound to the turn, the router raises the tier 
 
 **Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other.
 
+**Attached images are not a retrieval need** (#1900): `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` removes `searchNexusAttachments` (`NEXUS_ATTACHMENT_SEARCH_TOOL_NAME`) from the required tools when the intent is `image`, the latest message has an image, and every attachment is an image (`hasOnlyImageAttachments`, computed in `resolveRequestRouting()` in `app/api/nexus/chat/route.ts`). The image route reads those bytes and passes them to the specialist, so "make this photo a cartoon" stays on the image model. A PDF or document in the same message keeps the tool and the text route. Every other required tool still counts as a real input tool, and only that one is dropped.
+
+The constant lives in `lib/nexus/attachment-search-tool-name.ts`. The router, the chat route, the chat helpers, and `createNexusAttachmentTools()` all import it, so a rename cannot leave one copy behind.
+
 **Reason Codes**:
 - `workspace_artifact_min_tier` — Floor was applied for this turn
 - `workspace_artifact_min_tier_unmet` — Final model fell below floor after all attempts
@@ -580,12 +635,12 @@ While an **editable artifact** is bound to the turn, the router raises the tier 
 The presence of `workspace_artifact_min_tier` does NOT guarantee the floor took effect — when the final binding lands below floor (no accessible medium/high candidates), `workspace_artifact_min_tier_unmet` is also recorded.
 
 **Key Sources**:
-- `/lib/nexus/model-router/router.ts` — `WORKSPACE_ARTIFACT_MIN_TIER`, `artifactFloorMayApply()`, `workspaceArtifactMinTier()`, `meetsMinTier()`, `selectionIgnoresTier()`
+- `/lib/nexus/model-router/router.ts` — `WORKSPACE_ARTIFACT_MIN_TIER`, `artifactFloorMayApply()`, `workspaceArtifactMinTier()`, `meetsMinTier()`, `selectsImageSpecialist()`, `dropImagePathSatisfiedTools()`, `shadowMayRetainFallback()`
 - `/lib/nexus/workspace-routing-contract.ts` — `workspaceNeedsPsdData()` predicate shared with connector attach
 - `/docs/features/nexus-model-routing.md` — Full routing documentation
 
 **Focused Tests**:
-- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Unit suite for routing decisions, floor application, shadow mode handling, reason codes
+- `lib/nexus/model-router/__tests__/router.test.ts` — Unit suite for routing decisions, floor application, shadow mode handling, reason codes. The image-attachment cases (`routes an image request WITH an attachment to the image specialist`, `refuses an attachment image request rather than falling back to text`, `keeps an image plus a PDF in one message on a text model`) are in `defineNexusModelRouterImageAttachmentSuite`, under the `Nexus model router` describe.
 - `tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts` — E2E wiring test proving browser state → transport → route integration with artifact bound
 - `tests/e2e/nexus-workspace-psd-data-connector.functional.spec.ts` — E2E (gated) popover behavior
 

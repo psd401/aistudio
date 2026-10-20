@@ -362,6 +362,7 @@ The Nexus chat route answers with a UI-message stream through three paths, and e
 - **Standard streaming**: `buildStreamingResponseHeaders()` in `app/api/nexus/chat/route.ts` adds `X-Unified-Streaming` and `X-Supports-Reasoning`.
 - **Deep Research**: `createDeepResearchResponse()` in `app/api/nexus/chat/route.ts` adds `X-Deep-Research`.
 - **Image generation**: `createImageStreamResponse()` in `app/api/nexus/chat/image-generation-handler.ts` adds `X-Image-Generated`.
+- **Explained no-image reply**: when a model answers an image request in text, `createNoImageResponse()` in the same file streams that text with `imageGenerated: false`, so `X-Image-Generated` is absent. The turn is still a successful stream; see [Explained Refusals](../app-features/overview.md#explained-refusals-are-replies-not-failures-1900) for when this path is taken.
 
 All three call `buildNexusStreamHeaders()` in `app/api/nexus/chat/stream-headers.ts`. Callers pass the conversation and routing facts, and the builder owns the header shape:
 
