@@ -11,13 +11,32 @@ openwiki:
     - lib/streaming/deferred-ui-message-stream.ts
     - lib/streaming/provider-adapters/base-adapter.ts
     - lib/streaming/nexus/nexus-streaming-service.ts
+    - lib/streaming/empty-turn-notice.ts
+    - lib/streaming/stream-error-message.ts
+    - lib/tools/direct-render-tools.ts
+    - app/api/nexus/chat/chat-helpers.ts
+    - app/api/nexus/chat/route.ts
+  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse]
   test_paths:
     - lib/streaming/__tests__/sse-keepalive.test.ts
     - lib/streaming/__tests__/deferred-ui-message-stream.test.ts
     - lib/streaming/__tests__/stream-deadline.test.ts
+    - lib/streaming/__tests__/empty-turn-notice.test.ts
+    - lib/streaming/__tests__/stream-error-message.test.ts
+    - app/api/nexus/chat/__tests__/incomplete-turn.test.ts
+    - app/api/nexus/chat/__tests__/assistant-turn-persistence.test.ts
+    - tests/unit/lib/nexus/chat-step-budget.test.ts
     - tests/e2e/nexus-chat-slow-stream-visible-error.functional.spec.ts
+    - tests/e2e/nexus-empty-turn-notice.functional.spec.ts
     - tests/e2e/assistant-architect-slow-chain-visible-error.functional.spec.ts
   invariants:
+    - A cleanly finished Nexus turn with no text part gets a terminal error notice naming its shape (reasoning-only, file-only, tool-only, step budget exhausted, or nothing); any text part suppresses it
+    - A turn that called a direct-render tool (`lib/tools/direct-render-tools.ts`) never gets an answer-less notice, because the chart or document is the answer
+    - Non-Nexus callers (`source` other than `nexus`) keep the pre-#1899 rule: only a run that emitted nothing at all is called empty
+    - Mid-stream errors reach the client only as one of six fixed sanitized explanations; the raw provider message is never echoed
+    - "`enhanceStreamConfig` must carry `source` through, or the Nexus policy silently falls back to the non-Nexus rule"
+    - An answer-less Nexus turn is persisted as a notice row rather than dropped, so the prompt does not reload unanswered
+    - Persisted notice rows carry no tool calls, because replaying a tool_use block without its tool_result throws on the next load
     - ALB idle timeout is 300s; keep-alive interval is 15s (well under common proxy timeouts)
     - SSE comment frames (`: keep-alive`) are invisible to eventsource-parser — parsed chunk sequence unchanged
     - Backpressure preserved — slow client stalls model stream, not in-memory buffer
@@ -31,6 +50,7 @@ openwiki:
     - bun run typecheck
     - bun test lib/streaming/__tests__/sse-keepalive.test.ts
     - bun test lib/streaming/__tests__/deferred-ui-message-stream.test.ts
+    - bunx jest --silent lib/streaming/__tests__/empty-turn-notice.test.ts lib/streaming/__tests__/stream-error-message.test.ts lib/streaming/__tests__/stream-deadline.test.ts
 ---
 
 # Streaming Architecture
@@ -65,7 +85,7 @@ The standard SSE no-op frame `: keep-alive\n\n` is used for keep-alive because:
 - `eventsource-parser` routes `:`-prefixed lines to `onComment` handler
 - AI SDK does not supply `onComment`, so frames are discarded before reaching `processUIMessageStream`
 - Parsed chunk sequence is identical to unwrapped stream
-- A `data-*` chunk would NOT work — `isVisibleChunkType` counts them as visible output, suppressing "empty response" notices
+- A `data-*` chunk would NOT work — `classifyChunkVisibility` (`lib/streaming/empty-turn-notice.ts`) buckets them as rendered output, which suppresses the empty-turn notice
 
 ### Keep-Alive Parameters
 
@@ -195,6 +215,8 @@ All provider responses are wrapped with keep-alive at the provider adapter layer
 
 **Location**: `lib/streaming/provider-adapters/base-adapter.ts`
 
+Both the base and the OpenAI Responses-API adapter build their response through `buildResponseFactory()`, which resolves the empty-turn policy once per run (`requireTextPart: config.source === 'nexus'`, plus the run's `maxSteps`) and hands it to `buildAbortAwareResponse()`. That method wraps the provider's UI-message stream, counts what the user will actually see, and appends a terminal `error` chunk when the run was aborted or ended with nothing to read (see [Answer-less Turns and Error Notices](#answer-less-turns-and-error-notices-1899)).
+
 ```typescript
 // Keep socket warm through silent reasoning/tool stretch
 return withSseKeepAliveResponse(
@@ -209,6 +231,114 @@ This means:
 - All AI provider calls (OpenAI, Claude, Gemini, Bedrock) automatically get keep-alive
 - No per-route configuration needed
 - Consistent behavior across Nexus Chat, Model Compare, and Assistant execution
+
+## Answer-less Turns and Error Notices (#1899)
+
+A cleanly finished turn can still leave the user with nothing to read. Three paths in the stream layer make sure the thread always says what happened, and the Nexus route keeps that explanation after a reload.
+
+**Why the old check failed**: `isVisibleChunkType` used to count `reasoning-*` and `file` chunks as visible output. The Nexus Thread (`DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS` in `components/assistant-ui/thread.tsx`) registers no Reasoning or File renderer, so those parts draw nothing. A model that thought and then wrote no text produced a blank bubble with no notice. Tool-only turns were also silent, and a turn can reach that state because an ordinary Nexus turn gets three steps (`WEB_FETCH_MAX_STEPS` in `lib/nexus/chat-step-budget.ts`).
+
+### Classifying the Turn
+
+`lib/streaming/empty-turn-notice.ts` holds the pure rules, with no AI SDK or React imports:
+
+- `classifyChunkVisibility(type)` buckets each UI-message chunk as `text`, `reasoning`, `file`, `tool`, `other` (`source-*` and `data-*`), or `none`.
+- `classifyEmptyTurn(observation)` returns one `EmptyTurnKind`, or `null` when there is nothing to say.
+- `emptyTurnNotice(kind)` returns the user-facing sentence. The sentence is rendered verbatim by `MessagePrimitive.Error`.
+
+```mermaid
+flowchart TD
+    A[Clean finish] --> B{Non-blank text part seen?}
+    B -- yes --> N1[No notice]
+    B -- no --> C{Direct-render tool ran?}
+    C -- yes --> N1
+    C -- no --> D{requireTextPart?}
+    D -- no --> E{Anything rendered at all?}
+    E -- yes --> N1
+    E -- no --> K1[nothing]
+    D -- yes --> F{Tool activity seen?}
+    F -- yes --> G{completedSteps at or above maxSteps?}
+    G -- yes --> K2[step_budget_exhausted]
+    G -- no --> K3[tool_only]
+    F -- no --> H{Reasoning seen?}
+    H -- yes --> K4[reasoning_only]
+    H -- no --> I{File seen?}
+    I -- yes --> K5[file_only]
+    I -- no --> J{Source or data part seen?}
+    J -- yes --> N1
+    J -- no --> K1
+```
+
+Caption: decision order for the notice shape in `classifyEmptyTurn`. The `requireTextPart` branch is the Nexus rule. The non-Nexus branch only classifies a run that emitted nothing at all.
+
+**Policy rules**:
+- Any text part suppresses the notice. Whitespace-only text does not count, which matches `incompleteTurnReason`.
+- A direct-render tool suppresses it. `generate_document`, `show_chart`, `search_graph_nodes`, `propose_decision` and `commit_decision` are listed in `lib/tools/direct-render-tools.ts` (`DIRECT_RENDER_TOOL_NAMES`, `isDirectRenderTool`). The chart or download card is the answer, and a notice under it would contradict it. The `generate_document` download card is described in [generated-documents.md](../app-features/generated-documents.md). The same list drives tool-group rendering in `app/(protected)/nexus/_components/tools/tool-group.tsx`.
+- `requireTextPart` is set only for `source: 'nexus'`. `buildResponseFactory` derives it from the original `config.source`, not the enhanced config. Assistant Architect execution and the programmatic `/api/v1/assistants` path share this code and keep the pre-#1899 rule, where only a run that emitted nothing at all is called empty. An injected `error` chunk would make an AI SDK client throw for those callers when the run ended on a structured tool call.
+- `enhanceStreamConfig()` in `base-adapter.ts` must copy `source` as well as `maxSteps`. Dropping `source` silently reverts every Nexus run to the non-Nexus rule.
+
+### Stream Errors Are Sanitized
+
+`toUIMessageStream()` is called with `onError: sanitizeStreamErrorMessage`. Without it, the AI SDK default `An error occurred.` reaches the browser. `lib/streaming/stream-error-message.ts` classifies the error with an ordered rule table (`classifyStreamError`: timeout, rate limit, content blocked, context too long, unavailable, or unknown) and returns one of six fixed strings from `STREAM_ERROR_MESSAGES`. The classifier reads the error, and the reply never quotes it, because provider messages can carry request ids, model ARNs, or prompt fragments. The handler logs the kind.
+
+Ordering matters: a `504 gateway timeout` must classify as a timeout, not as an outage, so the timeout rule comes first and the broad 5xx rule comes last.
+
+### Persistence Keeps the Prompt Answered
+
+The user message is saved before streaming starts, so a reply that is never written leaves the prompt looking unanswered after a reload. `app/api/nexus/chat/route.ts` (`createOnFinishCallback`) and `app/api/nexus/chat/chat-helpers.ts` implement this:
+
+```mermaid
+sequenceDiagram
+    participant Provider as Provider UI-message stream
+    participant Adapter as buildAbortAwareResponse
+    participant Client as Nexus thread
+    participant Route as Nexus chat onFinish
+    participant DB as nexus_messages
+    Provider->>Adapter: chunks such as text, reasoning, file, tool, finish-step
+    Adapter->>Client: forwards every chunk unchanged
+    Adapter->>Client: on flush, error chunk when the turn was answer-less
+    Provider->>Route: onFinish with text, steps, toolCalls, aborted
+    alt aborted
+        Route->>DB: nothing written (stream_aborted)
+    else no text and no tool history
+        Route->>DB: EMPTY_TURN_PERSIST_NOTICE row (no_content)
+    else answer or tool history
+        Route->>DB: persistAssistantTurn writes the real rows
+        opt the write throws
+            Route->>DB: ASSISTANT_SAVE_FAILED_NOTICE row
+        end
+        opt tool rows, no text, no direct-render tool
+            Route->>DB: EMPTY_TURN_PERSIST_NOTICE row after the tool rows
+        end
+    end
+```
+
+Caption: what `onFinish` writes for each outcome. The live notice and the persisted notice are separate; the live one is specific, the persisted one states the shared fact.
+
+- `incompleteTurnReason()` returns `stream_aborted` (nothing written, because an aborted run may hold a tool call without its result), or `no_content` when there is no text and no tool history. A turn with tool calls is never `no_content`, so its tool rows are kept.
+- `turnNeedsEmptyNotice()` decides whether tool rows need a trailing notice row. It applies only to text-free turns with no direct-render tool.
+- `persistAssistantTurn()` keeps the one-row versus per-step split (#977). If the write throws, it logs and writes `ASSISTANT_SAVE_FAILED_NOTICE` instead. That fallback fails safely: it carries no tool calls and no token usage, and if the second insert also fails there is nothing more to do but log.
+- Notice rows carry `metadata.emptyTurn` or `metadata.assistantSaveFailed`. They contain only plain text, because a tool_use block whose tool_result was never stored throws `AI_MissingToolResultsError` on the next load.
+- The deep-research path has the same rule. `persistDeepResearchFailure` stores the sanitized `Research failed` text, so a failed research run does not reload with no reply.
+
+### Change Guidance for Answer-less Turns
+
+- To add a part type, decide what the thread renders for it. A chunk with no registered renderer is not visible output. Then add it to `classifyChunkVisibility` and to the tests.
+- To add a direct-render tool, add it to `DIRECT_RENDER_TOOL_NAMES` only. The stream notice, the tool-group rendering, and the persistence check all read that one list.
+- Change the copy in `EMPTY_TURN_NOTICES` and `STREAM_ERROR_MESSAGES` together with the matching tests, because the tests assert specific phrases.
+- Keep the step budget and its notice in step. `tests/unit/lib/nexus/chat-step-budget.test.ts` checks that every budget `resolveMaxSteps` can return maps to `step_budget_exhausted`.
+
+**Focused tests**:
+- `lib/streaming/__tests__/empty-turn-notice.test.ts` — chunk buckets, each `classifyEmptyTurn` branch, the narrower non-Nexus rule, notice wording
+- `lib/streaming/__tests__/stream-deadline.test.ts` — `describe('buildAbortAwareResponse — answer-less turns (#1899)')`, `enhanceStreamConfig preserves the calling surface`, and the `onError` replacement test
+- `lib/streaming/__tests__/stream-error-message.test.ts` — error classification order, the "never echo provider text" guarantee
+- `app/api/nexus/chat/__tests__/incomplete-turn.test.ts` — `incompleteTurnReason` keeps a single tool-call step; `turnNeedsEmptyNotice`
+- `app/api/nexus/chat/__tests__/assistant-turn-persistence.test.ts` — the fallback notice row and the guarded second write
+- `tests/e2e/nexus-empty-turn-notice.functional.spec.ts` — browser proof that the notice renders beside the turn's output (mocked network, not a live provider)
+
+**Minimal validation**: `bunx jest --silent lib/streaming/__tests__/empty-turn-notice.test.ts lib/streaming/__tests__/stream-error-message.test.ts lib/streaming/__tests__/stream-deadline.test.ts` covers the stream layer. The persistence check is `bunx jest --silent app/api/nexus/chat/__tests__/incomplete-turn.test.ts app/api/nexus/chat/__tests__/assistant-turn-persistence.test.ts`. The Playwright spec is conditional: run it only when the Thread rendering or notice markup changes, because it needs the full app stack.
+
+**Scope boundary**: the notice is a stream-layer fact. Changes to provider adapter selection, the keep-alive timer, or deferred responses do not need this section's checks unless they touch `buildAbortAwareResponse`.
 
 ### Streaming Service
 
@@ -241,7 +371,7 @@ New routes that stream AI responses should:
 1. **Use provider adapters** (automatic keep-alive)
 2. **For deferred scenarios** (no body initially), use `deferUIMessageStreamResponse`
 3. **Set route `maxDuration`** to match expected execution time
-4. **Handle abort gracefully** — `buildAbortAwareResponse` appends terminal error chunk
+4. **Handle abort gracefully** — `buildAbortAwareResponse` appends a terminal error chunk for an abort or an answer-less turn (see [Answer-less Turns and Error Notices](#answer-less-turns-and-error-notices-1899)); pass `source` through config so the right rule applies
 
 ### Testing Long-Running Streams
 
@@ -260,7 +390,7 @@ New routes that stream AI responses should:
 **From**: `docs/guides/silent-failure-patterns.md`
 
 ```typescript
-// WRONG — data-* counted as visible output, suppresses "empty response" notice
+// WRONG — data-* counted as rendered output, suppresses the empty-turn notice
 controller.enqueue({ type: 'data-keepalive' })
 
 // CORRECT — SSE comment frame, below transport, discarded by parser
