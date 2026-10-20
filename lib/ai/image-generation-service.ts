@@ -12,7 +12,7 @@
 import { experimental_generateImage as generateImage, generateText, type LanguageModel } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { createLogger, generateRequestId } from '@/lib/logger';
@@ -20,7 +20,10 @@ import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
 import { assertSafeFetchUrl } from '@/lib/agents/agent-tools/web-fetch';
 import { safeFetch } from '@/lib/security/safe-fetch';
-import { getGeneratedImageBucket } from '@/lib/ai/generated-image-bucket';
+import {
+  getGeneratedImageBucket,
+  getGeneratedImageS3Client,
+} from '@/lib/ai/generated-image-bucket';
 
 // Type for OpenAI image size
 type OpenAIImageSize = '256x256' | '512x512' | '1024x1024' | '1792x1024' | '1024x1792';
@@ -149,27 +152,6 @@ export async function fetchReferenceImageSafely(
   throw createImageError('NO_IMAGE', 'Too many redirects fetching reference image');
 }
 
-// Cache S3 client to avoid repeated async calls
-let s3ClientCache: S3Client | null = null;
-let s3RegionCache: string | null = null;
-
-// Get or create S3 client (reads region from Settings)
-async function getS3Client(): Promise<S3Client> {
-  if (s3ClientCache) {
-    return s3ClientCache;
-  }
-
-  // Get region from Settings (reads AWS_REGION from database)
-  const s3Config = await Settings.getS3();
-  s3RegionCache = s3Config.region || 'us-west-2';
-
-  s3ClientCache = new S3Client({
-    region: s3RegionCache,
-  });
-
-  log.debug('S3 client initialized', { region: s3RegionCache });
-  return s3ClientCache;
-}
 
 /**
  * Reference image for image editing/generation
@@ -216,6 +198,16 @@ export interface ImageGenerationError {
   message: string;
   retryAfter?: number;
   details?: string;
+  /**
+   * What the model said INSTEAD of producing an image (#1900).
+   *
+   * A Gemini image turn can come back with a perfectly good explanation and no
+   * file — "I can't render recognisable people", "that photo is too low
+   * resolution to upscale". Discarding it turned a usable answer into a generic
+   * 500, so the reply the model actually wrote travels with the error and is
+   * shown to the user.
+   */
+  providerText?: string;
 }
 
 /**
@@ -699,9 +691,13 @@ function extractGeminiImage(
       hasText: Boolean(result.text),
       textLength: result.text?.length ?? 0
     });
+    // The model's own words travel with the error so the user reads its
+    // explanation rather than a generic failure (#1900).
     throw createImageError(
       'NO_IMAGE',
-      'Gemini did not generate an image. Try a different prompt.'
+      'Gemini did not generate an image. Try a different prompt.',
+      undefined,
+      result.text
     );
   }
   for (const file of files) {
@@ -828,7 +824,7 @@ async function storeImageInS3(params: {
   const s3Key = `v2/generated-images/${params.conversationId}/${timestamp}-${sanitizedModelId}.png`;
 
   // Get S3 client (reads region from Settings)
-  const s3Client = await getS3Client();
+  const s3Client = await getGeneratedImageS3Client();
 
   try {
     // Upload to S3
@@ -876,13 +872,17 @@ async function storeImageInS3(params: {
 function createImageError(
   type: ImageGenerationError['type'],
   message: string,
-  retryAfter?: number
+  retryAfter?: number,
+  providerText?: string
 ): Error & ImageGenerationError {
   const error = new Error(message) as Error & ImageGenerationError;
   error.type = type;
   error.message = message;
   if (retryAfter) {
     error.retryAfter = retryAfter;
+  }
+  if (providerText && providerText.trim()) {
+    error.providerText = providerText.trim();
   }
   return error;
 }

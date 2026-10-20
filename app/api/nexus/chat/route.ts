@@ -68,9 +68,14 @@ import {
   getImageRoutingContext,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
+  buildNoImageMessage,
   createImageStreamResponse,
+  createNoImageResponse,
   handleImageGenerationError,
+  respondToImageFailure,
+  persistNoImageExchange,
 } from './image-generation-handler';
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
 
 import {
   generateConversationTitle,
@@ -669,7 +674,7 @@ async function executeStreaming(params: {
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools &&
-    Object.hasOwn(attachmentTools, "searchNexusAttachments");
+    Object.hasOwn(attachmentTools, NEXUS_ATTACHMENT_SEARCH_TOOL_NAME);
   const systemPrompt = buildNexusSystemPrompt({
     skillInstructions,
     skillName,
@@ -1088,18 +1093,91 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
-    const rollbackError = await rollbackFailedImageConversation({
-      attachmentReferences,
+    return respondToImageFailure({
+      error: imageError,
       conversationId,
-      existingConversationId,
-      userId,
-      requestId,
-      log,
-      timer,
+      replyWithExplanation: (explanation) =>
+        respondWithNoImage({
+          explanation,
+          conversationId,
+          conversationTitle,
+          existingConversationId,
+          imagePrompt,
+          persistenceMessages,
+          dbModelId,
+          routingMetadata,
+          requestId,
+          log,
+          timer,
+        }),
+      rollback: () =>
+        rollbackFailedImageConversation({
+          attachmentReferences,
+          conversationId,
+          existingConversationId,
+          userId,
+          requestId,
+          log,
+          timer,
+        }),
+      toErrorResponse: (failure) =>
+        handleImageGenerationError(failure, conversationId, requestId),
     });
-    if (rollbackError) return rollbackError;
-    return handleImageGenerationError(imageError, conversationId, requestId);
   }
+}
+
+/**
+ * Turn a model's text-instead-of-image answer into an ordinary assistant
+ * reply (#1900).
+ *
+ * Throws if the exchange cannot be saved: a reply that vanishes on reload,
+ * over a new conversation left with no messages, is worse than an error, so
+ * the caller rolls back exactly as it does for a failed image save.
+ */
+async function respondWithNoImage(params: {
+  explanation: string;
+  conversationId: string;
+  conversationTitle: string;
+  existingConversationId?: string;
+  imagePrompt: string;
+  persistenceMessages: z.infer<typeof ChatRequestSchema>["messages"];
+  dbModelId: number;
+  routingMetadata: NexusRoutingMetadata;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  timer: (data: Record<string, unknown>) => void;
+}): Promise<Response> {
+  const text = buildNoImageMessage(params.explanation);
+  const lastMessage =
+    params.persistenceMessages[params.persistenceMessages.length - 1];
+  const persistedUser =
+    lastMessage?.role === "user"
+      ? extractUserContent(lastMessage as UIMessage)
+      : {
+          content: params.imagePrompt,
+          parts: [{ type: "text", text: params.imagePrompt }],
+        };
+  await persistNoImageExchange({
+    conversationId: params.conversationId,
+    userContent: persistedUser.content,
+    userParts: persistedUser.parts,
+    assistantText: text,
+    dbModelId: params.dbModelId,
+    routingMetadata: { ...params.routingMetadata },
+  });
+  params.log.info("Image generation returned no image; returning the model's text", {
+    conversationId: params.conversationId,
+    requestId: params.requestId,
+  });
+  params.timer({ status: "success", reason: "no_image", conversationId: params.conversationId });
+  return createNoImageResponse({
+    text,
+    conversationId: params.conversationId,
+    conversationTitle: params.conversationTitle,
+    isNewConversation: !params.existingConversationId,
+    requestId: params.requestId,
+    routingMetadata: { ...params.routingMetadata },
+  });
 }
 
 /**
@@ -1631,6 +1709,8 @@ async function resolveRequestRouting(args: {
   modelFamily: z.infer<typeof nexusModelFamilySchema>;
   manuallyEnabledConnectors: string[];
   manuallyEnabledTools: string[];
+  /** `itemType` of each canonical attachment on the latest message. */
+  attachmentItemTypes: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -1658,6 +1738,11 @@ async function resolveRequestRouting(args: {
     enabledToolNames: args.manuallyEnabledTools,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
+    // The image path reads only image attachments; a PDF or document in the
+    // same message needs the text route's retrieval loop.
+    hasOnlyImageAttachments:
+      !imageContext.hasNonImageFileInput &&
+      args.attachmentItemTypes.every((itemType) => itemType === "image"),
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
     workspace: args.workspace,
   });
@@ -2476,7 +2561,7 @@ async function buildRoutingEnabledTools(params: {
   return [
     ...new Set([
       ...params.enabledTools,
-      ...(requiresAttachmentTools ? ["searchNexusAttachments"] : []),
+      ...(requiresAttachmentTools ? [NEXUS_ATTACHMENT_SEARCH_TOOL_NAME] : []),
       ...(hasDurableRepositoryBinding
         ? ["searchConversationRepositories"]
         : []),
@@ -2668,6 +2753,9 @@ async function resolveChatModel(params: {
     modelFamily: prepared.validationData.modelFamily,
     manuallyEnabledConnectors: prepared.manuallyEnabledConnectors,
     manuallyEnabledTools: prepared.routingEnabledTools,
+    attachmentItemTypes: prepared.attachmentPreflight.resolutions.map(
+      (resolution) => resolution.itemType,
+    ),
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,

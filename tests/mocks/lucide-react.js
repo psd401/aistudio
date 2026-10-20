@@ -24,5 +24,7 @@ module.exports = {
   FileText: () => React.createElement('div', { className: 'mock-file-text', 'data-testid': 'file-text-icon' }),
   FileSpreadsheet: () => React.createElement('div', { className: 'mock-file-spreadsheet', 'data-testid': 'file-spreadsheet-icon' }),
   Presentation: () => React.createElement('div', { className: 'mock-presentation', 'data-testid': 'presentation-icon' }),
+  // Icon used by the Nexus markdown image-unavailable fallback (#1900)
+  ImageOffIcon: () => React.createElement('div', { className: 'mock-image-off', 'data-testid': 'image-off-icon' }),
   // Add other icons as needed
 };

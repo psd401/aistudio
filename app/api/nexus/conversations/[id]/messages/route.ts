@@ -11,7 +11,12 @@ import {
   type MessagePart,
 } from '@/lib/db/drizzle'
 import { getDocumentSignedUrl } from '@/lib/aws/s3-client'
+import {
+  generatedImageKeyPrefix,
+  generatedImageProxyPath,
+} from '@/lib/ai/generated-image-bucket'
 import { decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer'
+import { generatedImageMarkdown } from '@/lib/nexus/generated-image-markdown'
 import {
   buildTemporaryAttachmentMarker,
   parseTemporaryAttachmentMarkers,
@@ -41,7 +46,7 @@ const MAX_CONTENT_LENGTH = 50000
 function isKeyForConversation(s3Key: string, conversationId: string): boolean {
   return (
     s3Key.startsWith(`conversations/${conversationId}/`) ||
-    s3Key.startsWith(`v2/generated-images/${conversationId}/`)
+    s3Key.startsWith(generatedImageKeyPrefix(conversationId))
   )
 }
 
@@ -101,15 +106,38 @@ function convertTextPart(part: MessagePart): ContentPart {
   return { type: 'text', text }
 }
 
+/**
+ * Re-point a stored image part at a URL the browser can still load (#1900).
+ *
+ * A generated image goes to the authenticated proxy, NOT to a freshly signed
+ * URL. `getDocumentSignedUrl` resolves its bucket from the database `S3_BUCKET`
+ * setting, which `generated-image-bucket.ts` warns may differ from the
+ * `DOCUMENTS_BUCKET_NAME` the image was written to — so on a mismatched
+ * deployment every reloaded image was signed against the wrong bucket and 404'd
+ * (#1804 fixed only the edit path). `/api/images/[...key]` signs with
+ * `getGeneratedImageBucket()`, the same resolver `storeImageInS3` uses, and
+ * re-checks ownership on every load instead of handing out a raw presigned URL
+ * that expires in an hour.
+ *
+ * Attachment keys keep the presigned path: the proxy serves generated images
+ * only, and rows stored before this change carry no `s3Key` at all, so their
+ * legacy `imageUrl` remains the fallback.
+ */
 async function convertImagePart(
   part: MessagePart,
   conversationId: string
 ): Promise<ContentPart | null> {
   const s3Key = part.s3Key
+  if (s3Key && s3Key.startsWith(generatedImageKeyPrefix(conversationId))) {
+    return {
+      type: 'text',
+      text: generatedImageMarkdown(generatedImageProxyPath(s3Key), part.altText),
+    }
+  }
   if (s3Key && isKeyForConversation(s3Key, conversationId)) {
     try {
       const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
-      return { type: 'text', text: `![Generated Image](${freshUrl})` }
+      return { type: 'text', text: generatedImageMarkdown(freshUrl, part.altText) }
     } catch (error) {
       const log = createLogger({ context: 'convertPartToTextContent' })
       log.warn('Failed to refresh presigned URL from s3Key', {
@@ -122,7 +150,7 @@ async function convertImagePart(
     log.warn('Refusing to presign s3Key outside the conversation prefix', { conversationId })
   }
   return part.imageUrl
-    ? { type: 'text', text: `![Generated Image](${part.imageUrl})` }
+    ? { type: 'text', text: generatedImageMarkdown(part.imageUrl, part.altText) }
     : null
 }
 

@@ -15,6 +15,7 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger";
 import { ASSISTANT_SAVE_FAILED_NOTICE } from "@/lib/streaming/empty-turn-notice";
 import { isDirectRenderTool } from "@/lib/tools/direct-render-tools";
 import { repositoryAttachmentLabels } from "@/lib/nexus/repository-attachment-messages";
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search-tool-name";
 import {
   buildTemporaryAttachmentMarker,
   parseTemporaryAttachmentMarkers,
@@ -387,7 +388,7 @@ export async function saveUserMessage(params: {
 /**
  * Convert messages to parts format for AI SDK v5
  */
-const NEXUS_ATTACHMENT_SEARCH_TOOL = "searchNexusAttachments";
+const NEXUS_ATTACHMENT_SEARCH_TOOL = NEXUS_ATTACHMENT_SEARCH_TOOL_NAME;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
