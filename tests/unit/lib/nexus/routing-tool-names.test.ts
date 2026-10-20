@@ -10,7 +10,8 @@ const none = {
   enabledTools: [] as string[],
   requiresAttachmentTools: false,
   hasDurableRepositoryBinding: false,
-  hasUserChosenRepository: false,
+  requestedRepositoryIds: undefined as number[] | undefined,
+  hasStoredDirectBinding: false,
   hasProjectBinding: false,
   hasSkillBinding: false,
 }
@@ -40,16 +41,47 @@ describe("splitRoutingToolNames", () => {
     ])
   })
 
-  it("keeps conversation search required when the user chose a repository", () => {
+  it("keeps conversation search required when this request picks a repository", () => {
     const result = splitRoutingToolNames({
       ...none,
       hasDurableRepositoryBinding: true,
-      hasUserChosenRepository: true,
+      requestedRepositoryIds: [12],
       hasProjectBinding: true,
     })
 
     expect(result.tools).toContain("searchConversationRepositories")
     expect(result.bindingTools).toEqual(["searchProjectRepositories"])
+  })
+
+  it("keeps a stored direct pick when the request sends no selection", () => {
+    const result = splitRoutingToolNames({
+      ...none,
+      hasDurableRepositoryBinding: true,
+      hasStoredDirectBinding: true,
+      hasProjectBinding: true,
+    })
+
+    expect(result.bindingTools).toEqual(["searchProjectRepositories"])
+  })
+
+  /**
+   * Clearing the picker sends `repositoryIds: []`, which removes the stored
+   * direct binding later in the same turn. Routing must not still treat that
+   * stale row as a user choice, or "draw a cat" goes back to a text model.
+   */
+  it("treats a cleared picker as no choice even with a stale direct binding", () => {
+    const result = splitRoutingToolNames({
+      ...none,
+      hasDurableRepositoryBinding: true,
+      requestedRepositoryIds: [],
+      hasStoredDirectBinding: true,
+      hasProjectBinding: true,
+    })
+
+    expect(result.bindingTools).toEqual([
+      "searchConversationRepositories",
+      "searchProjectRepositories",
+    ])
   })
 
   it("never treats a hand-enabled tool or an attachment as binding-only", () => {

@@ -8,15 +8,20 @@ import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search
  * they say nothing about what this request needs. The router treats those
  * binding-only tools as satisfied for an image request: otherwise "draw a cat"
  * in a Project conversation counts as a tool turn and goes to a text model,
- * which cannot produce an image at all. A repository the user chose directly
- * (a `direct` binding or this request's `repositoryIds`), and any tool the user
- * enabled by hand, is never binding-only.
+ * which cannot produce an image at all. A repository the user chose directly,
+ * and any tool the user enabled by hand, is never binding-only.
+ *
+ * "Chose directly" is this request's picker selection when the client sent
+ * one — it replaces the stored `direct` binding later in the turn, so an EMPTY
+ * selection means the user just cleared it. The stored `direct` binding
+ * decides only when the request carries no selection.
  */
 export function splitRoutingToolNames(input: {
   enabledTools: string[];
   requiresAttachmentTools: boolean;
   hasDurableRepositoryBinding: boolean;
-  hasUserChosenRepository: boolean;
+  requestedRepositoryIds: number[] | undefined;
+  hasStoredDirectBinding: boolean;
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
 }): { tools: string[]; bindingTools: string[] } {
@@ -34,8 +39,12 @@ export function splitRoutingToolNames(input: {
       ...skillTools,
     ]),
   ];
+  const hasUserChosenRepository =
+    input.requestedRepositoryIds !== undefined
+      ? input.requestedRepositoryIds.length > 0
+      : input.hasStoredDirectBinding;
   const bindingTools = [
-    ...(input.hasUserChosenRepository ? [] : conversationTools),
+    ...(hasUserChosenRepository ? [] : conversationTools),
     ...projectTools,
     ...skillTools,
   ].filter((tool) => !input.enabledTools.includes(tool));

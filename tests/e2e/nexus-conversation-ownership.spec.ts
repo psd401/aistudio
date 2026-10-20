@@ -7,8 +7,8 @@ import { test, expect } from './fixtures'
  * own by supplying an arbitrary conversationId in the request body. Before the
  * fix, any authenticated user could inject messages into any conversation.
  *
- * Both the standard chat path (setupConversation) and the image-generation
- * path (getOrCreateImageConversation) are covered.
+ * Both the standard chat path and the image-generation path are covered;
+ * both now go through setupConversation.
  *
  * Auth requirement: Two distinct authenticated sessions are needed. Set
  * PLAYWRIGHT_AUTH_ENABLED=true and configure storage-state files for each

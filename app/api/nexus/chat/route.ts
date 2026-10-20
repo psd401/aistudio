@@ -61,7 +61,6 @@ import {
 import {
   extractImagePrompt,
   validateImagePrompt,
-  getOrCreateImageConversation,
   extractReferenceImages,
   extractCanonicalRepositoryImages,
   resolvePreviousGeneratedImageReferences,
@@ -981,6 +980,8 @@ async function handleImageGeneration(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
+  projectId?: string;
+  skillId?: string;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -1010,22 +1011,28 @@ async function handleImageGeneration(params: {
     return validation.error;
   }
 
-  // Determine provider and create/get conversation
+  // Determine provider and create/get conversation. The standard setup, not an
+  // image-only insert: an image request in a Project or Skill conversation now
+  // reaches this path, and the conversation must keep those bindings and pass
+  // the same ownership, project-match and approved-skill checks as any turn.
   const imageProvider = modelConfig.provider === "google" ? "google" : "openai";
-  const convResult = await getOrCreateImageConversation({
-    existingConversationId,
-    imagePrompt,
-    imageProvider,
-    modelId,
+  const convResult = await setupConversation({
+    conversationIdValue: existingConversationId,
+    messages,
     userId,
+    provider: imageProvider,
+    modelId,
     requestId,
+    log,
+    projectId: params.projectId,
+    skillId: params.skillId,
   });
 
   if ("error" in convResult) {
     return convResult.error;
   }
 
-  const { conversationId, title: conversationTitle } = convResult;
+  const { conversationId, conversationTitle } = convResult;
 
   try {
     const bindingError = await bindAttachmentReferencesOrError({
@@ -1570,6 +1577,8 @@ async function routeSpecialModel(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
+  projectId?: string;
+  skillId?: string;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -1590,6 +1599,8 @@ async function routeSpecialModel(params: {
       dbModelId: params.dbModelId,
       userId: params.userId,
       existingConversationId: params.existingConversationId,
+      projectId: params.projectId,
+      skillId: params.skillId,
       requestId: params.requestId,
       timer: params.timer,
       log: params.log,
@@ -2534,8 +2545,10 @@ async function buildRoutingEnabledTools(params: {
   enabledTools: string[];
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
-  requestedRepositoryIds: number[];
+  /** This request's picker selection; undefined when the client sent none. */
+  requestedRepositoryIds?: number[];
 }): Promise<{ tools: string[]; bindingTools: string[] }> {
+  const requestedRepositoryIds = params.requestedRepositoryIds ?? [];
   const attachmentRepositoryIds = params.conversationId
     ? await resolveNexusConversationRepositoryIds({
         ownerId: params.userId,
@@ -2553,16 +2566,17 @@ async function buildRoutingEnabledTools(params: {
     : [];
   const hasDurableRepositoryBinding =
     durableBindings.length > 0 ||
-    params.requestedRepositoryIds.length > 0 ||
+    requestedRepositoryIds.length > 0 ||
     params.hasProjectBinding ||
     params.hasSkillBinding;
   return splitRoutingToolNames({
     enabledTools: params.enabledTools,
     requiresAttachmentTools,
     hasDurableRepositoryBinding,
-    hasUserChosenRepository:
-      params.requestedRepositoryIds.length > 0 ||
-      durableBindings.some((binding) => binding.source === "direct"),
+    requestedRepositoryIds: params.requestedRepositoryIds,
+    hasStoredDirectBinding: durableBindings.some(
+      (binding) => binding.source === "direct",
+    ),
     hasProjectBinding: params.hasProjectBinding,
     hasSkillBinding: params.hasSkillBinding,
   });
@@ -2646,7 +2660,7 @@ async function prepareChatRequest(params: {
     enabledTools,
     hasProjectBinding: !!projectBinding,
     hasSkillBinding: !!data.skillId,
-    requestedRepositoryIds: data.repositoryIds ?? [],
+    requestedRepositoryIds: data.repositoryIds,
   });
   // #1786: routing needs to know an artifact is open BEFORE the classifier runs,
   // so a follow-up like "add a school dropdown" keeps the PSD Data tools. The
@@ -2695,7 +2709,6 @@ async function prepareChatRequest(params: {
 
 function createSpecialModelCompatibilityError(params: {
   isDeepResearchModel: boolean;
-  isImageGenerationModel: boolean;
   hasAttachmentReferences: boolean;
   hasProjectBinding: boolean;
   requestId: string;
@@ -2713,17 +2726,6 @@ function createSpecialModelCompatibilityError(params: {
       JSON.stringify({
         error:
           "Deep Research does not support repository-backed project content. Choose a chat model for this request.",
-        requestId: params.requestId,
-      }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
-  if (params.isImageGenerationModel && params.hasProjectBinding) {
-    params.timer({ status: "error", reason: "image_project_unsupported" });
-    return new Response(
-      JSON.stringify({
-        error:
-          "Image generation does not use project repository context. Choose a chat model for this request.",
         requestId: params.requestId,
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },
@@ -2830,7 +2832,6 @@ async function resolveChatModel(params: {
   );
   const compatibilityError = createSpecialModelCompatibilityError({
     isDeepResearchModel,
-    isImageGenerationModel,
     hasAttachmentReferences: prepared.attachmentPreflight.references.length > 0,
     hasProjectBinding: !!prepared.projectBinding,
     requestId,
@@ -2850,6 +2851,8 @@ async function resolveChatModel(params: {
     dbModelId,
     userId: prepared.userId,
     existingConversationId: prepared.conversationIdValue,
+    projectId: prepared.projectBinding?.projectId,
+    skillId: prepared.skillId,
     requestId,
     timer,
     log,

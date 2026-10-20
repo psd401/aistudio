@@ -17,7 +17,6 @@ import {
   generatedImageProxyPath,
   getGeneratedImageBucket,
 } from "@/lib/ai/generated-image-bucket";
-import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
 import { generatedImageMarkdown } from "@/lib/nexus/generated-image-markdown";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
@@ -332,103 +331,6 @@ export function validateImagePrompt(prompt: string): {
   }
 
   return { valid: true };
-}
-
-/**
- * Create or get image conversation
- */
-export async function getOrCreateImageConversation(params: {
-  existingConversationId?: string;
-  imagePrompt: string;
-  imageProvider: string;
-  modelId: string;
-  userId: number;
-  requestId: string;
-}): Promise<{ conversationId: string; title: string } | { error: Response }> {
-  const {
-    existingConversationId,
-    imagePrompt,
-    imageProvider,
-    modelId,
-    userId,
-    requestId,
-  } = params;
-
-  if (existingConversationId) {
-    const owned = await executeQuery(
-      (db) =>
-        db
-          .select({ id: nexusConversations.id })
-          .from(nexusConversations)
-          .where(
-            and(
-              eq(nexusConversations.id, existingConversationId),
-              eq(nexusConversations.userId, userId),
-            ),
-          )
-          .limit(1),
-      "verifyImageConversationOwnership",
-    );
-    if (!owned || owned.length === 0) {
-      log.warn("Image conversation ownership check failed — access denied", {
-        existingConversationId,
-        userId,
-      });
-      return {
-        error: new Response(
-          JSON.stringify({
-            error: "Conversation not found or access denied",
-            requestId,
-          }),
-          { status: 404, headers: { "Content-Type": "application/json" } },
-        ),
-      };
-    }
-    return {
-      conversationId: existingConversationId,
-      title: "Image Generation",
-    };
-  }
-
-  const cleanedPrompt = imagePrompt.replace(/\s+/g, " ").trim();
-  let title = cleanedPrompt.slice(0, 40).trim();
-  if (cleanedPrompt.length > 40) {
-    title += "...";
-  }
-
-  const now = new Date();
-  const createResult = await executeQuery(
-    (db) =>
-      db
-        .insert(nexusConversations)
-        .values({
-          userId,
-          provider: imageProvider,
-          modelUsed: modelId,
-          title: sanitizeTextForDatabase(title),
-          messageCount: 0,
-          totalTokens: 0,
-          metadata: sql`${safeJsonbStringify({ source: "nexus", type: "image-generation" })}::jsonb`,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: nexusConversations.id }),
-    "createImageConversation",
-  );
-
-  if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
-    log.error("Failed to create image conversation");
-    return {
-      error: new Response(
-        JSON.stringify({ error: "Failed to create conversation" }),
-        { status: 500, headers: { "Content-Type": "application/json" } },
-      ),
-    };
-  }
-
-  const conversationId = createResult[0].id as string;
-  log.info("Created new image conversation", { conversationId });
-  return { conversationId, title };
 }
 
 /**
