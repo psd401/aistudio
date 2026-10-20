@@ -16,6 +16,11 @@ import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search
  * the Skill's, not this request's: `skillPinnedTools` (from the approved
  * skill record, never the URL) marks them binding-only too.
  *
+ * Known limitation (accepted for PR #1950): the request carries tool names,
+ * not where they came from, so a tool the user ALSO picked by hand that the
+ * Skill pins is indistinguishable from the pin and is dropped on an image
+ * turn. Telling them apart needs the client to send provenance.
+ *
  * "Chose directly" is this request's picker selection when the client sent
  * one — it replaces the stored `direct` binding later in the turn, so an EMPTY
  * selection means the user just cleared it. The stored `direct` binding
