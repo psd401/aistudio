@@ -17,14 +17,16 @@ import {
   generatedImageProxyPath,
   getGeneratedImageBucket,
 } from "@/lib/ai/generated-image-bucket";
-import { sanitizeTextForDatabase } from "@/lib/utils/text-sanitizer";
 import { generatedImageMarkdown } from "@/lib/nexus/generated-image-markdown";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import { assertSafeFetchUrl } from "@/lib/agents/agent-tools/web-fetch";
 import { deleteDocumentVersions } from "@/lib/aws/s3-client";
 import { createLogger } from "@/lib/logger";
 import { describeQueryErrorCause } from "@/lib/db/query-error";
-import type { NexusAttachmentImageSource } from "@/lib/nexus/ephemeral-repository-service";
+import {
+  nexusConversationHasNonImageAttachments,
+  type NexusAttachmentImageSource,
+} from "@/lib/nexus/ephemeral-repository-service";
 import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
 import { buildNexusStreamHeaders } from "./stream-headers";
 
@@ -332,103 +334,6 @@ export function validateImagePrompt(prompt: string): {
   }
 
   return { valid: true };
-}
-
-/**
- * Create or get image conversation
- */
-export async function getOrCreateImageConversation(params: {
-  existingConversationId?: string;
-  imagePrompt: string;
-  imageProvider: string;
-  modelId: string;
-  userId: number;
-  requestId: string;
-}): Promise<{ conversationId: string; title: string } | { error: Response }> {
-  const {
-    existingConversationId,
-    imagePrompt,
-    imageProvider,
-    modelId,
-    userId,
-    requestId,
-  } = params;
-
-  if (existingConversationId) {
-    const owned = await executeQuery(
-      (db) =>
-        db
-          .select({ id: nexusConversations.id })
-          .from(nexusConversations)
-          .where(
-            and(
-              eq(nexusConversations.id, existingConversationId),
-              eq(nexusConversations.userId, userId),
-            ),
-          )
-          .limit(1),
-      "verifyImageConversationOwnership",
-    );
-    if (!owned || owned.length === 0) {
-      log.warn("Image conversation ownership check failed — access denied", {
-        existingConversationId,
-        userId,
-      });
-      return {
-        error: new Response(
-          JSON.stringify({
-            error: "Conversation not found or access denied",
-            requestId,
-          }),
-          { status: 404, headers: { "Content-Type": "application/json" } },
-        ),
-      };
-    }
-    return {
-      conversationId: existingConversationId,
-      title: "Image Generation",
-    };
-  }
-
-  const cleanedPrompt = imagePrompt.replace(/\s+/g, " ").trim();
-  let title = cleanedPrompt.slice(0, 40).trim();
-  if (cleanedPrompt.length > 40) {
-    title += "...";
-  }
-
-  const now = new Date();
-  const createResult = await executeQuery(
-    (db) =>
-      db
-        .insert(nexusConversations)
-        .values({
-          userId,
-          provider: imageProvider,
-          modelUsed: modelId,
-          title: sanitizeTextForDatabase(title),
-          messageCount: 0,
-          totalTokens: 0,
-          metadata: sql`${safeJsonbStringify({ source: "nexus", type: "image-generation" })}::jsonb`,
-          createdAt: now,
-          updatedAt: now,
-        })
-        .returning({ id: nexusConversations.id }),
-    "createImageConversation",
-  );
-
-  if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
-    log.error("Failed to create image conversation");
-    return {
-      error: new Response(
-        JSON.stringify({ error: "Failed to create conversation" }),
-        { status: 500, headers: { "Content-Type": "application/json" } },
-      ),
-    };
-  }
-
-  const conversationId = createResult[0].id as string;
-  log.info("Created new image conversation", { conversationId });
-  return { conversationId, title };
 }
 
 /**
@@ -937,6 +842,67 @@ export async function getImageRoutingContext(params: {
       hasPreviousGeneratedImage: false,
     };
   }
+}
+
+/**
+ * Whether every attachment an image turn could need is an image the image
+ * path can read. A PDF or document — beside the image in this message, or
+ * attached in an earlier turn — needs the text route's retrieval loop. Only
+ * queried for a turn that carries an image; nothing else consults it.
+ */
+export async function hasOnlyImageAttachments(params: {
+  imageContext: { hasImageInput: boolean; hasNonImageFileInput: boolean };
+  attachmentItemTypes: string[];
+  conversationId?: string;
+  userId: number;
+}): Promise<boolean> {
+  if (!params.imageContext.hasImageInput) return false;
+  if (params.imageContext.hasNonImageFileInput) return false;
+  if (!params.attachmentItemTypes.every((itemType) => itemType === "image")) {
+    return false;
+  }
+  if (!params.conversationId) return true;
+  return !(await nexusConversationHasNonImageAttachments({
+    ownerId: params.userId,
+    conversationId: params.conversationId,
+  }));
+}
+
+/** Longest prompt any configured image provider accepts (DALL·E 3). */
+const MAX_IMAGE_PROMPT_CHARS = 4000;
+
+const promptGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * The prompt an image model receives in a Project or Skill conversation.
+ *
+ * The text path puts the Project's instructions and the Skill's SKILL.md in
+ * the system prompt; an image model has no system prompt, so without this an
+ * image request silently ignored brand style, audience or format rules. The
+ * user's own request comes first and is never cut. The instructions follow
+ * and are clipped (by grapheme, never mid-emoji) to the room left under the
+ * smallest provider limit, so a long SKILL.md cannot make the request fail.
+ */
+export function buildBoundImagePrompt(
+  prompt: string,
+  sources: Array<{ label: string; instructions?: string | null }>,
+): string {
+  const blocks = sources
+    .map(({ label, instructions }) => ({ label, text: instructions?.trim() ?? "" }))
+    .filter(({ text }) => text.length > 0)
+    .map(({ label, text }) => `${label}:\n${text}`);
+  if (blocks.length === 0) return prompt;
+  const header = "\n\nApply these instructions where they affect the image.\n\n";
+  const room = MAX_IMAGE_PROMPT_CHARS - prompt.length - header.length;
+  if (room <= 0) return prompt;
+  const instructions = blocks.join("\n\n");
+  if (instructions.length <= room) return `${prompt}${header}${instructions}`;
+  let clipped = "";
+  for (const { segment } of promptGraphemes.segment(instructions)) {
+    if (clipped.length + segment.length > room - 1) break;
+    clipped += segment;
+  }
+  return `${prompt}${header}${clipped.trimEnd()}…`;
 }
 
 /**

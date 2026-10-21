@@ -30,7 +30,9 @@ import {
   extractImagePrompt,
   validateImagePrompt,
   extractReferenceImages,
+  buildBoundImagePrompt,
   getImageRoutingContext,
+  hasOnlyImageAttachments,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
   extractCanonicalRepositoryImages,
@@ -594,5 +596,104 @@ describe('handleImageGenerationError', () => {
     const body = getLastBody();
     expect(body.code).toBe('INVALID_ATTACHMENT');
     expect(String(body.error)).not.toContain('private storage detail');
+  });
+});
+
+/**
+ * The image path reads only image attachments. An image request whose turn
+ * also needs a PDF or document — in this message or attached earlier — must
+ * keep the text route, or the document is silently ignored (Codex, #1950).
+ */
+describe('hasOnlyImageAttachments', () => {
+  const OWNED_CONVO = '8a1b19b2-2c21-4a02-9e8d-8b2c0c2a61ff';
+  const imageOnly = { hasImageInput: true, hasNonImageFileInput: false };
+
+  beforeEach(() => {
+    mockExecuteQuery.mockReset();
+  });
+
+  it('is true for an image-only message in a new conversation', async () => {
+    await expect(hasOnlyImageAttachments({
+      imageContext: imageOnly, attachmentItemTypes: ['image'], userId: 42,
+    })).resolves.toBe(true);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
+  });
+
+  it('is false for a message without an image', async () => {
+    await expect(hasOnlyImageAttachments({
+      imageContext: { hasImageInput: false, hasNonImageFileInput: false },
+      attachmentItemTypes: [], conversationId: OWNED_CONVO, userId: 42,
+    })).resolves.toBe(false);
+    expect(mockExecuteQuery).not.toHaveBeenCalled();
+  });
+
+  it('is false when a PDF rides along inline or as an attachment', async () => {
+    await expect(hasOnlyImageAttachments({
+      imageContext: { hasImageInput: true, hasNonImageFileInput: true },
+      attachmentItemTypes: [], userId: 42,
+    })).resolves.toBe(false);
+    await expect(hasOnlyImageAttachments({
+      imageContext: imageOnly, attachmentItemTypes: ['image', 'document'], userId: 42,
+    })).resolves.toBe(false);
+  });
+
+  it('is false when an earlier turn attached a document', async () => {
+    mockExecuteQuery.mockResolvedValue([{ id: 7 }]);
+
+    await expect(hasOnlyImageAttachments({
+      imageContext: imageOnly, attachmentItemTypes: ['image'],
+      conversationId: OWNED_CONVO, userId: 42,
+    })).resolves.toBe(false);
+  });
+
+  it('is true when every earlier attachment was an image', async () => {
+    mockExecuteQuery.mockResolvedValue([]);
+
+    await expect(hasOnlyImageAttachments({
+      imageContext: imageOnly, attachmentItemTypes: ['image'],
+      conversationId: OWNED_CONVO, userId: 42,
+    })).resolves.toBe(true);
+  });
+});
+
+/**
+ * An image model has no system prompt, so a Project's instructions or a
+ * Skill's SKILL.md must travel in the prompt itself (Codex, #1950).
+ */
+describe('buildBoundImagePrompt', () => {
+  it('returns the prompt unchanged with no instructions', () => {
+    expect(buildBoundImagePrompt('A cat', [])).toBe('A cat');
+    expect(buildBoundImagePrompt('A cat', [{ label: 'Project "P"', instructions: '  ' }]))
+      .toBe('A cat');
+  });
+
+  it('appends Project and Skill instructions after the request', () => {
+    const prompt = buildBoundImagePrompt('A cat', [
+      { label: 'Project "Brand"', instructions: 'Use navy and gold.' },
+      { label: 'Skill "Posters"', instructions: 'Portrait layout.' },
+    ]);
+
+    expect(prompt.startsWith('A cat\n\nApply these instructions')).toBe(true);
+    expect(prompt).toContain('Project "Brand":\nUse navy and gold.');
+    expect(prompt).toContain('Skill "Posters":\nPortrait layout.');
+  });
+
+  it('keeps the request whole and clips instructions to the provider limit', () => {
+    const request = 'A cat '.repeat(100).trim();
+    const prompt = buildBoundImagePrompt(request, [
+      { label: 'Skill "Long"', instructions: '👩‍👩‍👧 rule. '.repeat(1000) },
+    ]);
+
+    expect(prompt.startsWith(request)).toBe(true);
+    expect(prompt.length).toBeLessThanOrEqual(4000);
+    expect(prompt.endsWith('…')).toBe(true);
+    // Never cut through the family emoji's zero-width joiners.
+    expect(prompt).not.toMatch(/\u200D…$/);
+  });
+
+  it('sends the request alone when it already fills the limit', () => {
+    const request = 'x'.repeat(4000);
+    expect(buildBoundImagePrompt(request, [{ label: 'Project "P"', instructions: 'Rule.' }]))
+      .toBe(request);
   });
 });

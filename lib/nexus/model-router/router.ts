@@ -84,14 +84,18 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
  * required only in the bookkeeping sense — nothing has to CALL it. Treating its
  * presence as "this turn needs a tool loop" is what sent "make this photo into
  * a cartoon" to a text model that cannot produce an image at all, which then
- * told the user images were impossible.
+ * told the user images were impossible. Only when the message itself carries
+ * an image (`hasImageInput`) and nothing else (`hasOnlyImageAttachments`): the
+ * tool is also required for a PDF or a document — attached earlier or beside
+ * the image — which the image path cannot read, so "draw a diagram of the
+ * attached report" keeps the text route and its retrieval loop.
  *
- * Only when the message itself carries an image (`hasImageInput`) and nothing
- * else (`hasOnlyImageAttachments`): the tool is also required for a PDF or a
- * document — attached earlier or beside the image — which the image path
- * cannot read, so "draw a diagram of the attached report" keeps the text route
- * and its retrieval loop. Every OTHER required tool (repository,
- * project, skill, web search) really does need a caller and is never dropped.
+ * Tools present only because the conversation is bound to a Project, Skill or
+ * Assistant (`bindingToolNames`) are added to every turn, so they say nothing
+ * about what this request needs; the image model never reads the repository
+ * and a text model cannot draw, so they are dropped too. A repository the user
+ * chose directly is never binding-only, so "draw a chart of the repo I picked"
+ * keeps the text route #1840's review round 5 required.
  *
  * Runs once, right after classification and before anything reads the list.
  * Mutates in place: `requiredTools` is the turn's single live list.
@@ -99,15 +103,20 @@ const TIER_RANK: Record<NexusRouterTier, number> = { light: 1, medium: 2, high: 
 function dropImagePathSatisfiedTools(
   decision: NexusClassifierDecision,
   requiredTools: string[],
-  input: { hasImageInput?: boolean; hasOnlyImageAttachments?: boolean }
+  context: {
+    hasImageInput?: boolean
+    hasOnlyImageAttachments?: boolean
+    bindingToolNames?: string[]
+  }
 ): void {
-  if (
-    decision.intent !== "image" ||
-    !input.hasImageInput ||
-    !input.hasOnlyImageAttachments
-  ) return
-  const index = requiredTools.indexOf(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
-  if (index !== -1) requiredTools.splice(index, 1)
+  if (decision.intent !== "image") return
+  const satisfied = new Set(context.bindingToolNames ?? [])
+  if (context.hasImageInput && context.hasOnlyImageAttachments) {
+    satisfied.add(NEXUS_ATTACHMENT_SEARCH_TOOL_NAME)
+  }
+  for (let index = requiredTools.length - 1; index >= 0; index--) {
+    if (satisfied.has(requiredTools[index])) requiredTools.splice(index, 1)
+  }
 }
 
 /**
@@ -420,6 +429,13 @@ interface RouteNexusRequestArgs {
   requestedFamily: NexusModelFamily
   enabledConnectorIds: string[]
   enabledToolNames?: string[]
+  /**
+   * The subset of `enabledToolNames` present only because the conversation is
+   * bound to a Project, Skill or Assistant — added to every turn, so not a
+   * statement of what this request needs. Dropped from an image turn's
+   * required tools (see `dropImagePathSatisfiedTools`).
+   */
+  bindingToolNames?: string[]
   userId: number
   hasImageInput?: boolean
   /**
