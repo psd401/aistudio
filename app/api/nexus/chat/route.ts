@@ -1011,35 +1011,50 @@ async function setupImageConversation(params: {
     skillId: params.bindings.skillId,
   });
   if ("error" in convResult) return convResult;
-  // Attachments first, as `prepareConversationRepositories` does: a rejected
-  // attachment must not leave this turn's repository selections committed.
-  const attachmentError = await bindAttachmentReferencesOrError({
-    ownerId: params.userId,
-    conversationId: convResult.conversationId,
-    references: params.attachmentReferences,
-    conversationCreated: convResult.created,
-    requestId: params.requestId,
-    timer: params.timer,
-    log: params.log,
-  });
-  if (attachmentError) return { error: attachmentError };
-  const repositoryBindingError = await persistConversationRepositoryBindings({
-    conversationId: convResult.conversationId,
-    userId: params.userId,
-    requestedRepositoryIds: params.bindings.requestedRepositoryIds,
-    projectBinding: params.bindings.projectBinding,
-    skillId: convResult.skillId,
-    requestId: params.requestId,
-  });
-  if (repositoryBindingError) {
-    // A conversation this turn just created never reaches the client; leave
-    // no empty row in the list, exactly as the standard path compensates.
-    if (convResult.created) {
-      await rollbackNewNexusAttachmentConversation({
-        ownerId: params.userId,
+  // A conversation this turn just created never reaches the client unless the
+  // turn succeeds, so any failure from here on — returned or thrown — removes
+  // it, exactly as the standard path compensates a failed first turn.
+  const rollbackIfCreated = async (): Promise<void> => {
+    if (!convResult.created) return;
+    await rollbackNewNexusAttachmentConversation({
+      ownerId: params.userId,
+      conversationId: convResult.conversationId,
+    });
+  };
+  let repositoryBindingError: Response | null;
+  try {
+    // Attachments first, as `prepareConversationRepositories` does: a rejected
+    // attachment must not leave this turn's repository selections committed.
+    // A returned error here has already compensated a new conversation.
+    const attachmentError = await bindAttachmentReferencesOrError({
+      ownerId: params.userId,
+      conversationId: convResult.conversationId,
+      references: params.attachmentReferences,
+      conversationCreated: convResult.created,
+      requestId: params.requestId,
+      timer: params.timer,
+      log: params.log,
+    });
+    if (attachmentError) return { error: attachmentError };
+    repositoryBindingError = await persistConversationRepositoryBindings({
+      conversationId: convResult.conversationId,
+      userId: params.userId,
+      requestedRepositoryIds: params.bindings.requestedRepositoryIds,
+      projectBinding: params.bindings.projectBinding,
+      skillId: convResult.skillId,
+      requestId: params.requestId,
+    });
+  } catch (error) {
+    await rollbackIfCreated().catch((cleanupError: unknown) => {
+      params.log.error("Failed to compensate a failed image conversation setup", {
         conversationId: convResult.conversationId,
+        error: cleanupError instanceof Error ? cleanupError.message : "Unknown cleanup error",
       });
-    }
+    });
+    throw error;
+  }
+  if (repositoryBindingError) {
+    await rollbackIfCreated();
     return { error: repositoryBindingError };
   }
   return {
