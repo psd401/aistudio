@@ -930,20 +930,19 @@ async function persistGeneratedImage(params: {
 }
 
 async function rollbackFailedImageConversation(params: {
-  attachmentReferences: NexusAttachmentReference[];
+  /**
+   * This turn created the conversation. Every such conversation is removed on
+   * failure — with or without attachments — because the client never gets its
+   * id, and a Project/Skill one also carries repository bindings.
+   */
+  created: boolean;
   conversationId: string;
-  existingConversationId?: string;
   userId: number;
   requestId: string;
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
 }): Promise<Response | null> {
-  if (
-    params.existingConversationId ||
-    params.attachmentReferences.length === 0
-  ) {
-    return null;
-  }
+  if (!params.created) return null;
   try {
     await rollbackNewNexusAttachmentConversation({
       ownerId: params.userId,
@@ -992,7 +991,12 @@ async function setupImageConversation(params: {
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
 }): Promise<
-  | { conversationId: string; conversationTitle: string; skillId?: string }
+  | {
+      conversationId: string;
+      conversationTitle: string;
+      created: boolean;
+      skillId?: string;
+    }
   | { error: Response }
 > {
   const convResult = await setupConversation({
@@ -1041,6 +1045,7 @@ async function setupImageConversation(params: {
   return {
     conversationId: convResult.conversationId,
     conversationTitle: convResult.conversationTitle,
+    created: convResult.created,
     skillId: convResult.skillId,
   };
 }
@@ -1200,9 +1205,8 @@ async function handleImageGeneration(params: {
         }),
       rollback: () =>
         rollbackFailedImageConversation({
-          attachmentReferences,
+          created: convResult.created,
           conversationId,
-          existingConversationId,
           userId,
           requestId,
           log,
