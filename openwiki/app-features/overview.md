@@ -28,6 +28,7 @@ openwiki:
     - actions/db/atrium/comments.ts
     - actions/db/atrium/publish-document.ts
     - lib/nexus/model-router/router.ts
+    - lib/nexus/routing-tool-names.ts
     - lib/nexus/model-router/types.ts
     - lib/nexus/model-router/psd-data-connector.ts
     - lib/nexus/workspace-routing-contract.ts
@@ -517,6 +518,61 @@ The saved reply is an ordinary assistant text message with `generationType: "ima
 
 **Minimal validation**: `bunx jest --silent tests/unit/nexus-generated-image-serving.test.ts tests/unit/nexus-no-image-result.test.ts tests/unit/nexus-generated-image-markdown.test.ts tests/unit/markdown-image-fallback.test.tsx`
 
+#### Image Turns in Project and Skill Conversations (#1950)
+
+An image request in a conversation bound to a Project, Skill, or Assistant used to be refused, or sent to a text model that cannot draw. The binding adds repository search tools to every turn, so "draw a cat" looked like a tool turn. Since #1950 these turns go to the image model and keep their bindings.
+
+**Binding-only tools.** `splitRoutingToolNames()` in `lib/nexus/routing-tool-names.ts` returns `tools` (the routing tools, unchanged) and `bindingTools` (the tools present only because of a binding):
+- `searchProjectRepositories` and `searchSkillRepositories` are binding-only whenever their binding exists.
+- `searchConversationRepositories` is binding-only unless the user chose a repository. When the request carries `repositoryIds`, that selection decides, and an empty list means the picker was cleared. The stored `direct` binding decides only when the request sends none.
+- A Skill's pinned `allowed-tools` arrive as `enabledTools`. `skillPinnedTools()` in `app/api/nexus/chat/route.ts` reads them from the approved skill record, using the request's `skillId` or, after the first turn, the conversation's stored skill. They are binding-only.
+- Known limitation: a tool the user also picks by hand that the Skill pins looks the same as the pin, so it is treated as binding-only. Telling them apart needs client-sent provenance.
+
+`resolveRequestRouting()` in `app/api/nexus/chat/route.ts` passes `bindingTools` to the router as `bindingToolNames`.
+
+**Routing decision.** `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` runs once, right after classification and before anything reads `requiredTools`. For an `image` intent it removes binding-only tools and, under the attachment rule below, `searchNexusAttachments`. Non-image intents are untouched.
+
+```mermaid
+flowchart TD
+    A[image intent with required tools] --> B[drop binding-only tools]
+    B --> C{image in message and only image attachments?}
+    C -- yes --> D[drop searchNexusAttachments]
+    C -- no --> E{requiredTools empty?}
+    D --> E
+    E -- yes --> F[image specialist via selectsImageSpecialist]
+    E -- no --> G[tier-aware text routing]
+```
+
+Caption: the image specialist is chosen only when no required tool remains. A user-chosen repository keeps the turn on the text route.
+
+**Only image attachments reach the image path.** `hasOnlyImageAttachments()` in `app/api/nexus/chat/image-generation-handler.ts` is true only when the message carries an image, has no non-image inline file, every current attachment is an image, and, for an existing conversation, `nexusConversationHasNonImageAttachments()` in `lib/nexus/ephemeral-repository-service.ts` finds no earlier document. That query runs only for turns that carry an image. A PDF attached in an earlier turn keeps "draw a diagram of the attached report" on the text route, which can retrieve it.
+
+**Conversation setup.** An image turn no longer inserts its own conversation row. `setupImageConversation()` in `app/api/nexus/chat/route.ts` calls the standard `setupConversation()`, which applies the same ownership, Project-match, approved-skill, and skill-conflict checks as any turn. It then binds attachments first and writes repository bindings through `persistConversationRepositoryBindings()`, the function the text path also uses from `prepareConversationRepositories()`. Attachments come first so a rejected attachment does not leave repository selections committed. The bindings are stored because the client drops `skillId` from the URL after the first turn, so the next text turn can route only from durable rows.
+
+If this turn created the conversation, any failure after creation, returned or thrown, removes it through `rollbackFailedImageConversation()`. The client never receives the id of a failed new conversation. An existing conversation is never removed.
+
+**Prompt composition.** `boundImagePrompt()` in `app/api/nexus/chat/route.ts` calls `buildBoundImagePrompt()` in `image-generation-handler.ts`. The text path puts Project instructions and the Skill's SKILL.md in a system prompt, and an image model has none. The provider therefore receives the user's request first, followed by "Apply these instructions where they affect the image." and a labelled block for each source. The total stays within 4,000 characters, the smallest provider limit, and instructions are clipped by grapheme. The persisted user message keeps the user's own words.
+
+**Invariants**
+- A Project-bound image request reaches the image specialist. The former `image_project_unsupported` 400 was removed.
+- A user-chosen repository keeps an image turn on the text route, so "draw a chart of the repo I picked" still retrieves.
+- The image model never reads repository content, so a bound image request is generated without it. A text model cannot produce an image at all, so this is the chosen trade-off.
+
+**Key Sources**:
+- `/lib/nexus/routing-tool-names.ts` — `splitRoutingToolNames()`, binding-only classification
+- `/lib/nexus/model-router/router.ts` — `dropImagePathSatisfiedTools()`, `selectsImageSpecialist()`
+- `/app/api/nexus/chat/route.ts` — `buildRoutingEnabledTools()`, `skillPinnedTools()`, `setupImageConversation()`, `persistConversationRepositoryBindings()`, `boundImagePrompt()`
+- `/app/api/nexus/chat/image-generation-handler.ts` — `hasOnlyImageAttachments()`, `buildBoundImagePrompt()`
+- `/lib/nexus/ephemeral-repository-service.ts` — `nexusConversationHasNonImageAttachments()`
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/routing-tool-names.test.ts` — Binding-only classification: Project and Skill tools, a request's picker against a stored direct binding, a cleared picker, hand-enabled tools and attachments that are never binding-only, and Skill-pinned tools.
+- `lib/nexus/model-router/__tests__/router.test.ts` — `defineNexusModelRouterBoundImageSuite` (a Project-bound image request reaches the image specialist, a binding-only tool stays required for a non-image turn, a user-chosen repository keeps the text route) and `defineNexusModelRouterImageAttachmentSuite` (a non-image attachment keeps an image turn on the text model).
+- `tests/unit/api/nexus/image-generation-handler.test.ts` — `hasOnlyImageAttachments` (an earlier document blocks the image path) and `buildBoundImagePrompt` (no instructions, both blocks appended, clipping within the limit).
+- `tests/e2e/nexus-bound-image.functional.spec.ts` — Gated flow `nexus-bound-image` (listed in `.psd/verify.json`): a Project chat's image request returns 200, the image decodes from `/api/images/...`, and a text follow-up succeeds. It is skipped unless an image-provider key is set (`GOOGLE_API_KEY` or `OPENAI_API_KEY`, or `E2E_IMAGE_GENERATION=true`) and the authenticated dev server is running.
+
+**Minimal validation**: `bunx jest --silent tests/unit/lib/nexus/routing-tool-names.test.ts tests/unit/api/nexus/image-generation-handler.test.ts lib/nexus/model-router/__tests__/router.test.ts`
+
 ### Attachments (#1735)
 
 File attachments (documents and images) are handled through a unified adapter system shared across Nexus, decision capture, and Assistant Architect. The system supports both inline content and repository-backed canonical references.
@@ -622,9 +678,9 @@ While an **editable artifact** is bound to the turn, the router raises the tier 
 
 **Min-Tier Eligibility**: The candidate sweep (`[tier, medium, light, high]`) prefers accessible light models over high ones. To reach `high` instead when the floor is `medium`, the floor is passed as a hard minimum that makes below-floor models ineligible. Function-calling ability still outranks tier (a model that cannot invoke tools is useless regardless), and the floor is dropped for the final attempt so it never becomes a new way to fail a turn.
 
-**Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other.
+**Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other. Binding-only tools are dropped before this check (see [Image Turns in Project and Skill Conversations](#image-turns-in-project-and-skill-conversations-1950)), so they do not count as input tools.
 
-**Attached images are not a retrieval need** (#1900): `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` removes `searchNexusAttachments` (`NEXUS_ATTACHMENT_SEARCH_TOOL_NAME`) from the required tools when the intent is `image`, the latest message has an image, and every attachment is an image (`hasOnlyImageAttachments`, computed in `resolveRequestRouting()` in `app/api/nexus/chat/route.ts`). The image route reads those bytes and passes them to the specialist, so "make this photo a cartoon" stays on the image model. A PDF or document in the same message keeps the tool and the text route. Every other required tool still counts as a real input tool, and only that one is dropped.
+**Attached images are not a retrieval need** (#1900, extended in #1950): `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` removes `searchNexusAttachments` (`NEXUS_ATTACHMENT_SEARCH_TOOL_NAME`) from the required tools when the intent is `image` and the turn carries an image with only image attachments (`hasOnlyImageAttachments`, computed in `resolveRequestRouting()` in `app/api/nexus/chat/route.ts`). The image route reads those bytes and passes them to the specialist, so "make this photo a cartoon" stays on the image model. A PDF or document in the same message, or attached in an earlier turn, keeps the tool and the text route. The same function drops binding-only tools; that rule is separate, and the attachment rule removes only `searchNexusAttachments`.
 
 The constant lives in `lib/nexus/attachment-search-tool-name.ts`. The router, the chat route, the chat helpers, and `createNexusAttachmentTools()` all import it, so a rename cannot leave one copy behind.
 
