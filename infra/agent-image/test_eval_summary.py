@@ -812,7 +812,12 @@ class EvalAutomationContractTests(unittest.TestCase):
             "--source-commit \"${{ steps.candidate.outputs.source_commit }}\"",
             workflow,
         )
-        self.assertIn("uses: actions/checkout@v7\n        with:\n          ref: dev", workflow)
+        # actions/checkout is SHA-pinned (psd-dev-standards standards/06 §4);
+        # the contract is that the harness checkout is the dev branch.
+        self.assertRegex(
+            workflow,
+            r"uses: actions/checkout@[0-9a-f]{40} # v[\d.]+\n        with:\n          ref: dev",
+        )
         self.assertIn('harness_commit="$(git rev-parse HEAD)"', workflow)
         self.assertIn(
             '--eval-harness-commit "${{ steps.harness.outputs.commit }}"',
