@@ -879,9 +879,9 @@ AI Studio uses GitHub Actions for continuous integration and deployment. Non-tri
 
 | Workflow | Reusable Source | Purpose |
 |----------|-----------------|---------|
-| `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@main` | AI-assisted PR review |
-| `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@main` | Automated documentation regeneration |
-| `psd-ci.yml` | `PSD401/.github/.github/workflows/reusable-psd-ci.yml@main` | Org-standard CI gate (check `psd-ci / psd-ci`) |
+| `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | AI-assisted PR review |
+| `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | Automated documentation regeneration |
+| `psd-ci.yml` | `PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | Org-standard CI gate (check `psd-ci / psd-ci`) |
 
 The `psd-ci.yml` caller passes no secrets and sets `build-command` to empty, so the gate runs install, lint, typecheck, and `test:ci` without `next build` or `AUTH_*` environment. Its install command mirrors the root install plus the `infra/lambdas/agent-router` and `infra/lambdas/agent-cron` installs, because those Lambdas resolve AWS SDK dependencies from their own `package.json`; a root-only install fails typecheck. The Postgres-backed suites and the production auth build remain in `ci.yml`. The Claude review caller passes only the one secret the reusable workflow reads, `BEDROCK_API_KEY`, by name instead of `secrets: inherit`, so the review job does not receive every other org and repo secret. The `claude-review` job is skipped for `dependabot[bot]` (Dependabot cannot grant `id-token: write` to the reusable), so a sibling job `claude-review-dependabot` with the same check name runs only for Dependabot, with empty `permissions` and no secrets, and calls the no-op skip reusable. A skipped job alone reports only `claude-review` and would never satisfy the required `claude-review / claude-review` check on production rulesets. The OpenWiki caller follows the same rule with two named secrets: `BEDROCK_API_KEY` for the model and `PSD_AUTOMATION_APP_PRIVATE_KEY` for the psd-automation GitHub App that opens and merges the docs PR. Keep new callers on explicit secret names; pass only the secrets the reusable workflow actually reads.
 
@@ -889,7 +889,7 @@ The `psd-ci.yml` caller passes no secrets and sets `build-command` to empty, so 
 
 Recent workflow changes establish conventions to follow when editing or adding workflows:
 
-- **Pin third-party actions to commit SHAs.** `ci.yml`, `claude.yml`, `agent-eval-l2.yml`, and `agent-eval-nightly.yml` pin actions such as `aws-actions/configure-aws-credentials`, `aws-actions/amazon-ecr-login`, `docker/setup-qemu-action`, and `anthropics/claude-code-action` to a full SHA with the release as a trailing comment. Not every action is pinned yet (for example `actions/github-script@v9` is still a tag). The org security-scan call (`security-scan.yml`) and the org `psd-ci` call (`psd-ci.yml`) are deliberately left on `@main` and marked with a zizmor ignore, so central fixes propagate.
+- **Pin every `uses:` reference to a commit SHA.** Every live `uses:` line in `.github/workflows/` (first-party actions, third-party actions, and the org reusable workflows) is a full 40-character SHA with the release as a trailing comment, for example `actions/checkout@3d3c42e5…  # v7.0.1`. The org reusable callers (`psd-ci.yml`, `claude-code-review.yml`, `security-scan.yml`, `openwiki-update.yml`) are pinned to the `PSD401/.github` v1.0.0 SHA rather than `@main`, so an org-side fix reaches this repository only when that pin is bumped in every caller. The earlier `@main` exception with zizmor ignores has been removed. A commented-out example (`codecov/codecov-action@v3` in `ci.yml`) is the only tag left. The eval-harness contract test `EvalAutomationContractTests` in `infra/agent-image/test_eval_summary.py` checks that the eval workflows' checkout is SHA-pinned and checks out `dev`, so keep those lines in the expected shape when editing them.
 - **Pass expressions to scripts through `env:`, not inline interpolation.** `sdk-version-guard.yml` previously interpolated `${{ steps.version-check.outputs.* }}` and `${{ github.base_ref }}` directly into `run:` and `script:` bodies, which is a template-injection risk. The steps now declare those values in a step-level `env:` block and read them as shell variables or `process.env`. Use the same pattern for any new step that handles branch names, PR fields, or step outputs.
 - **Secret scanning uses a reviewed baseline.** The root `.gitleaksignore` lists fingerprints of reviewed historical findings (documentation placeholders, test fixtures, and one SQL column name). Its header states that anything not listed still fails `security-scan.yml`. Do not add fingerprints for new code to make a scan pass; fix the finding or review it explicitly.
 
@@ -903,7 +903,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
+    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       base_branch: dev
     secrets:
@@ -931,72 +931,7 @@ Benefits:
 | `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
 | `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
 | `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
-| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml@main` (install, lint, typecheck, `test:ci`; no build, no secrets) |
-
----
-
-## Key Source Files
-
-| File/Directory | Purpose |
-|----------------|---------|
-| `/infra/bin/infra.ts` | CDK app entrypoint |
-| `/infra/lib/stacks/` | Stack definitions |
-| `/infra/lib/constructs/` | Reusable patterns |
-| `/infra/database/` | Migrations |
-| `/infra/lambdas/` | Lambda function code |
-| `/infra/policies/` | Cedar policies |
-| `/infra/agent-image/` | Agent container |
-| `/.github/workflows/` | CI/CD workflows |
-| `/.gitleaksignore` | Reviewed secret-scan baseline (see [Workflow Hardening Rules](#workflow-hardening-rules)) |
-
----
-
-## Related Concepts
-
-- **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
-- **[data-models/overview.md](../data-models/overview.md)** — Database schema
-- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
-ts for new code to make a scan pass; fix the finding or review it explicitly.
-
-### Caller Pattern
-
-Caller workflows are minimal—granting permissions and passing configuration:
-
-```yaml
-jobs:
-  openwiki:
-    permissions:
-      contents: write
-      pull-requests: write
-    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
-    with:
-      base_branch: dev
-    secrets:
-      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
-      PSD_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.PSD_AUTOMATION_APP_PRIVATE_KEY }}
-```
-
-Benefits:
-- Single source of truth for workflow logic
-- Centralized security and dependency updates
-- Reduced boilerplate in repository callers
-
-### Index of Workflows
-
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| `ci.yml` | Push and PR to main/dev | Lint, typecheck, tests |
-| `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
-| `claude.yml` | Issue and PR comments, issue opened/assigned, PR review submitted | Interactive Claude assistant triggered from GitHub events |
-| `claude-dispatch.yml` | `repository_dispatch` (`claude-dispatch`) | Claude run started by an external dispatch event |
-| `sdk-version-guard.yml` | PRs touching `package.json`, `bun.lock`, or `lib/streaming/**`; weekly schedule; manual | SDK version guard for streaming changes |
-| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule, manual | Regenerate OpenWiki docs; passes only `BEDROCK_API_KEY` and `PSD_AUTOMATION_APP_PRIVATE_KEY` by name |
-| `agent-eval-nightly.yml` | Manual dispatch only (nightly schedule removed 2026-10-07) | Agent skill evaluation baseline (55 regression and capability tasks) |
-| `agent-eval-l2.yml` | Manual dispatch only (weekly schedule removed 2026-10-07) | Live-dev fixture-drift eval run |
-| `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
-| `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
-| `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
-| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml@main` (install, lint, typecheck, `test:ci`; no build, no secrets) |
+| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml` pinned at `1aa5f535` (v1.0.0) (install, lint, typecheck, `test:ci`; no build, no secrets) |
 
 ---
 
