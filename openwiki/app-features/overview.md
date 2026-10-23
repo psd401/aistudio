@@ -1229,6 +1229,40 @@ Atrium objects have both a **visibility level** (who can access) and a **grant l
 - **Internal** — Staff with visibility grants (specific users, groups, roles, buildings, departments, grades)
 - **Public** — Anyone with the link, including anonymous visitors
 
+#### Private-Collection Content (#1958)
+
+**Sources**: `/lib/content/visibility-service.ts`, `/lib/content/errors.ts`, `/actions/db/atrium/set-visibility.ts`, `/actions/db/atrium/get-visibility.ts`, `/components/atrium/VisibilityChip.tsx`
+
+Content filed in an owner-bound (private) collection can only be `private`. `setLevelInTx` rejects every other level by throwing `PrivateCollectionLevelError`, a `ValidationError` subclass that keeps the `CONTENT_VALIDATION` code and 400 status. The rule itself is intentional and enforced on the server; the surrounding UI and error handling were the defect.
+
+```mermaid
+flowchart TD
+    A["Share dialog opens"] --> B["getVisibilityAction (editor only)"]
+    B --> C{"isInPrivateCollection?"}
+    C -->|yes| D["LevelPicker privateOnly: Group / Internal / Public disabled, note shown"]
+    C -->|no| E["All levels enabled"]
+    F["setVisibilityAction save"] --> G{"setLevelInTx: private collection and level != private?"}
+    G -->|yes| H["PrivateCollectionLevelError"]
+    H --> I["Action returns the rule's own message"]
+    G -->|other failure| J["Generic 'Failed to update visibility'"]
+```
+
+*Caption: how the private-collection rule reaches the Share dialog and the save path.*
+
+- **Picker lock**: `getVisibilityAction` sets `inPrivateCollection` on `VisibilityState` only for an editor; a viewer always gets `false` and no lookup. `VisibilityChip` forwards it as `privateOnly` to `LevelPicker`, which disables the wider levels (shown, not hidden) and renders the explanation. `Private` stays selectable so legacy content that is wider than its collection can still be narrowed.
+- **Error surfacing is deliberately narrow**: `setVisibilityAction` returns the message only for `PrivateCollectionLevelError`. Other `ValidationError`s, notably grant-target failures such as "Unknown user id(s)" and "Group(s) not synced", keep the generic message. Echoing them would let an editor probe which `users.id` values exist or which groups are synced.
+- **Lookup**: `visibilityService.isInPrivateCollection(collectionId)` applies the same `content_collections.owner_user_id IS NOT NULL` test as `setLevelInTx`. Unfiled content (`null`) returns `false` without a query.
+- **Invariant**: the disabled picker is a usability layer only; the server check in `setLevelInTx` remains the authority.
+
+**Focused Tests**:
+- `tests/unit/atrium-visibility.test.ts` — `describe("isInPrivateCollection")`: null short-circuits, owner-bound collection is `true`, district collection (null owner) and missing row are `false`
+- `tests/unit/atrium-set-visibility-action.test.ts` — `describe("setVisibilityAction — write")`: "surfaces the private-collection rule's message" and "does NOT surface grant-target validation text"
+- `tests/unit/atrium-get-visibility-action.test.ts` — "reports inPrivateCollection for an editor…" and "reports inPrivateCollection=false and skips the lookup for a non-editor"
+- `tests/components/visibility-chip.test.tsx` — "offers only Private, with a reason…" and "offers every level when the content is not in a private collection"
+- `tests/e2e/atrium-visibility-editor.spec.ts` — "content in a private collection offers only Private, and says why" (seeded by `tests/e2e/fixtures/atrium-visibility-seed.sql`)
+
+**Validation**: `bunx jest --silent tests/unit/atrium-visibility.test.ts tests/unit/atrium-set-visibility-action.test.ts tests/unit/atrium-get-visibility-action.test.ts tests/components/visibility-chip.test.tsx`. The Playwright spec is conditional: run `bun run test:e2e:local tests/e2e/atrium-visibility-editor.spec.ts` only when the seed fixture, the Share dialog DOM, or the `data-testid="visibility-private-collection-note"` element changes.
+
 #### Grant Types
 
 Each grant is `kind:value` where `kind` determines the value format:
