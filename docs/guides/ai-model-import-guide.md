@@ -156,6 +156,13 @@ OpenAI GPT text models (GPT-5.x, GPT-6.x) are also served by Bedrock. Add them w
 - Do **not** list `web_search` or `code_interpreter` capabilities: bedrock-runtime has neither, and the router sends turns that need them to another provider.
 - Image generation models stay on `"provider": "openai"`.
 
+**Default reasoning effort.** After importing, open the model in Admin → Models → Edit and set **Default Reasoning Effort** (the field only appears for these models). It is stored as `provider_metadata.defaultReasoningEffort` and used whenever a request does not choose an effort — today that is every Nexus and Assistant Architect request.
+
+- **Model default** (unset): nothing is sent; the model applies its own default — `none` for GPT-5.4, `medium` for GPT-5.5, 5.6 and 6.x.
+- **None**: no reasoning; first words in about a second. Best for everyday chat and writing.
+- **Low / Medium / High**: more reasoning, slower first token (roughly 3–15s at medium in testing).
+- `minimal` is not offered: Bedrock's GPT models reject it. GPT-6.1 Sol also rejects `none`.
+
 ### Step 2: Search for Current Information
 
 **Required searches:**

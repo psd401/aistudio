@@ -200,7 +200,7 @@ export async function createProviderModelWithCapabilities(
   provider: string,
   modelId: string,
   options?: {
-    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
     backgroundMode?: boolean;
     thinkingBudget?: number;

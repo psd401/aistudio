@@ -58,6 +58,19 @@ export interface NexusCapabilities {
  * Note: Uses snake_case to match external API responses (OpenAI, Anthropic, etc.)
  * These fields are stored as-is in JSONB columns.
  */
+/**
+ * Reasoning effort an admin can set as a model's default. `minimal` is
+ * deliberately absent: Bedrock's GPT models reject it.
+ */
+export type ModelReasoningEffort = "none" | "low" | "medium" | "high";
+
+export const MODEL_REASONING_EFFORTS: readonly ModelReasoningEffort[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+];
+
 export interface ProviderMetadata {
   max_context_length?: number;
   supports_streaming?: boolean;
@@ -67,6 +80,12 @@ export interface ProviderMetadata {
   modelRouterTier?: "light" | "medium" | "high";
   /** Legacy Nexus-specific routing tier retained for backward compatibility. */
   nexusRouterTier?: "light" | "medium" | "high";
+  /**
+   * Reasoning effort used when a request does not choose one. Applies to OpenAI
+   * GPT models on Amazon Bedrock (`lib/ai/bedrock-openai.ts`). Unset = the
+   * model's own default.
+   */
+  defaultReasoningEffort?: ModelReasoningEffort;
   /** Allow additional provider-specific fields */
   [key: string]: unknown;
 }

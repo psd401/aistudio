@@ -27,10 +27,11 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   async createModel(modelId: string, options?: StreamRequest['options']) {
     if (isBedrockOpenAIModel(modelId)) {
       // Effort is bound to the model: the shared streaming path does not
-      // forward getProviderOptions() to streamText(). Medium mirrors the
-      // direct OpenAI adapter's default.
+      // forward getProviderOptions() to streamText(). No fallback here — an
+      // unset effort resolves to the model row's admin default, then to the
+      // model's own default (see createBedrockOpenAIModel).
       return createBedrockOpenAIModel(modelId, {
-        reasoningEffort: options?.reasoningEffort || 'medium'
+        reasoningEffort: options?.reasoningEffort
       });
     }
 

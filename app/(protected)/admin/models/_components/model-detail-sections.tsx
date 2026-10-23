@@ -23,6 +23,11 @@ import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
+import { isBedrockOpenAIModel } from "@/lib/ai/bedrock-openai-model-id"
+import {
+  MODEL_REASONING_EFFORTS,
+  type ModelReasoningEffort,
+} from "@/lib/db/types/jsonb"
 import type { SelectAiModel } from "@/types/db-types"
 import type {
   CostErrors,
@@ -149,6 +154,58 @@ interface ConfigurationPanelProps {
   updateField: UpdateModelField
 }
 
+const MODEL_DEFAULT_EFFORT = "model-default"
+
+const reasoningEffortLabels: Record<ModelReasoningEffort, string> = {
+  none: "None — fastest, no reasoning",
+  low: "Low",
+  medium: "Medium",
+  high: "High — slowest, most thorough",
+}
+
+function DefaultReasoningEffortField({
+  formData,
+  updateField,
+}: {
+  formData: ModelFormData
+  updateField: UpdateModelField
+}) {
+  const current = formData.providerMetadata.defaultReasoningEffort
+  const setDefault = (value: string) => {
+    const { defaultReasoningEffort: _previous, ...rest } = formData.providerMetadata
+    updateField(
+      "providerMetadata",
+      value === MODEL_DEFAULT_EFFORT
+        ? rest
+        : { ...rest, defaultReasoningEffort: value as ModelReasoningEffort }
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <Label htmlFor="defaultReasoningEffort">Default Reasoning Effort</Label>
+      <Select value={current ?? MODEL_DEFAULT_EFFORT} onValueChange={setDefault}>
+        <SelectTrigger id="defaultReasoningEffort">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className={meridianPortalClassName}>
+          <SelectItem value={MODEL_DEFAULT_EFFORT}>Model default</SelectItem>
+          {MODEL_REASONING_EFFORTS.map((effort) => (
+            <SelectItem key={effort} value={effort}>
+              {reasoningEffortLabels[effort]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-xs text-muted-foreground">
+        Used when a request does not choose an effort. Lower effort answers
+        sooner; &ldquo;None&rdquo; starts replying in about a second. Not every
+        model accepts every level (GPT-6.1 Sol rejects None).
+      </p>
+    </div>
+  )
+}
+
 export function ConfigurationPanel({
   formData,
   isNew,
@@ -215,6 +272,14 @@ export function ConfigurationPanel({
             />
           </div>
         </div>
+
+        {formData.provider === "amazon-bedrock" &&
+          isBedrockOpenAIModel(formData.modelId) && (
+            <DefaultReasoningEffortField
+              formData={formData}
+              updateField={updateField}
+            />
+          )}
 
         <div className="space-y-2">
           <Label>Capabilities</Label>

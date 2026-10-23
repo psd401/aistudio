@@ -4,21 +4,22 @@ import { AwsClient } from 'aws4fetch';
 import { Settings } from '@/lib/settings-manager';
 import { getBedrockCredentialProvider, type AwsCredentials } from '@/lib/ai/bedrock-credentials';
 import { createLogger } from '@/lib/logger';
+import { getAIModelByModelId } from '@/lib/db/drizzle';
+import { MODEL_REASONING_EFFORTS, type ModelReasoningEffort } from '@/lib/db/types/jsonb';
+
+export { isBedrockOpenAIModel } from './bedrock-openai-model-id';
 
 const log = createLogger({ module: 'bedrock-openai' });
 
 /**
  * OpenAI GPT models served by Amazon Bedrock (`us.openai.gpt-5.5`,
- * `openai.gpt-6-sol`, ...). These are reached through the OpenAI Responses API
- * that bedrock-runtime exposes at `/openai/v1`, NOT through Converse: Converse
- * rejects `document` blocks for these models (Responses takes `input_file`),
- * and the AI SDK's Bedrock provider only maps reasoning effort for bare
- * `openai.` IDs, never for the `us.` inference profiles these models require.
- *
- * gpt-oss is excluded on purpose — it is not a Responses-API model family and
- * keeps the Converse path.
+ * `openai.gpt-6-sol`, ...; matched by `isBedrockOpenAIModel`). These are reached
+ * through the OpenAI Responses API that bedrock-runtime exposes at
+ * `/openai/v1`, NOT through Converse: Converse rejects `document` blocks for
+ * these models (Responses takes `input_file`), and the AI SDK's Bedrock
+ * provider only maps reasoning effort for bare `openai.` IDs, never for the
+ * `us.` inference profiles these models require.
  */
-const BEDROCK_OPENAI_MODEL_PATTERN = /(?:^|\.)openai\.gpt-(?!oss)/i;
 
 /**
  * bedrock-mantle also serves this API (and adds hosted web search), but we were
@@ -36,11 +37,34 @@ const runtimeBaseURL = (region: string) =>
  */
 const UNUSED_BEARER_VALUE = 'unused';
 
-export function isBedrockOpenAIModel(modelId: string): boolean {
-  return BEDROCK_OPENAI_MODEL_PATTERN.test(modelId);
+export type BedrockOpenAIReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
+
+function isModelReasoningEffort(value: unknown): value is ModelReasoningEffort {
+  return MODEL_REASONING_EFFORTS.includes(value as ModelReasoningEffort);
 }
 
-export type BedrockOpenAIReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+/**
+ * The admin-set default effort for a model row
+ * (`ai_models.provider_metadata.defaultReasoningEffort`), or undefined.
+ *
+ * Fails open to undefined — the model's own default — so a lookup problem
+ * never blocks a request.
+ */
+async function getModelDefaultReasoningEffort(
+  modelId: string
+): Promise<ModelReasoningEffort | undefined> {
+  try {
+    const row = await getAIModelByModelId(modelId);
+    const value = row?.providerMetadata?.defaultReasoningEffort;
+    return isModelReasoningEffort(value) ? value : undefined;
+  } catch (error) {
+    log.warn('Could not read model default reasoning effort; using the model default', {
+      modelId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
 
 /**
  * Defaults applied to every request, whichever caller builds it (streaming
@@ -60,7 +84,9 @@ export type BedrockOpenAIReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
  *
  * `reasoningEffort` is bound here, on the model, because the shared streaming
  * path (`BaseProviderAdapter.streamWithEnhancements`) does not forward an
- * adapter's `getProviderOptions()` to `streamText()`.
+ * adapter's `getProviderOptions()` to `streamText()`. When it is undefined
+ * nothing is sent and the model uses its own default (GPT-5.4: none; GPT-5.5,
+ * 5.6 and 6.x: medium).
  */
 function bedrockOpenAIDefaults(reasoningEffort?: BedrockOpenAIReasoningEffort) {
   return defaultSettingsMiddleware({
@@ -111,12 +137,17 @@ export async function createBedrockOpenAIModel(
 ): Promise<LanguageModel> {
   const config = await Settings.getBedrock();
   const region = config.region || 'us-east-1';
+  // A request's own effort wins; otherwise the model row's admin default;
+  // otherwise nothing, so the model applies its own default.
+  const reasoningEffort =
+    options?.reasoningEffort ?? (await getModelDefaultReasoningEffort(modelId));
   const { source, credentialProvider } = getBedrockCredentialProvider(config);
 
   log.debug('Creating Bedrock OpenAI model', {
     modelId,
     region,
-    credentialSource: source
+    credentialSource: source,
+    reasoningEffort: reasoningEffort ?? 'model-default'
   });
 
   const client = createOpenAI({
@@ -128,6 +159,6 @@ export async function createBedrockOpenAIModel(
 
   return wrapLanguageModel({
     model: client.responses(modelId),
-    middleware: bedrockOpenAIDefaults(options?.reasoningEffort)
+    middleware: bedrockOpenAIDefaults(reasoningEffort)
   });
 }

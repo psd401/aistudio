@@ -50,7 +50,7 @@ export interface StreamRequest {
   // Advanced model options
   options?: {
     // Reasoning configuration
-    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
 
     // Background processing for long-running models

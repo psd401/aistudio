@@ -631,7 +631,8 @@ async function executeStreaming(params: {
   userMemoryFragment?: string;
   /** Guardrail-processed latest user text used for post-turn extraction. */
   latestUserText: string;
-  reasoningEffort: "minimal" | "low" | "medium" | "high";
+  /** Unset = each model's own default (or its admin-set default). */
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
   responseMode: "standard" | "flex" | "priority";
   requestId: string;
   dbModelId: number;
@@ -833,7 +834,7 @@ const ChatRequestSchema = z.object({
   // `contentId` is checked against the object actually bound before the model
   // sees anything, so a stale/mismatched buffer is dropped rather than reported.
   workspacePreviewDiagnostics: workspacePreviewDiagnosticsSchema.optional(),
-  reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
+  reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
   nexusMode: nexusExperienceModeSchema.default('standard'),
   modelFamily: nexusModelFamilySchema.default('auto'),
@@ -3426,7 +3427,7 @@ async function resolveToolsAndStream(params: {
     ),
     userMemoryFragment: memoryContext.userMemoryFragment,
     latestUserText: resolved.protectedLatestUserText,
-    reasoningEffort: prepared.validationData.reasoningEffort || "medium",
+    reasoningEffort: prepared.validationData.reasoningEffort,
     responseMode: prepared.validationData.responseMode || "standard",
     requestId: params.requestId,
     dbModelId: resolved.dbModelId,
