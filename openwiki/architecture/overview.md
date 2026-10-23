@@ -76,7 +76,7 @@ Defined in `/lib/ai/provider-factory.ts` and orchestrated by the Nexus provider 
 Supported providers:
 - OpenAI (GPT-5, GPT-4)
 - Google (Gemini models)
-- Amazon Bedrock (Claude, Llama, and OpenAI GPT models, which use the Responses API on bedrock-runtime; see [streaming.md](streaming.md#amazon-bedrock-adapter-and-openai-gpt-models))
+- Amazon Bedrock (Claude, Llama, and OpenAI GPT models, which use the Responses API on bedrock-runtime; see [streaming.md](streaming.md#amazon-bedrock-adapter-and-openai-gpt-models)). Bedrock clients take their signing credentials from stored keys or the ECS task role; see [Credential Resolution for Bedrock Clients](streaming.md#credential-resolution-for-bedrock-clients).
 - Azure OpenAI
 
 ### 2. Settings Management
