@@ -868,3 +868,27 @@ describe("listVisible — limit/offset clamping", () => {
     expect(offset).toBe(25);
   });
 });
+
+describe("isInPrivateCollection", () => {
+  beforeEach(() => executeQueryMock.mockReset());
+
+  it("is false for unfiled content without querying", async () => {
+    await expect(visibilityService.isInPrivateCollection(null)).resolves.toBe(false);
+    expect(executeQueryMock).not.toHaveBeenCalled();
+  });
+
+  it("is true for an owner-bound (private) collection", async () => {
+    executeQueryMock.mockResolvedValueOnce([{ ownerUserId: 3 }]);
+    await expect(visibilityService.isInPrivateCollection("c1")).resolves.toBe(true);
+  });
+
+  it("is false for a district collection (no owner)", async () => {
+    executeQueryMock.mockResolvedValueOnce([{ ownerUserId: null }]);
+    await expect(visibilityService.isInPrivateCollection("c1")).resolves.toBe(false);
+  });
+
+  it("is false when the collection row is missing", async () => {
+    executeQueryMock.mockResolvedValueOnce([]);
+    await expect(visibilityService.isInPrivateCollection("gone")).resolves.toBe(false);
+  });
+});
