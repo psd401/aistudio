@@ -10,6 +10,10 @@ openwiki:
     - lib/streaming/sse-keep-alive.ts
     - lib/streaming/deferred-ui-message-stream.ts
     - lib/streaming/provider-adapters/base-adapter.ts
+    - lib/streaming/provider-adapters/claude-adapter.ts
+    - lib/streaming/provider-adapters/index.ts
+    - lib/ai/bedrock-openai.ts
+    - lib/ai/provider-factory.ts
     - lib/streaming/nexus/nexus-streaming-service.ts
     - lib/streaming/empty-turn-notice.ts
     - lib/streaming/stream-error-message.ts
@@ -18,8 +22,11 @@ openwiki:
     - app/api/nexus/chat/route.ts
     - app/api/nexus/chat/stream-headers.ts
     - app/api/nexus/chat/image-generation-handler.ts
-  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH]
+  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH, ClaudeAdapter, getProviderAdapter, isBedrockOpenAIModel, createBedrockOpenAIModel, bedrockOpenAIDefaults]
   test_paths:
+    - lib/ai/__tests__/bedrock-openai.test.ts
+    - tests/e2e/nexus-bedrock-openai.functional.spec.ts
+    - lib/streaming/__tests__/model-capability-coverage.test.ts
     - lib/streaming/__tests__/sse-keepalive.test.ts
     - lib/streaming/__tests__/deferred-ui-message-stream.test.ts
     - lib/streaming/__tests__/stream-deadline.test.ts
@@ -49,8 +56,13 @@ openwiki:
     - Per-step deadline is now idle timeout — touch() on every chunk keeps stream alive during long single steps (#1791)
     - touch() throttled to 1s — safe to call per token without churning setTimeout (#1791)
     - Hard stop ceiling unchanged — absolute bound (10 min) still stops runaway streams (#1791)
+    - Every `amazon-bedrock` model ID matching `openai.gpt-` (except gpt-oss) is sent to bedrock-runtime's `/openai/v1` Responses API, never Converse; other Bedrock IDs keep the Claude/Converse path
+    - Reasoning effort is bound on the model, not in `getProviderOptions()`, because the shared streaming path does not forward provider options to `streamText()`
+    - Bedrock GPT requests default to store disabled (`store` false) and forced reasoning (`forceReasoning` true), unless a caller overrides them
+    - Bedrock GPT requests are signed with SigV4 for service `bedrock` and never carry a Bearer key
   validation_commands:
     - bun run typecheck
+    - bunx jest --silent lib/ai/__tests__/bedrock-openai.test.ts
     - bun test lib/streaming/__tests__/sse-keepalive.test.ts
     - bun test lib/streaming/__tests__/deferred-ui-message-stream.test.ts
     - bunx jest --silent lib/streaming/__tests__/empty-turn-notice.test.ts lib/streaming/__tests__/stream-error-message.test.ts lib/streaming/__tests__/stream-deadline.test.ts
@@ -234,6 +246,72 @@ This means:
 - All AI provider calls (OpenAI, Claude, Gemini, Bedrock) automatically get keep-alive
 - No per-route configuration needed
 - Consistent behavior across Nexus Chat, Model Compare, and Assistant execution
+
+## Amazon Bedrock Adapter and OpenAI GPT Models
+
+**Location**: `lib/streaming/provider-adapters/index.ts` registers `ClaudeAdapter` for the `amazon-bedrock` provider (`getProviderAdapter`). The class name reflects the original Claude and Nova path. It also owns Bedrock-hosted OpenAI GPT models (IDs such as `us.openai.gpt-5.5`), which bypass Converse and go to the OpenAI Responses API on `bedrock-runtime`.
+
+**Why a separate path**: Converse rejects `document` blocks for these models (Responses accepts `input_file`). The AI SDK's Bedrock provider maps reasoning effort only for bare `openai.` IDs, but runtime accepts only `us.`-style inference-profile IDs for these models. `bedrock-mantle` also serves the Responses API, but it is not used because AWS expects it to be retired. The implementation reuses `@ai-sdk/openai`'s Responses model with a SigV4-signing `fetch`, because no AI SDK release supports `bedrock-runtime`'s `/openai/v1` natively.
+
+### Routing Decisions
+
+| Decision | Symbol | Rule |
+|----------|--------|------|
+| Model match | `isBedrockOpenAIModel` (`lib/ai/bedrock-openai.ts`) | `openai.gpt-` IDs, excluding `gpt-oss` |
+| Model construction | `ClaudeAdapter.createModel` | GPT IDs call `createBedrockOpenAIModel(modelId, { reasoningEffort })`, with `reasoningEffort` defaulting to `medium` |
+| Factory path | `createBedrockModel` (`lib/ai/provider-factory.ts`) | `createProviderModel('amazon-bedrock', ...)` delegates GPT IDs to the same builder |
+| Capabilities | `ClaudeAdapter.getCapabilities` | `bedrockOpenAICapabilities()`: reasoning yes, `standard` response mode only, no background mode, no provider-native tools, 300000 ms timeout |
+| Support | `ClaudeAdapter.supportsModel` | GPT IDs are supported in addition to the Claude patterns |
+
+```mermaid
+sequenceDiagram
+    participant Caller as Nexus stream or createProviderModel
+    participant Adapter as ClaudeAdapter
+    participant Builder as createBedrockOpenAIModel
+    participant Settings as Settings.getBedrock
+    participant Runtime as bedrock-runtime /openai/v1
+    Caller->>Adapter: createModel(modelId, options)
+    Adapter->>Builder: GPT ID with reasoningEffort
+    Builder->>Settings: region and stored keys
+    Builder-->>Adapter: wrapped Responses model with default settings
+    Caller->>Runtime: streamText sends POST responses, signed for service bedrock
+    Runtime-->>Caller: streamed reasoning and text
+```
+
+Caption: `createModel` builds the GPT model with its effort bound, and the stream then runs through the shared `streamWithEnhancements` path.
+
+### Request Defaults and Why They Exist
+
+`bedrockOpenAIDefaults()` wraps the model with `defaultSettingsMiddleware`. Every caller gets these defaults unless it passes its own provider options:
+
+- **`reasoningEffort`** is bound to the model because `BaseProviderAdapter.streamWithEnhancements` calls `streamText()` without forwarding `providerOptions`, and `enhanceStreamConfig()` does not carry them either. An effort placed in `getProviderOptions()` would be silently dropped. Forwarding options in the base path was deliberately not changed, because that would alter direct OpenAI and Converse requests.
+- **`forceReasoning: true`** is needed because the OpenAI provider detects reasoning models by ID prefix (`gpt-5`, `o3`). The `us.openai.gpt-*` IDs match none of them, so without this flag the provider drops the effort, sends the system prompt with the `system` role instead of `developer`, and forwards sampling parameters that reasoning models reject.
+- **`store: false`** makes each request self-contained. Prior reasoning is replayed inline, because a `us.` profile can route each request to any member Region, and a stored item is not guaranteed to resolve there.
+
+Authentication mirrors the Converse path. `createBedrockOpenAIModel` uses stored Bedrock keys from `Settings.getBedrock()` outside Lambda. Otherwise it uses the default AWS provider chain (`fromNodeProviderChain`, memoized), so the ECS task role works. The `fetch` strips the placeholder Bearer header, signs with `aws4fetch` for service `bedrock`, and sets `retries: 0` so the AI SDK alone owns retries. The placeholder value is not a credential.
+
+### Routing Consequences
+
+- `inferModelFamily` returns `openai` for `us.openai.*` rows, so the Nexus ChatGPT family can select them. The tier comes from the model name (`luna` maps to light, `sol` to high).
+- `modelSupportsProviderNativeTool` returns false for web search and code interpreter on `amazon-bedrock`. Turns that need those tools route to another provider, because bedrock-runtime offers neither.
+- Image generation stays on the direct `openai` provider and is unaffected.
+- To add a model, add an `ai_models` row with a `us.openai.gpt-*` inference-profile ID. No code change is needed. The model import guide is at `docs/guides/ai-model-import-guide.md`; bare `openai.*` IDs are rejected by runtime.
+
+### Change Guidance for Bedrock GPT Models
+
+- Change model matching only in `BEDROCK_OPENAI_MODEL_PATTERN`. The `isBedrockOpenAIModel` callers in `provider-factory.ts` and `claude-adapter.ts` follow it.
+- Do not reintroduce a Bedrock-GPT branch in `ClaudeAdapter.getProviderOptions`. The earlier version was removed because the streaming path discarded it.
+- Changing the effort default touches `ClaudeAdapter.createModel`, the direct OpenAI adapter default, and the effort tests together.
+- Claude and Nova requests use the unchanged Converse path. A change to `createBedrockOpenAIModel` should not alter them.
+- An IAM change for these models lives in the ECS task role. See [IAM Least Privilege](../infrastructure/overview.md#iam-least-privilege).
+
+**Focused tests**: `lib/ai/__tests__/bedrock-openai.test.ts` (describe blocks `isBedrockOpenAIModel`, `createBedrockOpenAIModel`, `ClaudeAdapter for Bedrock-hosted GPT models`, and `model router treatment of Bedrock-hosted GPT models`). The request-level tests check the URL, the SigV4 header, `store: false`, effort on the wire, the `developer` role, and the configured region. `lib/streaming/__tests__/model-capability-coverage.test.ts` covers the GPT-5.5 and GPT-6 Sol capability rows.
+
+**Minimal validation**: `bunx jest --silent lib/ai/__tests__/bedrock-openai.test.ts`. Add `bun run typecheck` when signatures or types change.
+
+**Conditional checks**: `tests/e2e/nexus-bedrock-openai.functional.spec.ts` runs a live two-turn Nexus conversation against Bedrock. It is gated by `PLAYWRIGHT_AUTH_ENABLED` and `E2E_RUN_EXTERNAL=1`, and skips unless `NEXUS_ROUTER_MODE` is `off`. Run it only for changes that need live provider proof, because it calls the external service. No unit test verifies the ECS `project/default` grant, and the change itself was not synthesized in that commit (`cdk synth` is the only available check).
+
+**Known limits** (from the commit's live checks): reasoning summaries come back empty from Bedrock, and Bedrock rejects `https://` image URLs for these models (only `data:` and `s3://` work). Nexus sends data URLs.
 
 ## Answer-less Turns and Error Notices (#1899)
 

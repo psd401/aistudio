@@ -76,7 +76,7 @@ Defined in `/lib/ai/provider-factory.ts` and orchestrated by the Nexus provider 
 Supported providers:
 - OpenAI (GPT-5, GPT-4)
 - Google (Gemini models)
-- Amazon Bedrock (Claude, Llama)
+- Amazon Bedrock (Claude, Llama, and OpenAI GPT models, which use the Responses API on bedrock-runtime; see [streaming.md](streaming.md#amazon-bedrock-adapter-and-openai-gpt-models))
 - Azure OpenAI
 
 ### 2. Settings Management
