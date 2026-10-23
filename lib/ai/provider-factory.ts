@@ -3,6 +3,7 @@ import { createAzure } from '@ai-sdk/azure';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { Settings } from '@/lib/settings-manager';
+import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createLogger } from '@/lib/logger';
 import { LanguageModel } from 'ai';
@@ -109,9 +110,15 @@ async function createGoogleModel(modelId: string): Promise<LanguageModel> {
 }
 
 /**
- * Amazon Bedrock Provider - Supports Claude, Llama, and other Bedrock models
+ * Amazon Bedrock Provider - Supports Claude, Llama, and other Bedrock models.
+ * OpenAI GPT models (`us.openai.gpt-*`) use the Responses API on
+ * bedrock-runtime instead of Converse — see `@/lib/ai/bedrock-openai`.
  */
 async function createBedrockModel(modelId: string): Promise<LanguageModel> {
+  if (isBedrockOpenAIModel(modelId)) {
+    return createBedrockOpenAIModel(modelId);
+  }
+
   try {
     const config = await Settings.getBedrock();
     const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;

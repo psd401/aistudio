@@ -802,6 +802,9 @@ export class EcsServiceConstruct extends Construct {
           'arn:aws:bedrock:*::foundation-model/*',
           'arn:aws:bedrock:*:*:inference-profile/*',
           'arn:aws:bedrock:*:*:provisioned-model/*',
+          // OpenAI GPT models on bedrock-runtime's Responses API also authorize
+          // InvokeModel against the account's default project.
+          'arn:aws:bedrock:*:*:project/default',
         ],
       }),
       // Bedrock does not support resource-level permissions for Rerank.
