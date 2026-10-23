@@ -36,7 +36,11 @@ import {
   raisePublishApprovalRequired,
 } from "./helpers";
 import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
-import { NotFoundError, ValidationError } from "./errors";
+import {
+  NotFoundError,
+  PrivateCollectionLevelError,
+  ValidationError,
+} from "./errors";
 import { assertGrantTargetsExist } from "./grant-targets";
 import {
   GRANT_KIND_SET,
@@ -543,9 +547,7 @@ async function setLevelInTx(
       .where(eq(contentObjects.id, objectId))
       .limit(1);
     if (collectionRows[0]?.ownerUserId != null) {
-      throw new ValidationError(
-        "Content in a private collection must remain private"
-      );
+      throw new PrivateCollectionLevelError();
     }
   }
 

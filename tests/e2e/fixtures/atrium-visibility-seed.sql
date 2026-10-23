@@ -52,7 +52,7 @@ SELECT
   'a7100000-0000-4000-8000-00000000c506', 'Visibility E2E Private Collection',
   'e2e-visibility-private-collection', 'private',
   (SELECT id FROM users WHERE cognito_sub = 'e2e-test-user'), false
-ON CONFLICT (id) DO UPDATE SET archived_at = NULL;
+ON CONFLICT (slug) DO UPDATE SET archived_at = NULL;
 
 INSERT INTO content_objects (
   id, kind, title, slug, owner_user_id, created_by_actor, visibility_level, status,
