@@ -18,6 +18,7 @@ import { createOpenAI } from '@ai-sdk/openai'
 import { z } from 'zod'
 import logger from "@/lib/logger"
 import { createProviderModel } from '@/lib/ai/provider-factory'
+import { getBedrockCredentialProvider } from '@/lib/ai/bedrock-credentials'
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service'
 import type { StreamRequest } from '@/lib/streaming/types'
 import { repositoryEmbeddingConfigurationFromSettings } from '@/lib/repositories/embedding-configuration'
@@ -265,7 +266,6 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
 // Get embedding model client
 // Note: Embedding models need special handling, so we keep some provider-specific logic here
 // But we reuse settings from the centralized settings-manager
-// eslint-disable-next-line complexity -- explicit provider branches keep credential handling isolated
 async function getEmbeddingModelClient(config: ModelConfig) {
   const { Settings } = await import('@/lib/settings-manager');
 
@@ -294,21 +294,12 @@ async function getEmbeddingModelClient(config: ModelConfig) {
     case 'amazon-bedrock': {
       try {
         const bedrockConfig = await Settings.getBedrock();
+        const { credentialProvider } = getBedrockCredentialProvider(bedrockConfig);
 
-        const bedrockOptions: Parameters<typeof createAmazonBedrock>[0] = {
-          region: bedrockConfig.region || 'us-east-1'
-        };
-
-        // In AWS Lambda, use IAM role credentials
-        const isAwsLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
-
-        if (bedrockConfig.accessKeyId && bedrockConfig.secretAccessKey && !isAwsLambda) {
-          // Only use stored credentials for local development
-          bedrockOptions.accessKeyId = bedrockConfig.accessKeyId;
-          bedrockOptions.secretAccessKey = bedrockConfig.secretAccessKey;
-        }
-
-        const bedrock = createAmazonBedrock(bedrockOptions);
+        const bedrock = createAmazonBedrock({
+          region: bedrockConfig.region || 'us-east-1',
+          credentialProvider
+        });
         const embeddingModel = bedrock.embedding(config.modelId);
 
         logger.info('[ai-helpers] Embedding model created successfully');

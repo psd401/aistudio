@@ -3,6 +3,7 @@ import type { ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
+import { getBedrockCredentialProvider } from '@/lib/ai/bedrock-credentials';
 import { BaseProviderAdapter } from './base-adapter';
 import type { StreamingCallbacks } from '../types';
 import type { ProviderCapabilities, StreamRequest, StreamConfig } from '../types';
@@ -35,30 +36,20 @@ export class ClaudeAdapter extends BaseProviderAdapter {
 
     try {
       const config = await Settings.getBedrock();
-      const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
-      
+      const { source, credentialProvider } = getBedrockCredentialProvider(config);
+
       log.debug(`Creating Claude model: ${modelId}`, {
         modelId,
-        hasAccessKey: !!config.accessKeyId,
-        hasSecretKey: !!config.secretAccessKey,
         region: config.region || 'us-east-1',
-        isLambda,
+        credentialSource: source,
         thinkingBudget: options?.thinkingBudget
       });
-      
-      const bedrockOptions: Parameters<typeof createAmazonBedrock>[0] = {
-        region: config.region || 'us-east-1'
-      };
-      
-      // Use explicit credentials for local development only
-      if (!isLambda && config.accessKeyId && config.secretAccessKey) {
-        log.debug('Using explicit credentials for local development');
-        bedrockOptions.accessKeyId = config.accessKeyId;
-        bedrockOptions.secretAccessKey = config.secretAccessKey;
-      }
 
       // Create and store client instance
-      this.bedrockClient = createAmazonBedrock(bedrockOptions);
+      this.bedrockClient = createAmazonBedrock({
+        region: config.region || 'us-east-1',
+        credentialProvider
+      });
       this.providerClient = this.bedrockClient;
 
       return this.bedrockClient(modelId);
