@@ -188,4 +188,13 @@ The following areas have substantial existing documentation and are deferred fro
 - **Individual Skill Docs**: See `/infra/agent-image/skills/*/SKILL.md`
 - **Database Migrations**: See `/docs/database/drizzle-migration-guide.md`
 - **Agent Eval Suite**: Eval harness, graders, and suites under `/infra/agent-image/eval/` (README at `/infra/agent-image/eval/README.md`); only its CI trigger state is recorded in [infrastructure/overview.md](infrastructure/overview.md). Deferred because the suite has its own README. The repository write evals it registers are covered in [app-features/overview.md](app-features/overview.md#repository-mcp-tools-1266-1907).
+he following areas have substantial existing documentation and are deferred from this wiki:
+
+- **API Reference**: See `/docs/API_REFERENCE.md`
+- **Deployment Guide**: See `/docs/DEPLOYMENT.md`
+- **Testing Guide**: See `/docs/guides/TESTING.md`
+- **K-12 Content Safety**: See `/docs/features/k12-content-safety.md`
+- **Individual Skill Docs**: See `/infra/agent-image/skills/*/SKILL.md`
+- **Database Migrations**: See `/docs/database/drizzle-migration-guide.md`
+- **Agent Eval Suite**: Eval harness, graders, and suites under `/infra/agent-image/eval/` (README at `/infra/agent-image/eval/README.md`); only its CI trigger state is recorded in [infrastructure/overview.md](infrastructure/overview.md). Deferred because the suite has its own README. The repository write evals it registers are covered in [app-features/overview.md](app-features/overview.md#repository-mcp-tools-1266-1907).
 66-1907).
