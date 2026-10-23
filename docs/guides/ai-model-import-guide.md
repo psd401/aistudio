@@ -109,7 +109,7 @@ Use these standard capability values for consistency:
 Must be one of:
 - `"openai"` - OpenAI (GPT models)
 - `"azure"` - Azure OpenAI
-- `"amazon-bedrock"` - AWS Bedrock (Claude, etc.)
+- `"amazon-bedrock"` - AWS Bedrock (Claude, OpenAI GPT, etc.)
 - `"google"` - Google AI (Gemini)
 - `"google-vertex"` - Google Vertex AI
 
@@ -145,6 +145,16 @@ Get the exact model identifier from the provider. **The `modelId` must match the
 - `us.anthropic.claude-sonnet-4-6`
 - `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
 - `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+
+#### OpenAI GPT Models on Bedrock
+
+OpenAI GPT text models (GPT-5.x, GPT-6.x) are also served by Bedrock. Add them with `"provider": "amazon-bedrock"` and the **US inference profile ID** — `us.openai.{model}`, e.g. `us.openai.gpt-5.5`, `us.openai.gpt-6-sol`. List the current ones with `aws bedrock list-inference-profiles --region us-east-1` (look for `us.openai.`).
+
+- **Never** the bare `openai.gpt-*` ID — bedrock-runtime rejects it ("on-demand throughput isn't supported").
+- **Never** `global.openai.*` — our AWS organization's SCP denies it.
+- Any `*openai.gpt-*` ID (except `gpt-oss`) is sent to the OpenAI **Responses API on bedrock-runtime** (`lib/ai/bedrock-openai.ts`), not Converse, so reasoning effort, the 5-minute stream budget and multi-turn history work with no code change.
+- Do **not** list `web_search` or `code_interpreter` capabilities: bedrock-runtime has neither, and the router sends turns that need them to another provider.
+- Image generation models stay on `"provider": "openai"`.
 
 ### Step 2: Search for Current Information
 

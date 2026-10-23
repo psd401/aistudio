@@ -57,6 +57,8 @@ const PRODUCTION_MODELS: ReadonlyArray<{
   { label: 'Gemini 3 Pro', modelId: 'gemini-3-pro-preview', adapter: gemini },
   { label: 'Gemini 3.1 Pro', modelId: 'gemini-3.1-pro-preview', adapter: gemini },
   { label: 'GPT-5', modelId: 'gpt-5', adapter: openai },
+  { label: 'GPT-5.5 (Bedrock)', modelId: 'us.openai.gpt-5.5', adapter: claude },
+  { label: 'GPT-6 Sol (Bedrock)', modelId: 'us.openai.gpt-6-sol', adapter: claude },
 ];
 
 describe('model capability coverage', () => {

@@ -2,6 +2,7 @@ import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import type { ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
+import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
 import { BaseProviderAdapter } from './base-adapter';
 import type { StreamingCallbacks } from '../types';
 import type { ProviderCapabilities, StreamRequest, StreamConfig } from '../types';
@@ -13,12 +14,25 @@ const log = createLogger({ module: 'claude-adapter' });
  * - Claude 4 Opus/Sonnet with thinking capabilities
  * - Extended thinking budgets (1024-6553 tokens)
  * - Enhanced reasoning and chain-of-thought
+ *
+ * This is the adapter for every `amazon-bedrock` model. OpenAI GPT models on
+ * Bedrock (`us.openai.gpt-*`) are routed to the OpenAI Responses API on
+ * bedrock-runtime instead of Converse — see `@/lib/ai/bedrock-openai`.
  */
 export class ClaudeAdapter extends BaseProviderAdapter {
   protected providerName = 'amazon-bedrock';
   private bedrockClient?: ReturnType<typeof createAmazonBedrock>;
 
   async createModel(modelId: string, options?: StreamRequest['options']) {
+    if (isBedrockOpenAIModel(modelId)) {
+      // Effort is bound to the model: the shared streaming path does not
+      // forward getProviderOptions() to streamText(). Medium mirrors the
+      // direct OpenAI adapter's default.
+      return createBedrockOpenAIModel(modelId, {
+        reasoningEffort: options?.reasoningEffort || 'medium'
+      });
+    }
+
     try {
       const config = await Settings.getBedrock();
       const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
@@ -132,7 +146,33 @@ export class ClaudeAdapter extends BaseProviderAdapter {
     };
   }
 
+  /**
+   * Bedrock-hosted GPT models. Capabilities are shared across the family so a
+   * newly added `us.openai.gpt-*` model works without a table edit. Bedrock
+   * runtime offers neither Priority/Flex tiers nor background mode for these
+   * models, and no hosted tools (web search, code interpreter) — routing sends
+   * turns that need those to another provider. Costs are GPT-5.5 Bedrock
+   * pricing as an estimate; the ai_models row is authoritative.
+   */
+  private bedrockOpenAICapabilities(): ProviderCapabilities {
+    return {
+      supportsReasoning: true,
+      supportsThinking: false,
+      supportedResponseModes: ['standard'],
+      supportsBackgroundMode: false,
+      supportedTools: [],
+      typicalLatencyMs: 3000,
+      maxTimeoutMs: 300000, // 5 minutes — matches GPT-5 on the direct OpenAI path
+      costPerInputToken: 0.0000055,
+      costPerOutputToken: 0.000033
+    };
+  }
+
   getCapabilities(modelId: string): ProviderCapabilities {
+    if (isBedrockOpenAIModel(modelId)) {
+      return this.bedrockOpenAICapabilities();
+    }
+
     // Claude 4.x and newer use family-first model IDs (`claude-sonnet-4-6`,
     // `claude-opus-4-6-v1`, `claude-haiku-4.5`, `claude-sonnet-5`, each also with
     // an `anthropic.`/`us.anthropic.` prefix on Bedrock). None of those contain
@@ -249,8 +289,8 @@ export class ClaudeAdapter extends BaseProviderAdapter {
       'claude-*',
       'anthropic.claude-*'
     ];
-    
-    return this.matchesPattern(modelId, supportedPatterns);
+
+    return isBedrockOpenAIModel(modelId) || this.matchesPattern(modelId, supportedPatterns);
   }
   
   /**
