@@ -1,8 +1,8 @@
 import { createOpenAI } from '@ai-sdk/openai';
-import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import { defaultSettingsMiddleware, wrapLanguageModel, type LanguageModel } from 'ai';
 import { AwsClient } from 'aws4fetch';
 import { Settings } from '@/lib/settings-manager';
+import { getBedrockCredentialProvider, type AwsCredentials } from '@/lib/ai/bedrock-credentials';
 import { createLogger } from '@/lib/logger';
 import { getAIModelByModelId } from '@/lib/db/drizzle';
 import { MODEL_REASONING_EFFORTS, type ModelReasoningEffort } from '@/lib/db/types/jsonb';
@@ -36,15 +36,6 @@ const runtimeBaseURL = (region: string) =>
  * authenticates by SigV4 instead, so the header is stripped before signing.
  */
 const UNUSED_BEARER_VALUE = 'unused';
-
-type AwsCredentials = {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-};
-
-// Memoized by the SDK: credentials are cached and refreshed before expiry.
-let defaultCredentialChain: (() => Promise<AwsCredentials>) | undefined;
 
 export type BedrockOpenAIReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
 
@@ -136,9 +127,9 @@ function createSigV4Fetch(
 /**
  * Creates a Bedrock-hosted OpenAI GPT model on the Responses API.
  *
- * Credentials mirror the Converse path: stored Bedrock keys outside Lambda
- * (local development and any deployment that configures them), otherwise the
- * default AWS credential chain (ECS task role, Lambda role, SSO profile).
+ * Credentials come from `getBedrockCredentialProvider`, shared with the
+ * Converse path: stored Bedrock keys outside Lambda, otherwise the default AWS
+ * credential chain (ECS task role, Lambda role, SSO profile).
  */
 export async function createBedrockOpenAIModel(
   modelId: string,
@@ -150,28 +141,20 @@ export async function createBedrockOpenAIModel(
   // otherwise nothing, so the model applies its own default.
   const reasoningEffort =
     options?.reasoningEffort ?? (await getModelDefaultReasoningEffort(modelId));
-  const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
-  const accessKeyId = config.accessKeyId;
-  const secretAccessKey = config.secretAccessKey;
-  const useStoredKeys = !isLambda && !!accessKeyId && !!secretAccessKey;
+  const { source, credentialProvider } = getBedrockCredentialProvider(config);
 
   log.debug('Creating Bedrock OpenAI model', {
     modelId,
     region,
-    credentialSource: useStoredKeys ? 'stored-keys' : 'default-chain',
+    credentialSource: source,
     reasoningEffort: reasoningEffort ?? 'model-default'
   });
-
-  const getCredentials: () => Promise<AwsCredentials> =
-    useStoredKeys && accessKeyId && secretAccessKey
-      ? async () => ({ accessKeyId, secretAccessKey })
-      : (defaultCredentialChain ??= fromNodeProviderChain());
 
   const client = createOpenAI({
     name: 'amazon-bedrock-openai',
     baseURL: runtimeBaseURL(region),
     apiKey: UNUSED_BEARER_VALUE,
-    fetch: createSigV4Fetch(region, getCredentials)
+    fetch: createSigV4Fetch(region, credentialProvider)
   });
 
   return wrapLanguageModel({
