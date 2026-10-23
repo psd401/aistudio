@@ -22,11 +22,12 @@ openwiki:
     - app/api/nexus/chat/route.ts
     - app/api/nexus/chat/stream-headers.ts
     - app/api/nexus/chat/image-generation-handler.ts
-  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH, ClaudeAdapter, getProviderAdapter, isBedrockOpenAIModel, createBedrockOpenAIModel, bedrockOpenAIDefaults, getBedrockCredentialProvider]
+  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH, ClaudeAdapter, getProviderAdapter, isBedrockOpenAIModel, createBedrockOpenAIModel, getModelDefaultReasoningEffort, bedrockOpenAIDefaults, getBedrockCredentialProvider, MODEL_REASONING_EFFORTS]
   test_paths:
     - lib/ai/__tests__/bedrock-credentials.test.ts
     - lib/ai/__tests__/bedrock-openai.test.ts
     - tests/e2e/nexus-bedrock-openai.functional.spec.ts
+    - tests/e2e/admin-model-default-reasoning-effort.functional.spec.ts
     - lib/streaming/__tests__/model-capability-coverage.test.ts
     - lib/streaming/__tests__/sse-keepalive.test.ts
     - lib/streaming/__tests__/deferred-ui-message-stream.test.ts
@@ -258,8 +259,8 @@ This means:
 
 | Decision | Symbol | Rule |
 |----------|--------|------|
-| Model match | `isBedrockOpenAIModel` (`lib/ai/bedrock-openai.ts`) | `openai.gpt-` IDs, excluding `gpt-oss` |
-| Model construction | `ClaudeAdapter.createModel` | GPT IDs call `createBedrockOpenAIModel(modelId, { reasoningEffort })`, with `reasoningEffort` defaulting to `medium` |
+| Model match | `isBedrockOpenAIModel` (`lib/ai/bedrock-openai-model-id.ts`, re-exported by `lib/ai/bedrock-openai.ts`) | `openai.gpt-` IDs, excluding `gpt-oss`. Free of server imports so the admin model form can use it |
+| Model construction | `ClaudeAdapter.createModel` | GPT IDs call `createBedrockOpenAIModel(modelId, { reasoningEffort })` with the request's effort as passed. There is no `medium` fallback; the effort is resolved inside the builder (see [Reasoning Effort Resolution](#reasoning-effort-resolution)) |
 | Factory path | `createBedrockModel` (`lib/ai/provider-factory.ts`) | `createProviderModel('amazon-bedrock', ...)` delegates GPT IDs to the same builder |
 | Capabilities | `ClaudeAdapter.getCapabilities` | `bedrockOpenAICapabilities()`: reasoning yes, `standard` response mode only, no background mode, no provider-native tools, 300000 ms timeout |
 | Support | `ClaudeAdapter.supportsModel` | GPT IDs are supported in addition to the Claude patterns |
@@ -285,9 +286,28 @@ Caption: `createModel` builds the GPT model with its effort bound, and the strea
 
 `bedrockOpenAIDefaults()` wraps the model with `defaultSettingsMiddleware`. Every caller gets these defaults unless it passes its own provider options:
 
-- **`reasoningEffort`** is bound to the model because `BaseProviderAdapter.streamWithEnhancements` calls `streamText()` without forwarding `providerOptions`, and `enhanceStreamConfig()` does not carry them either. An effort placed in `getProviderOptions()` would be silently dropped. Forwarding options in the base path was deliberately not changed, because that would alter direct OpenAI and Converse requests.
+- **`reasoningEffort`** is bound to the model because `BaseProviderAdapter.streamWithEnhancements` calls `streamText()` without forwarding `providerOptions`, and `enhanceStreamConfig()` does not carry them either. An effort placed in `getProviderOptions()` would be silently dropped. Forwarding options in the base path was deliberately not changed, because that would alter direct OpenAI and Converse requests. When no effort is resolved, nothing is sent and the model uses its own default.
 - **`forceReasoning: true`** is needed because the OpenAI provider detects reasoning models by ID prefix (`gpt-5`, `o3`). The `us.openai.gpt-*` IDs match none of them, so without this flag the provider drops the effort, sends the system prompt with the `system` role instead of `developer`, and forwards sampling parameters that reasoning models reject.
 - **`store: false`** makes each request self-contained. Prior reasoning is replayed inline, because a `us.` profile can route each request to any member Region, and a stored item is not guaranteed to resolve there.
+
+### Reasoning Effort Resolution
+
+A Bedrock GPT request's effort comes from one of three sources, checked in this order by `createBedrockOpenAIModel`:
+
+1. The request's own `reasoningEffort`. The Nexus route accepts `none`, `minimal`, `low`, `medium`, or `high`, and only sends an effort when the user or caller set one.
+2. The admin default stored on the model row at `ai_models.provider_metadata.defaultReasoningEffort`, read by `getModelDefaultReasoningEffort`. Only `none`, `low`, `medium`, and `high` are honored (`MODEL_REASONING_EFFORTS` in `lib/db/types/jsonb/index.ts`). `minimal` is never offered, because Bedrock's GPT models reject it. An unrecognized stored value is ignored.
+3. Nothing. The `reasoning` field is omitted and the model applies its own default.
+
+```mermaid
+flowchart TD
+    A["Request sets reasoningEffort?"] -- yes --> E["Bind request effort to model"]
+    A -- no --> B["Read ai_models provider_metadata defaultReasoningEffort"]
+    B -- "lookup throws" --> D["Omit effort: model default"]
+    B -- "valid level" --> E
+    B -- "unset or unrecognized" --> D
+```
+
+Caption: the lookup fails open with a warning, so a database problem never blocks a turn. The builder's debug log records the resolved level, or `model-default` when none applies.
 
 Authentication for this path uses the shared helper described in [Credential Resolution for Bedrock Clients](#credential-resolution-for-bedrock-clients). `createBedrockOpenAIModel` passes that helper's `credentialProvider` into a SigV4-signing `fetch` (`aws4fetch`, service `bedrock`). The `fetch` strips the placeholder Bearer header and sets `retries: 0`, so the AI SDK alone owns retries. The placeholder value is not a credential.
 
@@ -333,20 +353,32 @@ Caption: stored keys win only outside Lambda and only when both keys are set. Ev
 - `modelSupportsProviderNativeTool` returns false for web search and code interpreter on `amazon-bedrock`. Turns that need those tools route to another provider, because bedrock-runtime offers neither.
 - Image generation stays on the direct `openai` provider and is unaffected.
 - To add a model, add an `ai_models` row with a `us.openai.gpt-*` inference-profile ID. No code change is needed. The model import guide is at `docs/guides/ai-model-import-guide.md`; bare `openai.*` IDs are rejected by runtime.
+- The default effort is set per row in Admin → Models → Edit. The **Default Reasoning Effort** field (`DefaultReasoningEffortField` in `app/(protected)/admin/models/_components/model-detail-sections.tsx`) appears only for `amazon-bedrock` rows whose ID matches `isBedrockOpenAIModel`. Choosing **Model default** removes the key, and other `provider_metadata` keys are preserved. The value is stored in the `ai_models` row described in [Data Models](../data-models/overview.md). The JSON import route does not carry `providerMetadata`, so the setting is applied in the form after import.
 
 ### Change Guidance for Bedrock GPT Models
 
-- Change model matching only in `BEDROCK_OPENAI_MODEL_PATTERN`. The `isBedrockOpenAIModel` callers in `provider-factory.ts` and `claude-adapter.ts` follow it.
+- Change model matching only in `BEDROCK_OPENAI_MODEL_PATTERN` in `lib/ai/bedrock-openai-model-id.ts`. The `isBedrockOpenAIModel` callers in `provider-factory.ts`, `claude-adapter.ts`, and the admin form follow it. Keep that module free of server imports.
 - Do not reintroduce a Bedrock-GPT branch in `ClaudeAdapter.getProviderOptions`. The earlier version was removed because the streaming path discarded it.
-- Changing the effort default touches `ClaudeAdapter.createModel`, the direct OpenAI adapter default, and the effort tests together.
+- Do not add a `medium` fallback to `ClaudeAdapter.createModel` or the Nexus route. Those fallbacks were removed in #1963, so the admin default and the model's own default can take effect. Widening the effort set means changing `ModelReasoningEffort`, the Nexus route schema, and `StreamRequest` options together.
+- The direct OpenAI adapter (`lib/streaming/provider-adapters/openai-adapter.ts`) still defaults to `medium`. That path is separate and was not changed; do not treat it as the Bedrock default.
 - Claude and Nova requests use the unchanged Converse path. A change to `createBedrockOpenAIModel` should not alter them.
 - An IAM change for these models lives in the ECS task role. See [IAM Least Privilege](../infrastructure/overview.md#iam-least-privilege).
 
-**Focused tests**: `lib/ai/__tests__/bedrock-openai.test.ts` (describe blocks `isBedrockOpenAIModel`, `createBedrockOpenAIModel`, `ClaudeAdapter for Bedrock-hosted GPT models`, and `model router treatment of Bedrock-hosted GPT models`). The request-level tests check the URL, the SigV4 header, `store: false`, effort on the wire, the `developer` role, and the configured region. `lib/streaming/__tests__/model-capability-coverage.test.ts` covers the GPT-5.5 and GPT-6 Sol capability rows.
+**Focused tests**: `lib/ai/__tests__/bedrock-openai.test.ts` (describe blocks `isBedrockOpenAIModel`, `createBedrockOpenAIModel`, `ClaudeAdapter for Bedrock-hosted GPT models`, and `model router treatment of Bedrock-hosted GPT models`). The request-level tests check the URL, the SigV4 header, `store: false`, effort on the wire, the `developer` role, and the configured region. The effort-resolution tests in the `ClaudeAdapter for Bedrock-hosted GPT models` block cover these behaviors:
+
+- Neither the request nor the row sets an effort: no `reasoning` field is sent (test name starts "sends no effort when neither the request nor the model row sets one"). The row lookup is called with the model ID.
+- The row default applies when the request sets none ("streams with the model row's admin default when the request sets none").
+- The request's effort overrides the row default ("lets the request's effort override the model row's default").
+- A throwing row lookup falls back to the model default ("falls back to the model default when the row lookup fails").
+- An unrecognized stored value such as `minimal` is ignored ("ignores an unrecognised stored default").
+
+`lib/streaming/__tests__/model-capability-coverage.test.ts` covers the GPT-5.5 and GPT-6 Sol capability rows.
 
 **Minimal validation**: `bunx jest --silent lib/ai/__tests__/bedrock-openai.test.ts`. Add `bun run typecheck` when signatures or types change.
 
-**Conditional checks**: `tests/e2e/nexus-bedrock-openai.functional.spec.ts` runs a live two-turn Nexus conversation against Bedrock. It is gated by `PLAYWRIGHT_AUTH_ENABLED` and `E2E_RUN_EXTERNAL=1`, and skips unless `NEXUS_ROUTER_MODE` is `off`. Run it only for changes that need live provider proof, because it calls the external service. No unit test verifies the ECS `project/default` grant, and the change itself was not synthesized in that commit (`cdk synth` is the only available check).
+**Conditional checks**:
+- `tests/e2e/nexus-bedrock-openai.functional.spec.ts` runs a live two-turn Nexus conversation against Bedrock. It is gated by `PLAYWRIGHT_AUTH_ENABLED` and `E2E_RUN_EXTERNAL=1`, and skips unless `NEXUS_ROUTER_MODE` is `off`. Run it only for changes that need live provider proof, because it calls the external service. No unit test verifies the ECS `project/default` grant, and the change itself was not synthesized in that commit (`cdk synth` is the only available check).
+- `tests/e2e/admin-model-default-reasoning-effort.functional.spec.ts` drives the admin form against a database. It is skipped unless `PLAYWRIGHT_AUTH_ENABLED` is `true` (it needs the authenticated dev server). It sets None on a Bedrock GPT row, checks that the value persists in `provider_metadata`, checks that unrelated metadata survives, and checks that "Model default" removes the key. It also checks that a Claude row shows no such field. It calls no model. Run it when the admin field or its persistence changes.
 
 **Known limits** (from the commit's live checks): reasoning summaries come back empty from Bedrock, and Bedrock rejects `https://` image URLs for these models (only `data:` and `s3://` work). Nexus sends data URLs.
 
@@ -585,3 +617,4 @@ controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
  streaming service
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
+ransport pitfalls
