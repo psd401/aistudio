@@ -740,7 +740,7 @@ Amazon Bedrock Guardrails operate in **detect-and-log mode**:
 - Tag-based access control
 - Role-filtered capabilities
 - Isolated agent execution
-- The ECS task role grants `bedrock:InvokeModel` on the foundation-model, inference-profile, provisioned-model, and `arn:aws:bedrock:*:*:project/default` resources in `infra/lib/constructs/ecs-service.ts`. The `project/default` grant is required for OpenAI GPT models on bedrock-runtime's Responses API, which [Bedrock GPT models](../architecture/streaming.md#amazon-bedrock-adapter-and-openai-gpt-models) use. Prod currently authenticates with stored keys, so the task-role path is not yet exercised there.
+- The ECS task role grants `bedrock:InvokeModel` on the foundation-model, inference-profile, provisioned-model, and `arn:aws:bedrock:*:*:project/default` resources in `infra/lib/constructs/ecs-service.ts`. The `project/default` grant is required for OpenAI GPT models on bedrock-runtime's Responses API, which [Bedrock GPT models](../architecture/streaming.md#amazon-bedrock-adapter-and-openai-gpt-models) use. Prod currently authenticates with stored keys, so the task-role path is not yet exercised there. When an environment stores no Bedrock keys, every AI SDK Bedrock client (Converse, Claude and Nova streaming, embeddings, and GPT Responses) signs as this task role instead, so these grants are what those clients depend on. The selection logic is in [Credential Resolution for Bedrock Clients](../architecture/streaming.md#credential-resolution-for-bedrock-clients).
 
 ### Network Security
 

@@ -22,8 +22,9 @@ openwiki:
     - app/api/nexus/chat/route.ts
     - app/api/nexus/chat/stream-headers.ts
     - app/api/nexus/chat/image-generation-handler.ts
-  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH, ClaudeAdapter, getProviderAdapter, isBedrockOpenAIModel, createBedrockOpenAIModel, bedrockOpenAIDefaults]
+  symbols: [buildAbortAwareResponse, buildResponseFactory, classifyEmptyTurn, classifyChunkVisibility, emptyTurnNotice, sanitizeStreamErrorMessage, classifyStreamError, incompleteTurnReason, turnNeedsEmptyNotice, persistAssistantTurn, isDirectRenderTool, withSseKeepAlive, deferUIMessageStreamResponse, buildNexusStreamHeaders, MAX_NEXUS_ROUTING_HEADER_LENGTH, ClaudeAdapter, getProviderAdapter, isBedrockOpenAIModel, createBedrockOpenAIModel, bedrockOpenAIDefaults, getBedrockCredentialProvider]
   test_paths:
+    - lib/ai/__tests__/bedrock-credentials.test.ts
     - lib/ai/__tests__/bedrock-openai.test.ts
     - tests/e2e/nexus-bedrock-openai.functional.spec.ts
     - lib/streaming/__tests__/model-capability-coverage.test.ts
@@ -288,7 +289,43 @@ Caption: `createModel` builds the GPT model with its effort bound, and the strea
 - **`forceReasoning: true`** is needed because the OpenAI provider detects reasoning models by ID prefix (`gpt-5`, `o3`). The `us.openai.gpt-*` IDs match none of them, so without this flag the provider drops the effort, sends the system prompt with the `system` role instead of `developer`, and forwards sampling parameters that reasoning models reject.
 - **`store: false`** makes each request self-contained. Prior reasoning is replayed inline, because a `us.` profile can route each request to any member Region, and a stored item is not guaranteed to resolve there.
 
-Authentication mirrors the Converse path. `createBedrockOpenAIModel` uses stored Bedrock keys from `Settings.getBedrock()` outside Lambda. Otherwise it uses the default AWS provider chain (`fromNodeProviderChain`, memoized), so the ECS task role works. The `fetch` strips the placeholder Bearer header, signs with `aws4fetch` for service `bedrock`, and sets `retries: 0` so the AI SDK alone owns retries. The placeholder value is not a credential.
+Authentication for this path uses the shared helper described in [Credential Resolution for Bedrock Clients](#credential-resolution-for-bedrock-clients). `createBedrockOpenAIModel` passes that helper's `credentialProvider` into a SigV4-signing `fetch` (`aws4fetch`, service `bedrock`). The `fetch` strips the placeholder Bearer header and sets `retries: 0`, so the AI SDK alone owns retries. The placeholder value is not a credential.
+
+### Credential Resolution for Bedrock Clients
+
+**Location**: `getBedrockCredentialProvider` in `lib/ai/bedrock-credentials.ts`. Every Bedrock client in the app calls it: the Converse builder `createBedrockModel` in `lib/ai/provider-factory.ts`, the Claude and Nova adapter `ClaudeAdapter.createModel`, the Bedrock-hosted GPT builder `createBedrockOpenAIModel`, and the Bedrock embedding client in `getEmbeddingModelClient` (`lib/ai-helpers.ts`).
+
+**Why it exists**: When a Bedrock client gets no `credentialProvider`, the AI SDK's Bedrock provider reads only the `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` env vars. Lambda sets those. ECS Fargate does not: it serves the task role from the container credential endpoint. Before this helper, ECS only worked because stored `BEDROCK_ACCESS_KEY_ID` and `BEDROCK_SECRET_ACCESS_KEY` settings supplied the keys, so all AI SDK Bedrock traffic signed as that stored IAM identity. The helper now passes the task role explicitly when no keys are stored.
+
+```mermaid
+flowchart TD
+    A[getBedrockCredentialProvider with Settings.getBedrock] --> B{Running in Lambda?}
+    B -- yes --> D[default-chain]
+    B -- no --> C{Both keys stored?}
+    C -- yes --> E[stored-keys]
+    C -- no --> D
+    D --> F[fromNodeProviderChain, memoized]
+```
+
+Caption: stored keys win only outside Lambda and only when both keys are set. Every other case uses the default AWS provider chain.
+
+**Rules**:
+- The result is `{ source, credentialProvider }`. `source` is `stored-keys` or `default-chain`. Debug logs record it as `credentialSource`.
+- A single stored key does not count as configured, so the chain is used.
+- The chain is module-memoized. The SDK caches and refreshes its credentials before expiry, and the AI SDK calls `credentialProvider` per request.
+- `AWS_BEARER_TOKEN_BEDROCK` still takes precedence inside the AI SDK.
+- Removing stored keys does not move a running environment. The settings cache keeps the last value, so running tasks keep the old keys until a new ECS deployment. Prod and dev still store keys, so their signing identity is unchanged.
+
+**Invariants for future changes**:
+- Pass `credentialProvider` to every Bedrock client. Do not set `accessKeyId` or `secretAccessKey` on the client options.
+- Stored keys are never used in Lambda.
+- The `fromNodeProviderChain` import lives only in `lib/ai/bedrock-credentials.ts`, so there is one memoized chain.
+
+**Focused tests**: `lib/ai/__tests__/bedrock-credentials.test.ts`. The describe block `getBedrockCredentialProvider` covers stored keys outside Lambda, the default chain with no keys, the default chain with one key, and Lambda ignoring stored keys. The block `Converse clients sign with the resolved credentials` checks the SigV4 `Credential=` in the outgoing `Authorization` header for the provider factory (default chain and stored keys) and for `ClaudeAdapter`. The block `Bedrock embeddings sign with the resolved credentials` covers `generateEmbedding`. The tests mock `fromNodeProviderChain` and `fetch`, so they need no AWS access.
+
+**Minimal validation**: `bunx jest --silent lib/ai/__tests__/bedrock-credentials.test.ts`. When `createBedrockOpenAIModel` changes, also run `bunx jest --silent lib/ai/__tests__/bedrock-openai.test.ts`. Add `bun run typecheck` when signatures change.
+
+**Scope boundary**: the helper decides the signing identity only. Permissions come from the ECS task role; see [IAM Least Privilege](../infrastructure/overview.md#iam-least-privilege).
 
 ### Routing Consequences
 
