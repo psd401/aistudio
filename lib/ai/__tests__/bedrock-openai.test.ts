@@ -265,9 +265,12 @@ describe("ClaudeAdapter for Bedrock-hosted GPT models", () => {
   })
 
   it("sends no effort when neither the request nor the model row sets one, so the model default applies", async () => {
-    // The direct OpenAI path never delivered an effort either (same streaming
-    // gap), so prod has always run these models at their own default:
-    // GPT-5.4 at none, newer models at medium.
+    // Matches what prod users get today on the DIRECT OpenAI path: the Nexus
+    // route filled in "medium", but BaseProviderAdapter's streamText() call
+    // drops providerOptions, so it never reached OpenAI and each model ran at
+    // its own default (GPT-5.4: none; newer models: medium). The forced
+    // "medium" this replaces existed only on the Bedrock GPT path from #1960,
+    // which had no prod rows when this changed.
     const request = await streamThroughAdapter({})
     expect(request.body.reasoning).toBeUndefined()
     expect(getAIModelByModelIdMock).toHaveBeenCalledWith("us.openai.gpt-5.5")
