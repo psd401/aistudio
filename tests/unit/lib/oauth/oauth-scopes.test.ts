@@ -7,6 +7,7 @@
  */
 
 import {
+  ALL_OAUTH_SCOPES,
   getScopeLabel,
   PUBLIC_CLIENT_REQUIRED_OIDC_SCOPES,
   RESOURCE_SERVER_SCOPES,
@@ -86,5 +87,25 @@ describe("RESOURCE_SERVER_SCOPES", () => {
         "offline_access",
       ])
     )
+  })
+
+  it("advertises assistants:execute but keeps the other assistant scopes API-key only", () => {
+    // Atrium Capture's two first-party OAuth clients need to request
+    // assistants:execute (migration 190). Without it here, oidc-provider
+    // neither advertises nor accepts the scope and every token request
+    // carrying it is rejected before the grant is ever consulted.
+    expect(RESOURCE_SERVER_SCOPES).toContain("assistants:execute")
+    expect(RESOURCE_SERVER_SCOPES).not.toContain("assistants:read")
+    expect(RESOURCE_SERVER_SCOPES).not.toContain("assistants:write")
+    expect(RESOURCE_SERVER_SCOPES).not.toContain("assistants:list")
+  })
+})
+
+describe("ALL_OAUTH_SCOPES", () => {
+  it("includes assistants:execute and excludes the other assistant scopes", () => {
+    expect(ALL_OAUTH_SCOPES).toContain("assistants:execute")
+    expect(ALL_OAUTH_SCOPES).not.toContain("assistants:read")
+    expect(ALL_OAUTH_SCOPES).not.toContain("assistants:write")
+    expect(ALL_OAUTH_SCOPES).not.toContain("assistants:list")
   })
 })
