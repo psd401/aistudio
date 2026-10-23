@@ -2,11 +2,7 @@ import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import type { ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
-import {
-  createBedrockOpenAIModel,
-  getBedrockOpenAIProviderOptions,
-  isBedrockOpenAIModel
-} from '@/lib/ai/bedrock-openai';
+import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
 import { BaseProviderAdapter } from './base-adapter';
 import type { StreamingCallbacks } from '../types';
 import type { ProviderCapabilities, StreamRequest, StreamConfig } from '../types';
@@ -29,7 +25,12 @@ export class ClaudeAdapter extends BaseProviderAdapter {
 
   async createModel(modelId: string, options?: StreamRequest['options']) {
     if (isBedrockOpenAIModel(modelId)) {
-      return createBedrockOpenAIModel(modelId);
+      // Effort is bound to the model: the shared streaming path does not
+      // forward getProviderOptions() to streamText(). Medium mirrors the
+      // direct OpenAI adapter's default.
+      return createBedrockOpenAIModel(modelId, {
+        reasoningEffort: options?.reasoningEffort || 'medium'
+      });
     }
 
     try {
@@ -253,14 +254,7 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   
   getProviderOptions(modelId: string, options?: StreamRequest['options']): Record<string, unknown> {
     const baseOptions = super.getProviderOptions(modelId, options);
-
-    if (isBedrockOpenAIModel(modelId)) {
-      return {
-        ...baseOptions,
-        ...getBedrockOpenAIProviderOptions(options?.reasoningEffort)
-      };
-    }
-
+    
     // Add Claude-specific options
     const claudeOptions: Record<string, unknown> = {
       ...baseOptions

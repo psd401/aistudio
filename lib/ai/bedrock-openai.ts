@@ -34,7 +34,7 @@ const runtimeBaseURL = (region: string) =>
  * `createOpenAI` requires an API key and sends it as a Bearer header. Bedrock
  * authenticates by SigV4 instead, so the header is stripped before signing.
  */
-const SIGV4_PLACEHOLDER_API_KEY = 'bedrock-sigv4';
+const UNUSED_BEARER_VALUE = 'unused';
 
 type AwsCredentials = {
   accessKeyId: string;
@@ -49,23 +49,12 @@ export function isBedrockOpenAIModel(modelId: string): boolean {
   return BEDROCK_OPENAI_MODEL_PATTERN.test(modelId);
 }
 
-/**
- * Provider options the streaming adapter adds for Bedrock-hosted GPT requests.
- * Mirrors the direct OpenAI adapter's reasoning-effort default.
- */
-export function getBedrockOpenAIProviderOptions(
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high'
-): Record<string, unknown> {
-  return {
-    openai: {
-      reasoningEffort: reasoningEffort || 'medium'
-    }
-  };
-}
+export type BedrockOpenAIReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
- * Applied to every request, whichever caller builds it (streaming adapter,
- * `createProviderModel` + `generateText`, ...); a caller's own value wins.
+ * Defaults applied to every request, whichever caller builds it (streaming
+ * adapter, `createProviderModel` + `generateText`, ...); a caller's own
+ * provider options still win.
  *
  * `store: false` keeps each request self-contained: prior reasoning is replayed
  * inline instead of as `item_reference`s to server-stored items. A `us.`
@@ -77,10 +66,24 @@ export function getBedrockOpenAIProviderOptions(
  * so without it the provider silently drops `reasoningEffort`, sends the
  * system prompt with the `system` role instead of `developer`, and forwards
  * sampling parameters that reasoning models reject.
+ *
+ * `reasoningEffort` is bound here, on the model, because the shared streaming
+ * path (`BaseProviderAdapter.streamWithEnhancements`) does not forward an
+ * adapter's `getProviderOptions()` to `streamText()`.
  */
-const BEDROCK_OPENAI_DEFAULTS = defaultSettingsMiddleware({
-  settings: { providerOptions: { openai: { store: false, forceReasoning: true } } }
-});
+function bedrockOpenAIDefaults(reasoningEffort?: BedrockOpenAIReasoningEffort) {
+  return defaultSettingsMiddleware({
+    settings: {
+      providerOptions: {
+        openai: {
+          store: false,
+          forceReasoning: true,
+          ...(reasoningEffort && { reasoningEffort })
+        }
+      }
+    }
+  });
+}
 
 function createSigV4Fetch(
   region: string,
@@ -111,7 +114,10 @@ function createSigV4Fetch(
  * (local development and any deployment that configures them), otherwise the
  * default AWS credential chain (ECS task role, Lambda role, SSO profile).
  */
-export async function createBedrockOpenAIModel(modelId: string): Promise<LanguageModel> {
+export async function createBedrockOpenAIModel(
+  modelId: string,
+  options?: { reasoningEffort?: BedrockOpenAIReasoningEffort }
+): Promise<LanguageModel> {
   const config = await Settings.getBedrock();
   const region = config.region || 'us-east-1';
   const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
@@ -133,12 +139,12 @@ export async function createBedrockOpenAIModel(modelId: string): Promise<Languag
   const client = createOpenAI({
     name: 'amazon-bedrock-openai',
     baseURL: runtimeBaseURL(region),
-    apiKey: SIGV4_PLACEHOLDER_API_KEY,
+    apiKey: UNUSED_BEARER_VALUE,
     fetch: createSigV4Fetch(region, getCredentials)
   });
 
   return wrapLanguageModel({
     model: client.responses(modelId),
-    middleware: BEDROCK_OPENAI_DEFAULTS
+    middleware: bedrockOpenAIDefaults(options?.reasoningEffort)
   });
 }

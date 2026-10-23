@@ -20,7 +20,6 @@ jest.mock("@/lib/settings-manager", () => ({
 
 import {
   createBedrockOpenAIModel,
-  getBedrockOpenAIProviderOptions,
   isBedrockOpenAIModel,
 } from "@/lib/ai/bedrock-openai"
 import {
@@ -96,15 +95,15 @@ describe("isBedrockOpenAIModel", () => {
   })
 })
 
-describe("createBedrockOpenAIModel", () => {
-  beforeEach(() => {
-    getBedrockMock.mockResolvedValue({
-      accessKeyId: "test-access-key-id",
-      secretAccessKey: "example-secret-not-real",
-      region: "us-east-1",
-    })
+beforeEach(() => {
+  getBedrockMock.mockResolvedValue({
+    accessKeyId: "test-access-key-id",
+    secretAccessKey: "example-secret-not-real",
+    region: "us-east-1",
   })
+})
 
+describe("createBedrockOpenAIModel", () => {
   afterEach(() => {
     jest.restoreAllMocks()
   })
@@ -135,19 +134,29 @@ describe("createBedrockOpenAIModel", () => {
     expect(captured[0].body.store).toBe(false)
   })
 
-  it("lets a caller's reasoning effort through alongside the store default", async () => {
+  it("sends the reasoning effort bound at creation, with no caller provider options", async () => {
     const captured = captureFetch()
-    const model = await createBedrockOpenAIModel("us.openai.gpt-5.5")
+    const model = await createBedrockOpenAIModel("us.openai.gpt-5.5", { reasoningEffort: "high" })
+
+    await generateText({ model, prompt: "Say OK", maxRetries: 0 })
+
+    expect(captured[0].body.store).toBe(false)
+    expect(captured[0].body.reasoning).toEqual({ effort: "high" })
+  })
+
+  it("lets a caller's own provider options override the bound effort", async () => {
+    const captured = captureFetch()
+    const model = await createBedrockOpenAIModel("us.openai.gpt-5.5", { reasoningEffort: "high" })
 
     await generateText({
       model,
       prompt: "Say OK",
       maxRetries: 0,
-      providerOptions: getBedrockOpenAIProviderOptions("high") as never,
+      providerOptions: { openai: { reasoningEffort: "low" } },
     })
 
+    expect(captured[0].body.reasoning).toEqual({ effort: "low" })
     expect(captured[0].body.store).toBe(false)
-    expect(captured[0].body.reasoning).toEqual({ effort: "high" })
   })
 
   it("treats prefixed IDs as reasoning models: developer role, no temperature", async () => {
@@ -205,17 +214,51 @@ describe("ClaudeAdapter for Bedrock-hosted GPT models", () => {
     expect(capabilities.supportedTools).toEqual([])
   })
 
-  it("passes reasoning effort as OpenAI provider options, defaulting to medium", () => {
-    expect(adapter.getProviderOptions("us.openai.gpt-5.5", {}).openai).toEqual({
-      reasoningEffort: "medium",
-    })
-    expect(
-      adapter.getProviderOptions("us.openai.gpt-5.5", { reasoningEffort: "low" }).openai
-    ).toEqual({ reasoningEffort: "low" })
+  afterEach(() => {
+    jest.restoreAllMocks()
   })
 
-  it("does not add OpenAI options to Claude models", () => {
-    expect(adapter.getProviderOptions("us.anthropic.claude-sonnet-5", {}).openai).toBeUndefined()
+  /**
+   * The Nexus path: unified-streaming-service hands the adapter's model to
+   * BaseProviderAdapter.streamWithEnhancements, whose streamText() call does
+   * NOT forward getProviderOptions(). The effort must still reach the wire.
+   */
+  async function streamThroughAdapter(
+    options: { reasoningEffort?: "minimal" | "low" | "medium" | "high" },
+  ): Promise<CapturedRequest> {
+    const captured = captureFetch()
+    const model = await adapter.createModel("us.openai.gpt-5.5", options)
+    const result = await adapter.streamWithEnhancements(
+      {
+        model,
+        messages: [{ role: "user", content: "Say OK" }],
+        system: "Be brief.",
+        maxSteps: 1,
+        timeout: 30_000,
+        providerOptions: adapter.getProviderOptions("us.openai.gpt-5.5", options),
+      },
+      {},
+    )
+    result.usage.catch(() => undefined)
+    // streamText starts the request without waiting for a reader.
+    for (let attempt = 0; attempt < 100 && captured.length === 0; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(captured).toHaveLength(1)
+    return captured[0]
+  }
+
+  it("streams with the requested reasoning effort on the wire", async () => {
+    const request = await streamThroughAdapter({ reasoningEffort: "low" })
+    expect(request.url).toMatch(/bedrock-runtime\.us-east-1\.amazonaws\.com\/openai\/v1\/responses$/)
+    expect(request.body.reasoning).toEqual({ effort: "low" })
+    expect(request.body.store).toBe(false)
+    expect(request.body.stream).toBe(true)
+  })
+
+  it("streams with medium effort when none is requested, like the direct OpenAI adapter", async () => {
+    const request = await streamThroughAdapter({})
+    expect(request.body.reasoning).toEqual({ effort: "medium" })
   })
 })
 
