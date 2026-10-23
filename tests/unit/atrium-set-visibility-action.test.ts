@@ -211,6 +211,27 @@ describe("setVisibilityAction — write", () => {
     expect(result.isSuccess).toBe(false);
   });
 
+  it("surfaces a service ValidationError's own message, not the generic fallback", async () => {
+    // Prod 2026-10-23: a doc in a private collection set to Internal showed only
+    // "Failed to update visibility". The service's reason is the actionable part.
+    const { ValidationError } = jest.requireActual("@/lib/content/errors");
+    setLevelMock.mockRejectedValueOnce(
+      new ValidationError("Content in a private collection must remain private")
+    );
+    const result = await setVisibilityAction("o1", { level: "internal" });
+    expect(result.isSuccess).toBe(false);
+    expect(result.message).toBe(
+      "Content in a private collection must remain private"
+    );
+  });
+
+  it("keeps the generic message for a non-validation failure", async () => {
+    setLevelMock.mockRejectedValueOnce(new Error("connection reset"));
+    const result = await setVisibilityAction("o1", { level: "internal" });
+    expect(result.isSuccess).toBe(false);
+    expect(result.message).toBe("Failed to update visibility");
+  });
+
   it("surfaces the §26.4 gate as a distinct approval_required state, not a generic error", async () => {
     // A non-admin widening to `public` is denied by the gate as an
     // ApprovalRequiredError. The action must map it to `approvalRequired: true`

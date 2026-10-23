@@ -683,6 +683,27 @@ export const visibilityService = {
   grantsFor,
 
   /**
+   * Whether `collectionId` names a PRIVATE (owner-scoped) collection — the same
+   * `ownerUserId IS NOT NULL` test `setLevelInTx` uses to reject any non-private
+   * level for content filed there. Exposed so the Share dialog can lock its
+   * level picker up front instead of offering choices the write path will
+   * always refuse. Unfiled content (`null`) is never in a private collection.
+   */
+  async isInPrivateCollection(collectionId: string | null): Promise<boolean> {
+    if (collectionId == null) return false;
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ ownerUserId: contentCollections.ownerUserId })
+          .from(contentCollections)
+          .where(eq(contentCollections.id, collectionId))
+          .limit(1),
+      "content.isInPrivateCollection"
+    );
+    return rows[0]?.ownerUserId != null;
+  },
+
+  /**
    * The single predicate that gates every content read. Evaluated against the
    * requester's principal.
    *
