@@ -18,6 +18,12 @@ jest.mock("@/lib/settings-manager", () => ({
   },
 }))
 
+const getAIModelByModelIdMock = jest.fn()
+
+jest.mock("@/lib/db/drizzle", () => ({
+  getAIModelByModelId: (modelId: string) => getAIModelByModelIdMock(modelId),
+}))
+
 import {
   createBedrockOpenAIModel,
   isBedrockOpenAIModel,
@@ -96,6 +102,8 @@ describe("isBedrockOpenAIModel", () => {
 })
 
 beforeEach(() => {
+  getAIModelByModelIdMock.mockReset()
+  getAIModelByModelIdMock.mockResolvedValue(null)
   getBedrockMock.mockResolvedValue({
     accessKeyId: "test-access-key-id",
     secretAccessKey: "example-secret-not-real",
@@ -224,7 +232,7 @@ describe("ClaudeAdapter for Bedrock-hosted GPT models", () => {
    * NOT forward getProviderOptions(). The effort must still reach the wire.
    */
   async function streamThroughAdapter(
-    options: { reasoningEffort?: "minimal" | "low" | "medium" | "high" },
+    options: { reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" },
   ): Promise<CapturedRequest> {
     const captured = captureFetch()
     const model = await adapter.createModel("us.openai.gpt-5.5", options)
@@ -256,9 +264,43 @@ describe("ClaudeAdapter for Bedrock-hosted GPT models", () => {
     expect(request.body.stream).toBe(true)
   })
 
-  it("streams with medium effort when none is requested, like the direct OpenAI adapter", async () => {
+  it("sends no effort when neither the request nor the model row sets one, so the model default applies", async () => {
+    // The direct OpenAI path never delivered an effort either (same streaming
+    // gap), so prod has always run these models at their own default:
+    // GPT-5.4 at none, newer models at medium.
     const request = await streamThroughAdapter({})
-    expect(request.body.reasoning).toEqual({ effort: "medium" })
+    expect(request.body.reasoning).toBeUndefined()
+    expect(getAIModelByModelIdMock).toHaveBeenCalledWith("us.openai.gpt-5.5")
+  })
+
+  it("streams with the model row's admin default when the request sets none", async () => {
+    getAIModelByModelIdMock.mockResolvedValue({
+      providerMetadata: { defaultReasoningEffort: "none" },
+    })
+    const request = await streamThroughAdapter({})
+    expect(request.body.reasoning).toEqual({ effort: "none" })
+  })
+
+  it("lets the request's effort override the model row's default", async () => {
+    getAIModelByModelIdMock.mockResolvedValue({
+      providerMetadata: { defaultReasoningEffort: "none" },
+    })
+    const request = await streamThroughAdapter({ reasoningEffort: "high" })
+    expect(request.body.reasoning).toEqual({ effort: "high" })
+  })
+
+  it("falls back to the model default when the row lookup fails", async () => {
+    getAIModelByModelIdMock.mockRejectedValue(new Error("db down"))
+    const request = await streamThroughAdapter({})
+    expect(request.body.reasoning).toBeUndefined()
+  })
+
+  it("ignores an unrecognised stored default", async () => {
+    getAIModelByModelIdMock.mockResolvedValue({
+      providerMetadata: { defaultReasoningEffort: "minimal" },
+    })
+    const request = await streamThroughAdapter({})
+    expect(request.body.reasoning).toBeUndefined()
   })
 
   it("does not add OpenAI options to Claude models", () => {

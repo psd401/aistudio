@@ -33,7 +33,7 @@ export interface NexusModelOptions {
   enableCaching?: boolean;
   enableOptimizations?: boolean;
   routingStrategy?: "cost" | "latency" | "quality" | "intelligent";
-  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
   responseMode?: "standard" | "flex" | "priority";
   backgroundMode?: boolean;
   thinkingBudget?: number;
