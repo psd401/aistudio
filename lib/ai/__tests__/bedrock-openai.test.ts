@@ -260,6 +260,13 @@ describe("ClaudeAdapter for Bedrock-hosted GPT models", () => {
     const request = await streamThroughAdapter({})
     expect(request.body.reasoning).toEqual({ effort: "medium" })
   })
+
+  it("does not add OpenAI options to Claude models", () => {
+    expect(adapter.getProviderOptions("us.anthropic.claude-sonnet-5", {}).openai).toBeUndefined()
+    expect(
+      adapter.getProviderOptions("us.anthropic.claude-sonnet-5", { reasoningEffort: "high" }).openai
+    ).toBeUndefined()
+  })
 })
 
 describe("model router treatment of Bedrock-hosted GPT models", () => {
