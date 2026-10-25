@@ -249,6 +249,34 @@ This means:
 - No per-route configuration needed
 - Consistent behavior across Nexus Chat, Model Compare, and Assistant execution
 
+## Gemini Model Capabilities (#1967)
+
+`GeminiAdapter.getCapabilities()` in `lib/streaming/provider-adapters/gemini-adapter.ts` maps a model ID to the capability row the stream uses: reasoning flag, `maxTimeoutMs` (the per-step budget that `StreamDeadline` enforces), and cost fields. A model that matches no row gets the defaults, so a new generation must be matched explicitly.
+
+- The first branch covers `gemini-3*` and `gemini-4*`, with and without the `models/` prefix. Before #1967 it matched only 3.x, so `gemini-4-argon` fell through to the defaults: no reasoning flag and a 120s budget.
+- Inside that branch, the flagship budget applies to IDs matching `*pro*` or `*argon*`. Those rows report reasoning and a 180s budget. The rest of the 3.x/4.x family (for example Flash) gets 120s.
+- The 2.5 and 1.5 branches follow and are unchanged.
+
+```mermaid
+flowchart TD
+    A[getCapabilities modelId] --> B{ID has gemini-3 or gemini-4 prefix?}
+    B -- no --> C[2.5 / 1.5 branches or defaults]
+    B -- yes --> D{ID contains pro or argon?}
+    D -- yes --> E[reasoning true, maxTimeoutMs 180000]
+    D -- no --> F[reasoning true, maxTimeoutMs 120000]
+```
+
+**Invariants for future changes**
+- Add a new Gemini generation to the first branch's pattern list. Otherwise it inherits the defaults, which the source comment ties to a 30s abort that cut off long Nexus answers.
+- The flagship match is a substring test on the model ID. Adding a flagship name means adding a pattern to that single `isPro` list.
+- The budget feeds `StreamDeadline`, so changing `maxTimeoutMs` changes when a silent stream is aborted. Re-check the keep-alive rules in [SSE Keep-Alive Implementation](#sse-keep-alive-implementation).
+
+**Focused tests**: `lib/streaming/__tests__/model-capability-coverage.test.ts`. The `PRODUCTION_MODELS` table lists the production IDs, including `gemini-3.8-flash` and `gemini-4-argon`. The test `treats Gemini 4 Argon as a flagship reasoning model with the Pro budget` asserts reasoning and 180000 ms.
+
+**Minimal validation**: `bunx jest --silent lib/streaming/__tests__/model-capability-coverage.test.ts`. Add `bun run typecheck` when the capability type changes.
+
+**Scope boundary**: this table sets the budget and reasoning flag only. Which model a turn uses is decided by the router in [Automatic Model Routing](../app-features/overview.md#automatic-model-routing), which reads tier from `inferModelTier()`, not from this table.
+
 ## Amazon Bedrock Adapter and OpenAI GPT Models
 
 **Location**: `lib/streaming/provider-adapters/index.ts` registers `ClaudeAdapter` for the `amazon-bedrock` provider (`getProviderAdapter`). The class name reflects the original Claude and Nova path. It also owns Bedrock-hosted OpenAI GPT models (IDs such as `us.openai.gpt-5.5`), which bypass Converse and go to the OpenAI Responses API on `bedrock-runtime`.
@@ -617,4 +645,8 @@ controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
  streaming service
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
+ransport pitfalls
+port pitfalls
+ransport pitfalls
+falls
 ransport pitfalls
