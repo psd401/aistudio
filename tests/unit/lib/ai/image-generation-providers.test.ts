@@ -168,4 +168,31 @@ describe("image generation provider pipelines", () => {
       altText: "A watercolor lighthouse",
     })
   })
+
+  it.each([
+    ["gemini-nano-banana-2.1", "gemini-nano-banana-2.1"],
+    // Differs from the fallback default, so a fallback cannot pass for it.
+    ["gemini-nano-banana-3", "gemini-nano-banana-3"],
+    ["gemini-3.1-flash-image", "gemini-3.1-flash-image"],
+    // A non-image ID falls back to the current default, not the restricted
+    // gemini-2.5-flash-image.
+    ["gemini-3.8-flash", "gemini-nano-banana-2.1"],
+  ])("calls Gemini image model %s as %s", async (requested, called) => {
+    generateTextMock.mockResolvedValue({
+      text: "An owl",
+      files: [{ uint8Array: new TextEncoder().encode("img"), mediaType: "image/png" }],
+    })
+
+    await generateImageForNexus({
+      prompt: "Draw an owl",
+      modelId: requested,
+      provider: "google",
+      conversationId: "conversation-3",
+      userId: "user-3",
+    })
+
+    // Nano Banana 2.1 drops "image" from its ID; it must not be swapped for
+    // a different model.
+    expect(googleImageModelMock).toHaveBeenLastCalledWith(called)
+  })
 })

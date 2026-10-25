@@ -36,8 +36,10 @@ export function inferModelTier(model: RoutableModel): ModelRouterTier {
     ?? model.providerMetadata?.nexusRouterTier
   if (configured === "light" || configured === "medium" || configured === "high") return configured
   const value = `${model.name} ${model.modelId}`.toLowerCase()
-  if (/haiku|flash-lite|flash lite|nano|mini|luna|micro/.test(value)) return "light"
-  if (/opus|fable|pro|sol|o3|o1|high/.test(value)) return "high"
+  // Whole words only: a bare substring test matched "mini" inside "gemini",
+  // which put every Gemini model (Pro included) in the light tier.
+  if (/\b(haiku|flash-lite|flash lite|nano|mini|luna|micro)\b/.test(value)) return "light"
+  if (/\b(opus|fable|pro|sol|argon|o3|o1|high)\b/.test(value)) return "high"
   return "medium"
 }
 
