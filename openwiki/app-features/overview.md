@@ -337,6 +337,24 @@ Nexus defaults to **Standard** mode where the server classifies each request and
 
 See `/docs/features/nexus-model-routing.md` for full configuration.
 
+#### Tier Inference and Specialist Defaults (#1967)
+
+Each candidate model has a tier (`light`, `medium`, or `high`). `inferModelTier()` in `lib/ai/model-router/core.ts` uses a stored tier first (`providerMetadata.modelRouterTier` or `nexusRouterTier`). Without one, it matches the name and model ID against whole-word patterns:
+
+- `light`: haiku, flash-lite, flash lite, nano, mini, luna, micro
+- `high`: opus, fable, pro, sol, argon, o3, o1, high
+- anything else: `medium`
+
+The whole-word match is the fix in #1967. The old substring test matched `mini` inside `gemini`, so every Gemini model, Pro included, was routed as `light` when no tier was configured. A new high-tier name needs a word in the `high` list. Otherwise it is routed as `medium`.
+
+The specialist defaults in `nexusRouterConfigSchema` (`lib/nexus/model-router/types.ts`) apply when no router config is stored. Image uses `gemini-nano-banana-2.1`, instruction uses `gemini-3.8-flash`, and web search uses `gemini-3.8-flash` then `gemini-4-argon`. Stored configs are not changed by a default edit. The defaults that #1967 replaced named retired or deprecated image and Flash IDs.
+
+**Focused tests**: `lib/ai/model-router/__tests__/core.test.ts` (the test `infers tiers from current model names when no tier is configured`) and `lib/nexus/model-router/__tests__/config.test.ts` (asserts the default image and web-search specialists).
+
+**Minimal validation**: `bunx jest --silent lib/ai/model-router/__tests__/core.test.ts lib/nexus/model-router/__tests__/config.test.ts`
+
+**Scope boundary**: the Gemini budget and reasoning flag come from [the Gemini capability row](../architecture/streaming.md#gemini-model-capabilities-1967), not from tier. The tier only decides which candidate the router prefers.
+
 ### Conversation Architecture
 
 - Hierarchical conversations with folders
@@ -448,6 +466,18 @@ Nexus supports AI image generation through OpenAI (DALL-E) and Google Gemini mod
 - **Generate**: Create images from text prompts
 - **Edit**: Modify existing generated images with new prompts
 - **Variations**: Generate variations of existing images (provider-dependent)
+
+#### Gemini Image Model IDs (#1967)
+
+`generateWithGemini()` in `lib/ai/image-generation-service.ts` uses the requested model when `isGeminiImageModelId()` accepts its ID. That check accepts any ID containing `image` or `nano-banana`. Google names the Nano Banana models `gemini-nano-banana-*` without `image`. The earlier `image`-only check missed them, so the request silently ran on a fallback model. An ID that is not an image model falls back to `DEFAULT_GEMINI_IMAGE_MODEL` (`gemini-nano-banana-2.1`).
+
+- `isImageGenerationModel()` also recognises the `nano-banana` substring.
+- `getGeminiCost()` has a per-image price for `gemini-nano-banana-2.1`.
+- Invariant: a Gemini image ID must reach the provider unchanged. A test that uses a non-`image` ID such as `gemini-nano-banana-3` is the one that discriminates the old check. A test on `gemini-nano-banana-2.1` alone does not, because that ID is also the new fallback.
+
+**Focused tests**: `tests/unit/lib/ai/image-generation-providers.test.ts` covers the requested-ID path, the fallback path, and the cost lookup.
+
+**Minimal validation**: `bunx jest --silent tests/unit/lib/ai/image-generation-providers.test.ts`
 
 #### Storage and Retrieval
 
@@ -2115,6 +2145,26 @@ Side-by-side evaluation of AI models for informed selection.
 ```
 Nexus Chat
     ├── uses → Model Router → classifies → routes to AI Providers
+    ├── integrates → MCP Tools → exposed by → Agent Platform
+    └── grounds in → Knowledge Repositories
+
+Assistant Architect
+    ├── builds → Prompt Chains → executes → AI Providers
+    ├── attaches → Tools → gated by → Capabilities
+    └── links → Knowledge Repositories
+
+Atrium
+    ├── exposes → Content API → consumed by → Agent Skills
+    ├── publishes → to Intranet → with Group Visibility
+    └── stores → Documents & Artifacts → in S3 + PostgreSQL
+```
+
+## Related Concepts
+
+- **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
+- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
+- **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
+�� routes to AI Providers
     ├── integrates → MCP Tools → exposed by → Agent Platform
     └── grounds in → Knowledge Repositories
 
