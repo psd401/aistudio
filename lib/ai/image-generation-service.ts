@@ -740,6 +740,24 @@ function throwGeminiImageError(error: unknown): never {
 }
 
 /**
+ * Current default Gemini image model. `gemini-2.5-flash-image` is now
+ * restricted to existing users, and `gemini-3.1-flash-image-preview` was shut
+ * down on 2026-06-25.
+ */
+const DEFAULT_GEMINI_IMAGE_MODEL = 'gemini-nano-banana-2.1';
+
+/**
+ * Gemini image models. Older IDs contain "image" (`gemini-3.1-flash-image`,
+ * `gemini-3-pro-image`); from Nano Banana 2.1 Google names them
+ * `gemini-nano-banana-*`, which an "image" substring check silently missed —
+ * the request then fell back to a different model.
+ */
+function isGeminiImageModelId(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return lower.includes('image') || lower.includes('nano-banana');
+}
+
+/**
  * Generate image using Google's Gemini image models
  * CRITICAL: Uses generateText() NOT generateImage() - Gemini returns images in result.files
  * Supports reference images for editing/compositing (Gemini 3 Pro Image supports up to 14 reference images)
@@ -764,10 +782,11 @@ async function generateWithGemini(
 
     const google = createGoogleGenerativeAI({ apiKey });
 
-    // Determine the image model - use gemini-2.5-flash-image as default
-    const imageModelId = request.modelId.includes('image')
+    // Use the requested Gemini image model; fall back to the current default
+    // only when the ID is not an image model at all.
+    const imageModelId = isGeminiImageModelId(request.modelId)
       ? request.modelId
-      : 'gemini-2.5-flash-image';
+      : DEFAULT_GEMINI_IMAGE_MODEL;
 
     // CRITICAL: Gemini image models use generateText with responseModalities
     const model = google(imageModelId);
@@ -931,6 +950,8 @@ function getOpenAICost(modelId: string, size?: string, quality?: string): number
  */
 function getGeminiCost(modelId: string): number {
   const baseCosts: Record<string, number> = {
+    // Per 1K image, Gemini API standard tier (2026-10).
+    'gemini-nano-banana-2.1': 0.0336,
     'gemini-2.5-flash-image-generation': 0.04,
     'gemini-3-pro-image-preview': 0.04,
     'imagen-3.0-generate-002': 0.04,
@@ -958,6 +979,7 @@ export function isImageGenerationModel(modelId: string): boolean {
     'gemini-3.1-flash-image',
     'gemini-3.1-flash-lite-image',
     'gemini-3-pro-image',
+    'nano-banana',
     'imagen'
   ];
 

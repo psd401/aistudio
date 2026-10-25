@@ -26,6 +26,22 @@ describe("shared model router core", () => {
     expect(inferModelTier(models[2])).toBe("high")
   })
 
+  it("infers tiers from current model names when no tier is configured", () => {
+    const row = (name: string, modelId: string, provider: string): RoutableModel => ({
+      id: 99, name, provider, modelId, capabilities: "[]", providerMetadata: null,
+    })
+    expect(inferModelTier(row("Gemini 4 Argon", "gemini-4-argon", "google"))).toBe("high")
+    expect(inferModelTier(row("Gemini 3.8 Flash", "gemini-3.8-flash", "google"))).toBe("medium")
+    expect(inferModelTier(row("Claude Opus 5.5", "us.anthropic.claude-opus-5-5", "amazon-bedrock"))).toBe("high")
+    expect(inferModelTier(row("Claude Haiku 5.5", "us.anthropic.claude-haiku-5-5", "amazon-bedrock"))).toBe("light")
+    // "gemini" contains "mini"; it must not make every Gemini model light.
+    expect(inferModelTier(row("Gemini 3.1 Pro", "gemini-3.1-pro-preview", "google"))).toBe("high")
+    expect(inferModelTier(row("GPT-6 Luna", "us.openai.gpt-6-luna", "amazon-bedrock"))).toBe("light")
+    expect(inferModelTier(row("GPT-6 Sol", "us.openai.gpt-6-sol", "amazon-bedrock"))).toBe("high")
+    expect(inferModelTier(row("GPT-5.6 Terra", "us.openai.gpt-5.6-terra", "amazon-bedrock"))).toBe("medium")
+    expect(inferModelTier(row("Nova Micro", "us.amazon.nova-micro-v1:0", "amazon-bedrock"))).toBe("light")
+  })
+
   it("excludes specialist-only image endpoints from text routing", () => {
     expect(isExecutableTextModel(models[4])).toBe(false)
   })

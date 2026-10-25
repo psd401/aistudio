@@ -56,6 +56,11 @@ const PRODUCTION_MODELS: ReadonlyArray<{
   { label: 'Gemini 3 Flash', modelId: 'gemini-3-flash-preview', adapter: gemini },
   { label: 'Gemini 3 Pro', modelId: 'gemini-3-pro-preview', adapter: gemini },
   { label: 'Gemini 3.1 Pro', modelId: 'gemini-3.1-pro-preview', adapter: gemini },
+  { label: 'Gemini 3.8 Flash', modelId: 'gemini-3.8-flash', adapter: gemini },
+  { label: 'Gemini 4 Argon', modelId: 'gemini-4-argon', adapter: gemini },
+  { label: 'Claude Opus 5.5 (Bedrock)', modelId: 'us.anthropic.claude-opus-5-5', adapter: claude },
+  { label: 'Claude Sonnet 5.5 (Bedrock)', modelId: 'us.anthropic.claude-sonnet-5-5', adapter: claude },
+  { label: 'Claude Haiku 5.5 (Bedrock)', modelId: 'us.anthropic.claude-haiku-5-5', adapter: claude },
   { label: 'GPT-5', modelId: 'gpt-5', adapter: openai },
   { label: 'GPT-5.5 (Bedrock)', modelId: 'us.openai.gpt-5.5', adapter: claude },
   { label: 'GPT-6 Sol (Bedrock)', modelId: 'us.openai.gpt-6-sol', adapter: claude },
@@ -186,5 +191,11 @@ describe('resolveStreamTimeout precedence', () => {
     expect(resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: true, maxTimeoutMs: 0 }))).toBe(120_000);
     expect(resolveStreamTimeout(caps({ supportsReasoning: true, supportsThinking: false, maxTimeoutMs: 0 }))).toBe(60_000);
     expect(resolveStreamTimeout(caps({ maxTimeoutMs: 0 }))).toBe(120_000);
+  });
+
+  it('treats Gemini 4 Argon as a flagship reasoning model with the Pro budget', () => {
+    const capabilities = gemini.getCapabilities('gemini-4-argon');
+    expect(capabilities.supportsReasoning).toBe(true);
+    expect(capabilities.maxTimeoutMs).toBe(180000);
   });
 });
