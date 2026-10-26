@@ -168,6 +168,16 @@ describe("pdfContentSafetyCheck", () => {
     expect(processInput).toHaveBeenLastCalledWith("bad content", "sub");
   });
 
+  it("refuses a PDF with no extracted text when guardrails are on (nothing was screened)", async () => {
+    const processInput = jest.fn(async () => allow);
+    const check = pdfContentSafetyCheck("sub", {
+      safety: { isEnabled: () => true, processInput: processInput as never },
+      loadText: async () => "  \n ",
+    });
+    await expect(check(source(7))).resolves.toBe(false);
+    expect(processInput).not.toHaveBeenCalled();
+  });
+
   it("allows when every slice passes", async () => {
     const check = pdfContentSafetyCheck("sub", {
       safety: { isEnabled: () => true, processInput: jest.fn(async () => allow) as never },

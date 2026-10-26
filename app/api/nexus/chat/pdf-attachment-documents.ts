@@ -14,9 +14,9 @@
  *  - only owner-bound, clean, processed PDFs (same rules as image references),
  *  - only Claude 4.x/5.x on Bedrock — the one path verified end to end (Gemini
  *    accepts PDFs too, but has not been verified on our model ids),
- *  - only after the PDF's extracted text passes the same content-safety check
- *    retrieved chunks get (`protectRetrievedChunk`), so the model never sees a
- *    PDF that the search path would have refused to return,
+ *  - only after the PDF's extracted text (text layer + OCR) passes the same
+ *    content-safety check retrieved chunks get (`protectRetrievedChunk`); with
+ *    guardrails on, a PDF with no extracted text is not attached,
  *  - bounded size, and
  *  - fail-open: a PDF that fails any step is simply not attached, and the turn
  *    proceeds on text retrieval exactly as before. Nothing here blocks a turn.
@@ -85,6 +85,10 @@ export function pdfContentSafetyCheck(
     const safety = deps.safety ?? getContentSafetyService();
     if (!safety.isEnabled()) return true;
     const text = await (deps.loadText ?? loadItemVersionText)(source.itemVersionId);
+    // Nothing the guardrail can read (no text layer and no OCR output): the
+    // pages the model would see were never screened, so do not attach. The
+    // turn still gets text retrieval, which has nothing to return either.
+    if (text.trim().length === 0) return false;
     for (let start = 0; start < text.length; start += SAFETY_SLICE_CHARS) {
       const result = await safety.processInput(text.slice(start, start + SAFETY_SLICE_CHARS), sessionId);
       if (!result.allowed) return false;
