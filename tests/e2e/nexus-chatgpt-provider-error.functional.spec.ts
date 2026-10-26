@@ -56,20 +56,26 @@ async function restoreStandardMode(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Nexus routing mode' })).toContainText('Standard')
 }
 
-/** Remove a fixture model this spec inserted, with the test turns that reference it. */
-async function deleteFixtureModel(
+/**
+ * Remove only what this run created: its own conversation, then the fixture
+ * model row if nothing else references it. Another run or a user that picked
+ * up the row in the meantime keeps its data; the row is then left in place.
+ */
+async function cleanupRun(
   database: ReturnType<typeof createDatabase>,
-  modelId: number,
+  conversationId: string | null,
+  insertedModelId: number | null,
 ): Promise<void> {
-  const conversations = await database<{ conversation_id: string }[]>`
-    SELECT DISTINCT conversation_id FROM nexus_messages WHERE model_id = ${modelId}
-  `
-  await database`DELETE FROM nexus_messages WHERE model_id = ${modelId}`
-  for (const { conversation_id: conversationId } of conversations) {
+  if (conversationId) {
     await database`DELETE FROM nexus_messages WHERE conversation_id = ${conversationId}`
     await database`DELETE FROM nexus_conversations WHERE id = ${conversationId}`
   }
-  await database`DELETE FROM ai_models WHERE id = ${modelId}`
+  if (insertedModelId === null) return
+  await database`
+    DELETE FROM ai_models
+    WHERE id = ${insertedModelId}
+      AND NOT EXISTS (SELECT 1 FROM nexus_messages WHERE model_id = ${insertedModelId})
+  `.catch(() => undefined)
 }
 
 async function assistantProviders(
@@ -135,6 +141,7 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
     const database = createDatabase()
     let advancedSelected = false
     let insertedModelId: number | null = null
+    let conversationId: string | null = null
     try {
       // Insert the fixture only when absent: an existing row (e.g. a real
       // deployment's GPT-6 Luna) is never modified, and the test skips if that
@@ -173,7 +180,7 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
       await expect
         .poll(() => getConversationIdFromUrl(page), { timeout: 15_000 })
         .toBeTruthy()
-      const conversationId = getConversationIdFromUrl(page)
+      conversationId = getConversationIdFromUrl(page)
       await expect
         .poll(() => assistantProviders(database, conversationId!), {
           timeout: 30_000,
@@ -188,7 +195,7 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
       })
     } finally {
       if (advancedSelected) await restoreStandardMode(page)
-      if (insertedModelId !== null) await deleteFixtureModel(database, insertedModelId)
+      await cleanupRun(database, conversationId ?? getConversationIdFromUrl(page), insertedModelId)
       await database.end()
     }
   })
