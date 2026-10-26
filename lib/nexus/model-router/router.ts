@@ -953,20 +953,24 @@ async function routeWithConfiguredRouter(options: {
 }
 
 /**
- * Stand-in for a client fallback model that no longer exists: the first
- * accessible, executable text model, preferring the configured medium-tier
- * candidates (Auto, then each family) over table order.
+ * Stand-in for a client fallback model that is no longer available (deleted or
+ * disabled): the first accessible, executable text model. Medium-tier
+ * candidates for the requested Advanced family come first, so a ChatGPT tab
+ * stays on ChatGPT where possible; then Auto, then every family; then table
+ * order.
  */
 function substituteFallback(
   models: NexusModelRow[],
   accessibleIds: Set<string>,
-  config: NexusRouterConfig
-): NexusModelRow | undefined {
+  config: NexusRouterConfig,
+  requestedFamily: NexusModelFamily
+): NexusModelRow | null {
   const textModels = models.filter(model =>
     !hasCapability(model.capabilities, "imageGeneration")
     && !hasCapability(model.capabilities, "deepResearch")
   )
   const preferredIds = [
+    ...(requestedFamily === "auto" ? [] : config.families[requestedFamily].medium),
     ...config.auto.medium,
     ...config.families.anthropic.medium,
     ...config.families.openai.medium,
@@ -975,7 +979,7 @@ function substituteFallback(
   const preferred = preferredIds
     .map(id => textModels.find(model => model.modelId === id || String(model.id) === id))
     .filter((model): model is NexusModelRow => model !== undefined)
-  return firstAccessibleModel([...preferred, ...textModels], accessibleIds) ?? undefined
+  return firstAccessibleModel([...preferred, ...textModels], accessibleIds)
 }
 
 export async function routeNexusRequest(
@@ -1003,13 +1007,15 @@ export async function routeNexusRequest(
     configuredProviders.has(model.provider.toLowerCase())
   )
   const fallback = requestedFallback
-    ?? (mode === "off" ? undefined : substituteFallback(routableModels, accessibleIds, config))
+    ?? (mode === "off"
+      ? undefined
+      : substituteFallback(routableModels, accessibleIds, config, args.requestedFamily) ?? undefined)
   if (!fallback) throw new Error("The fallback Nexus model is unavailable")
   if (!requestedFallback) {
     // A browser tab opened before an admin replaced/removed the model it has
     // saved keeps sending the old id until reload. With routing on, that id is
     // only a safety net, so a stale one must not fail the turn.
-    log.warn("Client fallback model no longer exists; substituting a routable default", {
+    log.warn("Client fallback model is no longer available (deleted or disabled); substituting a routable default", {
       requestedFallbackModelId: args.fallbackModelId,
       substituteModelId: fallback.modelId,
     })
