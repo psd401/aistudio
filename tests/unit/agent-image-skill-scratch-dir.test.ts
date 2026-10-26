@@ -109,4 +109,22 @@ describe("agent skill scratch directory", () => {
     // The self-check is what the model actually re-reads before replying.
     expect(rules).toMatch(/\(R16\)/)
   })
+
+  it("tells the agent that 'show me' means publish now, privately", () => {
+    // Dev retest 2026-10-26: asked to "show" a rendered PNG, the model viewed
+    // it with its own image tool and offered to publish instead of publishing.
+    const rules = readFileSync(
+      join(skillsDir, "psd-rules", "SKILL.md"),
+      "utf8"
+    )
+    expect(rules).toContain(
+      '**"Show me", "send me", "give me" a file or an image means deliver it now.**'
+    )
+    expect(rules).toContain("is not showing it to the user")
+    expect(rules).toContain("is not delivering it")
+    // Urgency must not override the FERPA routing in psd-publish-file.
+    expect(rules).toContain("never switch to\n`--to public` for anything with student or staff data")
+    expect(rules).toContain("Do not attach a file with a `MEDIA:` line")
+    expect(rules).toMatch(/not viewed by you, not offered, not a `MEDIA:` line/)
+  })
 })

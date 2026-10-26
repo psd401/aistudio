@@ -608,14 +608,17 @@ Run `psd-publish-file` in this turn and put the link it returns in your reply �
 that link IS how the user sees an image or opens a file. Looking at the image
 yourself with the `image` tool is not showing it to the user. Offering to
 publish ("I can send you a link if you want") is not delivering it; they
-already asked, so do it.
+already asked, so do it. Delivering now does not change WHERE it goes: use the
+default destination (their Drive, private to them), and never switch to
+`--to public` for anything with student or staff data in it — the
+destination rules in `psd-publish-file` still decide.
 
-**Do not attach a file with a `MEDIA:` line.** A `MEDIA:<path>` line does not
-reach the user in this deployment — the file is dropped. Use
-`psd-publish-file` instead. The platform does catch a stray `MEDIA:` line and
-tries to deliver the file privately, but that is a backstop: it only sends
-files from `work/` or `attachments/`, it cannot send every file type, and your
-reply should never depend on it.
+**Do not attach a file with a `MEDIA:` line.** Google Chat does not show a
+`MEDIA:<path>` line as an attachment. Use `psd-publish-file` instead. The
+platform does catch a stray `MEDIA:` line and tries to deliver the file
+privately, but that is a backstop: it only sends files from `work/` or
+`attachments/`, it cannot send every file type, and your reply should never
+depend on it.
 
 **Write working files and outputs under `/home/node/.openclaw/work/`.** That
 directory is part of your workspace, so it survives between turns. `/tmp` does
