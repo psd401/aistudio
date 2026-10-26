@@ -355,6 +355,18 @@ The specialist defaults in `nexusRouterConfigSchema` (`lib/nexus/model-router/ty
 
 **Scope boundary**: the Gemini budget and reasoning flag come from [the Gemini capability row](../architecture/streaming.md#gemini-model-capabilities-1967), not from tier. The tier only decides which candidate the router prefers.
 
+#### Instructional Specialist Family Rule (#1969)
+
+In Standard mode (`family === "auto"`), an instruction-intent request is normally limited to Google text models. `selectModel()` in `lib/nexus/model-router/router.ts` passes that check through `selectRoutedTextModel()` as `additionalEligibility`. The one exemption is a model listed in `config.specialists.instructionModels`, matched by `modelId` or numeric `id`, so an admin can set a Claude or GPT model as the instructional specialist. The exemption exists only for configured candidates. When no specialist is configured ("Automatic Gemini"), or when none of them is accessible to the user, the unconfigured route and the tier fallback sweep both stay on Gemini. Advanced family selection and the web-search Google-only rule are unchanged. Assistant Architect routing in `lib/assistant-architect/model-router.ts` never had the Google-only rule.
+
+The admin picker in `app/(protected)/admin/settings/_components/nexus-router-settings-card.tsx` feeds the Instructional questions select the full text-model list (image-generation and Deep Research models are still excluded). Its `SpecialistGrid` props are `textModels` and `googleWebSearchModels`. The web-search select still uses Google-only models.
+
+**Focused tests**: `lib/nexus/model-router/__tests__/router.test.ts`, the tests `routes Standard instructional requests to a configured non-Gemini specialist`, `falls back to Gemini when the configured non-Gemini specialist is inaccessible`, and `keeps an unconfigured instructional route on Gemini even when Auto tiers list other families`. The browser check is `tests/e2e/admin-nexus-router-settings.spec.ts`, which covers the Instructional questions select offering the Claude models.
+
+**Minimal validation**: `bunx jest --silent lib/nexus/model-router/__tests__/router.test.ts`
+
+**Scope boundary**: the rule covers only the Standard instructional route. Advanced mode with a family set is governed by the family filter, not this exemption. The documented behavior lives in `docs/features/nexus-model-routing.md`, which must agree with the predicate.
+
 ### Conversation Architecture
 
 - Hierarchical conversations with folders
