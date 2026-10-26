@@ -2210,6 +2210,7 @@ Side-by-side evaluation of AI models for informed selection.
 |------|---------|
 | `/lib/compare/` | Comparison logic |
 | `/app/(protected)/compare/` | Comparison UI |
+| `app/api/compare/route.ts` | Compare endpoint. `createTextGenerator` calls `streamText` directly, not through `ClaudeAdapter`, so it passes `maxOutputTokens: defaultClaudeMaxOutputTokens(...)` itself. Without it, Bedrock caps Claude answers at 4,096 tokens (#1979). See [Claude Default Output Cap](../architecture/streaming.md#claude-default-output-cap-1979) |
 
 ---
 
