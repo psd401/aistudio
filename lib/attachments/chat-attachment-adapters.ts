@@ -8,6 +8,7 @@ import {
 } from "@assistant-ui/react";
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
+import { dataUrlMediaType, downscaleImageDataUrl } from "@/lib/attachments/image-downscale";
 import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
 import {
   uploadTemporaryAttachment,
@@ -817,8 +818,13 @@ export class VisionImageAdapter implements AttachmentAdapter {
   }
 
   async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
-    // Convert image to base64 data URL
-    const base64 = await this.fileToBase64DataURL(attachment.file);
+    // Convert image to a base64 data URL, shrunk so phone photos do not push the
+    // chat request past the 10MB proxied-body limit (#1850). The repository
+    // upload keeps the original file.
+    const base64 = await downscaleImageDataUrl(
+      attachment.file,
+      await this.fileToBase64DataURL(attachment.file)
+    );
 
     // Normally already resolved — add() kicked this off when the file was picked.
     // The fallback covers an attachment that reached send() without going through
@@ -847,7 +853,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
       id: attachment.id,
       type: "image",
       name: attachment.name,
-      contentType: attachment.contentType || "image/jpeg",
+      contentType: dataUrlMediaType(base64) ?? attachment.contentType ?? "image/jpeg",
       file: attachment.file, // Keep the file reference - required by assistant-ui
       content: [
         {

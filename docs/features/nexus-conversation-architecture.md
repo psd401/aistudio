@@ -411,10 +411,14 @@ the content cutover flags are active. The memoized attachment adapter initiates
 an owner-bound ephemeral repository, uploads directly to signed object storage,
 completes canonical processing, and sends only an opaque repository marker for
 document/text provenance. Their source bytes and extracted text never traverse
-the chat request. Images retain an inline data URL in transient client state
-while also carrying the opaque marker, but a canonical server turn treats those
-caller-carried pixels as untrusted, ignores them, and reloads the exact
-inspected current version from the owner-bound repository.
+the chat request. Images are the exception: they carry the opaque marker AND an
+inline data URL, and on a standard chat turn that inline data URL is what the
+model sees, for the current turn and for every prior turn the client resends.
+Only the image-generation/edit route treats the caller-carried pixels as
+untrusted, ignores them, and reloads the exact inspected current version from
+the owner-bound repository. `VisionImageAdapter` therefore downscales the inline
+copy (longest edge 2048px; see `lib/attachments/image-downscale.ts`) so resent
+history stays well under the proxied request-body limit (#1850).
 Durable history stores only image-presence metadata and the repository
 reference.
 
