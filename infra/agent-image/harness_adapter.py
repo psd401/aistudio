@@ -1390,11 +1390,22 @@ class OpenClawAdapter(HarnessAdapter):
             session_uuid,
         )
 
-    # Where a MEDIA: path may point. The workspace (work/, attachments/) and
-    # /tmp, where tools such as pdftoppm write by default.
-    MEDIA_DIRECTIVE_ROOTS = ("/home/node/.openclaw", "/tmp")
+    # The ONLY folders a MEDIA: path may resolve into: the agent's output
+    # folder and the user's own uploads. Never the whole state dir — it holds
+    # the transcript database (every session's conversation) and
+    # openclaw.json, and a MEDIA: line is model output that injected text in an
+    # uploaded document can steer. Not /tmp either: it is not the documented
+    # output location (Rule 16) and other processes write there.
+    MEDIA_DIRECTIVE_ROOTS = (
+        "/home/node/.openclaw/work",
+        "/home/node/.openclaw/attachments",
+    )
     MEDIA_PUBLISH_SCRIPT = "/opt/psd-skills/psd-publish-file/publish.js"
     MEDIA_PUBLISH_TIMEOUT_S = 120
+    # Total wall-clock budget for all deliveries in one turn. Runs after the
+    # model has finished, before the reply is returned, so it must stay well
+    # inside the turn deadline rather than stack MAX_FILES x per-file timeout.
+    MEDIA_DELIVERY_BUDGET_S = 180
 
     def _read_turn_media_targets(
         self,
@@ -1465,9 +1476,11 @@ class OpenClawAdapter(HarnessAdapter):
             logger.warning("media directive read failed: %s", str(exc)[:200])
             return []
 
-    def _resolve_media_path(self, target: str) -> Optional[str]:
-        """Absolute real path of a local MEDIA: target, or None if it is not a
-        regular file under one of MEDIA_DIRECTIVE_ROOTS."""
+    def _resolve_media_path(self, target: str) -> Tuple[Optional[str], str]:
+        """`(real_path, "")` for a deliverable local MEDIA: target, else
+        `(None, reason)`. Deliverable means a regular file whose resolved path
+        (symlinks followed) sits strictly inside one of MEDIA_DIRECTIVE_ROOTS.
+        """
         candidate = target
         if candidate.startswith("~/"):
             candidate = os.path.join("/home/node", candidate[2:])
@@ -1475,10 +1488,22 @@ class OpenClawAdapter(HarnessAdapter):
             candidate = os.path.join(self.WORKSPACE_DIR, candidate)
         real = os.path.realpath(candidate)
         for root in self.MEDIA_DIRECTIVE_ROOTS:
-            root_real = os.path.realpath(root)
-            if real == root_real or real.startswith(root_real + os.sep):
-                return real if os.path.isfile(real) else None
-        return None
+            if real.startswith(os.path.realpath(root) + os.sep):
+                if os.path.isfile(real):
+                    return real, ""
+                return None, "file not found"
+        return None, "outside the folders files can be sent from"
+
+    @staticmethod
+    def _parse_publish_output(stdout: str) -> Dict[str, Any]:
+        """publish.js prints its result pretty-printed across many lines
+        (JSON.stringify(obj, null, 2)) and its errors as one line, so parse the
+        whole output; an unparseable one is an empty result."""
+        try:
+            payload = json.loads(stdout.strip())
+        except (TypeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _deliver_media_directives(
         self, targets: List[str], session_id: Optional[str], model: Optional[str],
@@ -1494,63 +1519,100 @@ class OpenClawAdapter(HarnessAdapter):
         recorded as a warn-level failure.
         """
         lines: List[str] = []
-        failures: List[str] = []
+        # (name, reason) for the user; the failure record gets only codes.
+        failures: List[Tuple[str, str]] = []
+        failure_codes: List[str] = []
+        published = 0
+        deadline = time.monotonic() + self.MEDIA_DELIVERY_BUDGET_S
         for target in targets[:MEDIA_DIRECTIVE_MAX_FILES]:
             if re.match(r"^https?://", target, re.IGNORECASE):
                 lines.append(target)
                 continue
-            path = self._resolve_media_path(target)
-            name = os.path.basename(target) or target
+            name = os.path.basename(target.rstrip("/")) or "file"
+            path, reason = self._resolve_media_path(target)
             if path is None:
-                failures.append(f"{name}: file not found")
+                failures.append((name, reason))
+                failure_codes.append(
+                    "not_found" if reason == "file not found" else "outside_roots"
+                )
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                failures.append((name, "out of time to send it this turn"))
+                failure_codes.append("budget_exhausted")
                 continue
             try:
                 done = subprocess.run(
                     ["node", self.MEDIA_PUBLISH_SCRIPT, "--file", path],
                     capture_output=True,
                     text=True,
-                    timeout=self.MEDIA_PUBLISH_TIMEOUT_S,
+                    timeout=min(self.MEDIA_PUBLISH_TIMEOUT_S, remaining),
                 )
-                payload = json.loads(done.stdout.strip().splitlines()[-1]) if done.stdout.strip() else {}
             except subprocess.TimeoutExpired:
-                failures.append(f"{name}: delivery timed out")
+                failures.append((name, "delivery timed out"))
+                failure_codes.append("timeout")
                 continue
-            except (OSError, ValueError, IndexError) as exc:
-                failures.append(f"{name}: {str(exc)[:120]}")
+            except OSError:
+                failures.append((name, "delivery could not start"))
+                failure_codes.append("spawn_failed")
                 continue
-            url = payload.get("url") if isinstance(payload, dict) else None
+            payload = self._parse_publish_output(done.stdout)
+            url = payload.get("url")
             if done.returncode == 0 and isinstance(url, str) and url.startswith("https://"):
                 lines.append(f"{payload.get('fileName') or name}:")
                 lines.append(url)
-            else:
-                message = (
-                    payload.get("message") if isinstance(payload, dict) else None
-                ) or (done.stderr or "").strip()[:200] or "delivery failed"
-                failures.append(f"{name}: {message}")
-        if len(targets) > MEDIA_DIRECTIVE_MAX_FILES:
-            failures.append(
-                f"{len(targets) - MEDIA_DIRECTIVE_MAX_FILES} more file(s) "
-                f"not sent (limit {MEDIA_DIRECTIVE_MAX_FILES} per reply)"
+                published += 1
+                continue
+            message = payload.get("message")
+            failures.append((
+                name,
+                message[:200] if isinstance(message, str) and message
+                else "delivery failed",
+            ))
+            code = payload.get("error")
+            failure_codes.append(
+                code if isinstance(code, str) and _SAFE_PATH_ID.match(code)
+                else "publish_failed"
             )
+        skipped = max(0, len(targets) - MEDIA_DIRECTIVE_MAX_FILES)
+        if skipped:
+            failure_codes.append("over_limit")
         logger.info(
-            "media directives: targets=%d delivered=%d failed=%d",
-            len(targets), sum(1 for l in lines if l.startswith("https://")),
-            len(failures),
+            "media directives: targets=%d published=%d failed=%d",
+            len(targets), published, len(failures),
         )
-        if failures:
+        not_sent = len(failures) + skipped
+        if not_sent:
+            # Counts and codes only: a file name can identify a student, and
+            # this record goes to CloudWatch and the failure broker.
             record_failure(
                 source="harness",
                 severity="warn",
                 error_class="MediaDirectiveDeliveryFailed",
-                error_message="; ".join(failures)[:1000],
+                error_message=(
+                    f"{not_sent} of {len(targets)} MEDIA: file(s) not "
+                    f"delivered: {', '.join(sorted(set(failure_codes)))}"
+                ),
                 session_id=session_id,
                 model=model,
-                context={"phase": "media_directive", "targets": len(targets)},
+                context={
+                    "phase": "media_directive",
+                    "targets": len(targets),
+                    "published": published,
+                    "codes": sorted(set(failure_codes)),
+                },
             )
+        if failures:
             lines.append(
                 "I couldn't send "
                 + ("this file" if len(failures) == 1 else "these files")
-                + ": " + "; ".join(failures)
+                + ": "
+                + "; ".join(f"{name}: {why}" for name, why in failures)
+            )
+        if skipped:
+            lines.append(
+                f"{skipped} more file(s) were not sent "
+                f"(limit {MEDIA_DIRECTIVE_MAX_FILES} per reply)."
             )
         return "\n".join(lines)
 

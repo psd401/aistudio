@@ -3024,7 +3024,6 @@ class TestStructuralMarks(unittest.TestCase):
         self.assertEqual(harness_adapter._structural_marks(None), "{}")
 
 
-
 class SilentReplyTextTests(unittest.TestCase):
     """Mirror of OpenClaw's isSilentReplyText (pinned 2026.7.2-beta.5)."""
 
@@ -3139,16 +3138,56 @@ class MediaDirectiveDeliveryTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.adapter = OpenClawAdapter()
         self.adapter.WORKSPACE_DIR = self.tmp.name
-        self.adapter.MEDIA_DIRECTIVE_ROOTS = (self.tmp.name,)
-        work = pathlib.Path(self.tmp.name) / "work"
-        work.mkdir()
-        (work / "states.csv").write_text("state,sq_mi\nAlaska,665384\n")
+        # The production roots, re-based onto the temp workspace.
+        self.adapter.MEDIA_DIRECTIVE_ROOTS = tuple(
+            os.path.join(self.tmp.name, os.path.relpath(root, "/home/node/.openclaw"))
+            for root in OpenClawAdapter.MEDIA_DIRECTIVE_ROOTS
+        )
+        root = pathlib.Path(self.tmp.name)
+        (root / "work").mkdir()
+        (root / "work" / "states.csv").write_text("state,sq_mi\nAlaska,665384\n")
+        agent = root / "agents" / "main" / "agent"
+        agent.mkdir(parents=True)
+        (agent / "openclaw-agent.sqlite").write_bytes(b"SQLite format 3\x00")
+        (root / "openclaw.json").write_text("{}")
         self.failures = mock.patch.object(harness_adapter, "record_failure").start()
         self.addCleanup(mock.patch.stopall)
 
     def _completed(self, returncode, payload, stderr=""):
-        return mock.Mock(returncode=returncode, stdout=json.dumps(payload) + "\n",
-                         stderr=stderr)
+        # publish.js success output is pretty-printed across lines
+        # (JSON.stringify(obj, null, 2)); its errors are a single line.
+        stdout = json.dumps(payload, indent=2 if returncode == 0 else None)
+        return mock.Mock(returncode=returncode, stdout=stdout + "\n", stderr=stderr)
+
+    def test_production_roots_are_work_and_attachments_only(self):
+        self.assertEqual(OpenClawAdapter.MEDIA_DIRECTIVE_ROOTS, (
+            "/home/node/.openclaw/work",
+            "/home/node/.openclaw/attachments",
+        ))
+        real = OpenClawAdapter()
+        for target in (
+            "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+            "/home/node/.openclaw/openclaw.json",
+            "agents/main/agent/openclaw-agent.sqlite",
+            "/tmp/anything.png",
+        ):
+            with self.subTest(target=target):
+                path, reason = real._resolve_media_path(target)
+                self.assertIsNone(path)
+                self.assertEqual(reason, "outside the folders files can be sent from")
+
+    def test_the_transcript_database_and_config_are_never_published(self):
+        # Injected text in an uploaded document could steer the model into
+        # writing these MEDIA: lines; the DB holds every session's transcript.
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives([
+                os.path.join(self.tmp.name, "agents/main/agent/openclaw-agent.sqlite"),
+                "agents/main/agent/openclaw-agent.sqlite",
+                "openclaw.json",
+                "work/../openclaw.json",
+            ], "sess", "model")
+        run.assert_not_called()
+        self.assertEqual(text.count("outside the folders files can be sent from"), 4)
 
     def test_a_local_file_is_published_to_drive_and_linked(self):
         url = "https://drive.google.com/file/d/abc/view"
@@ -3174,10 +3213,13 @@ class MediaDirectiveDeliveryTests(unittest.TestCase):
             text = self.adapter._deliver_media_directives(
                 ["work/states.csv"], "sess", "model")
         self.assertIn("I couldn't send this file", text)
-        self.assertIn(".mp3 cannot go to Drive", text)
-        self.assertEqual(
-            self.failures.call_args.kwargs["error_class"],
-            "MediaDirectiveDeliveryFailed")
+        self.assertIn("states.csv: .mp3 cannot go to Drive", text)
+        kwargs = self.failures.call_args.kwargs
+        self.assertEqual(kwargs["error_class"], "MediaDirectiveDeliveryFailed")
+        # A file name can identify a student; the record carries codes only.
+        self.assertNotIn("states", kwargs["error_message"])
+        self.assertNotIn("states", json.dumps(kwargs["context"]))
+        self.assertIn("unsupported_type", kwargs["error_message"])
 
     def test_a_path_outside_the_allowed_roots_is_never_published(self):
         with mock.patch.object(harness_adapter.subprocess, "run") as run:
@@ -3185,8 +3227,25 @@ class MediaDirectiveDeliveryTests(unittest.TestCase):
                 ["/etc/passwd", "work/../../outside.csv", "work/missing.csv"],
                 "sess", "model")
         run.assert_not_called()
-        self.assertIn("passwd: file not found", text)
+        self.assertIn("passwd: outside the folders files can be sent from", text)
+        self.assertIn("outside.csv: outside the folders files can be sent from", text)
         self.assertIn("missing.csv: file not found", text)
+
+    def test_unparseable_publisher_output_is_a_failure_not_a_crash(self):
+        with mock.patch.object(harness_adapter.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stdout="}\n",
+                                                      stderr="")):
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        self.assertIn("states.csv: delivery failed", text)
+
+    def test_the_turn_budget_stops_further_deliveries(self):
+        self.adapter.MEDIA_DELIVERY_BUDGET_S = 0
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        run.assert_not_called()
+        self.assertIn("out of time to send it this turn", text)
 
     def test_an_https_target_is_passed_through_as_a_link(self):
         url = "https://psd-agents-dev.s3.amazonaws.com/public-images/x/y.png"
@@ -3198,8 +3257,10 @@ class MediaDirectiveDeliveryTests(unittest.TestCase):
     def test_at_most_five_files_are_sent(self):
         targets = [f"https://example.com/{i}.png" for i in range(7)]
         text = self.adapter._deliver_media_directives(targets, "sess", "model")
-        self.assertEqual(sum(1 for l in text.splitlines() if l.startswith("https://")), 5)
-        self.assertIn("2 more file(s) not sent", text)
+        links = [line for line in text.splitlines() if line.startswith("https://")]
+        self.assertEqual(len(links), 5)
+        self.assertIn("2 more file(s) were not sent (limit 5 per reply).", text)
+        self.assertNotIn("I couldn't send", text)
 
 
 if __name__ == "__main__":

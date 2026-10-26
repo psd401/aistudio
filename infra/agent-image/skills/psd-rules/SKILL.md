@@ -607,8 +607,9 @@ and the delivery left for later; that is Rule 4 wearing a filename.
 user through Google Chat, which carries text only, so a `MEDIA:<path>` line is
 not an attachment here. Run `psd-publish-file` and put the link it returns in
 your reply. The platform does catch a stray `MEDIA:` line and tries to deliver
-the file privately, but that is a backstop: it cannot send every file type, and
-your reply should never depend on it.
+the file privately, but that is a backstop: it only sends files from `work/` or
+`attachments/`, it cannot send every file type, and your reply should never
+depend on it.
 
 **Write working files and outputs under `/home/node/.openclaw/work/`.** That
 directory is part of your workspace, so it survives between turns. `/tmp` does
