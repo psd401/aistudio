@@ -406,6 +406,28 @@ function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family w
     expect(result.modelId).toBe("us.anthropic.claude-sonnet")
   })
 
+  it("falls back to Gemini when the configured non-Gemini specialist is inaccessible", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        specialists: { ...config.specialists, instructionModels: ["us.anthropic.claude-sonnet"] },
+      }),
+      mode: "active",
+    })
+    mockFilterAccessibleResourceIds.mockResolvedValue(
+      models.filter(model => model.id !== 3).map(model => String(model.id))
+    )
+    mockClassify.mockResolvedValue({
+      intent: "instruction", tier: "medium", confidence: 0.95,
+      reasonCodes: ["instruction_domain"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Build a differentiated lesson plan", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-flash")
+  })
+
   it("keeps an unconfigured Standard instructional route on Gemini", async () => {
     mockGetConfig.mockResolvedValue({
       config: nexusRouterConfigSchema.parse({
