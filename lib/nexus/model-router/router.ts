@@ -300,7 +300,8 @@ function selectModel(args: {
       // case and the fallback sweep when no configured specialist is
       // accessible - stays on Google.
       && (args.intent !== "instruction" || args.family !== "auto"
-        || configuredIds.includes(model.modelId) || configuredIds.includes(String(model.id))
+        || args.config.specialists.instructionModels.includes(model.modelId)
+        || args.config.specialists.instructionModels.includes(String(model.id))
         || inferFamily(model) === "google")
       && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
