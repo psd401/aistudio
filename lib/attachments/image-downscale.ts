@@ -18,12 +18,13 @@ export const MAX_IMAGE_EDGE_PX = 2048;
 /** Images at or under both limits are sent untouched. */
 export const MAX_UNTOUCHED_IMAGE_BYTES = 1_500_000;
 
-const JPEG_QUALITY = 0.85;
+/** Quality for the lossy encoders (JPEG, WebP). */
+const LOSSY_QUALITY = 0.85;
 
 export interface DownscalePlan {
   width: number;
   height: number;
-  mimeType: "image/jpeg" | "image/png";
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
 }
 
 /**
@@ -48,8 +49,9 @@ export function planImageDownscale(input: {
   return {
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
-    // PNG may carry transparency that JPEG would flatten to black.
-    mimeType: mimeType === "image/png" ? "image/png" : "image/jpeg",
+    // PNG and WebP may carry transparency that JPEG would flatten to black, so
+    // they keep their format; only JPEG (and unknown types) become JPEG.
+    mimeType: mimeType === "image/png" || mimeType === "image/webp" ? mimeType : "image/jpeg",
   };
 }
 
@@ -85,9 +87,10 @@ export async function downscaleImageDataUrl(
 
     const reencoded = canvas.toDataURL(
       plan.mimeType,
-      plan.mimeType === "image/jpeg" ? JPEG_QUALITY : undefined
+      plan.mimeType === "image/png" ? undefined : LOSSY_QUALITY
     );
-    // toDataURL silently falls back to PNG for unsupported types, and a small
+    // toDataURL silently falls back to PNG for unsupported types (e.g. WebP on
+    // older Safari) — then keep the original rather than send a bigger PNG. A small
     // image can grow when re-encoded; only ever send the smaller of the two.
     if (!reencoded.startsWith(`data:${plan.mimeType}`)) return originalDataUrl;
     return reencoded.length < originalDataUrl.length ? reencoded : originalDataUrl;

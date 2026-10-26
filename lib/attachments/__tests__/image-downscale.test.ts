@@ -2,7 +2,7 @@
  * #1850: phone photos inlined at full size pushed Nexus chat requests past the
  * 10MB proxied-body limit. These pin the shrink rules and the config safety net.
  */
-import { describe, it, expect } from "@jest/globals";
+import { describe, it, expect, afterEach, jest } from "@jest/globals";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -28,8 +28,14 @@ describe("planImageDownscale (#1850)", () => {
 
   it("re-encodes a large-in-bytes image that is already small in pixels", () => {
     expect(
-      planImageDownscale({ width: 1600, height: 1200, bytes: 4_000_000, mimeType: "image/webp" })
+      planImageDownscale({ width: 1600, height: 1200, bytes: 4_000_000, mimeType: "image/jpeg" })
     ).toEqual({ width: 1600, height: 1200, mimeType: "image/jpeg" });
+  });
+
+  it("keeps WebP as WebP so transparency is not flattened", () => {
+    expect(
+      planImageDownscale({ width: 4000, height: 3000, bytes: 4_000_000, mimeType: "image/webp" })
+    ).toEqual({ width: 2048, height: 1536, mimeType: "image/webp" });
   });
 
   it("keeps PNG as PNG so transparency is not flattened", () => {
@@ -53,10 +59,23 @@ describe("planImageDownscale (#1850)", () => {
 });
 
 describe("downscaleImageDataUrl", () => {
-  it("returns the original data URL when the browser cannot decode images (fail-open)", async () => {
-    const original = "data:image/jpeg;base64,/9j/AAAA";
-    const file = new File([new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0])], "a.jpg", { type: "image/jpeg" });
+  const original = "data:image/jpeg;base64,/9j/AAAA";
+  const file = new File([new Uint8Array([0xFF, 0xD8, 0xFF, 0xE0])], "a.jpg", { type: "image/jpeg" });
+
+  afterEach(() => {
+    delete (globalThis as { createImageBitmap?: unknown }).createImageBitmap;
+  });
+
+  it("returns the original when the browser has no createImageBitmap", async () => {
     await expect(downscaleImageDataUrl(file, original)).resolves.toBe(original);
+  });
+
+  it("returns the original when decoding the image fails (fail-open)", async () => {
+    (globalThis as { createImageBitmap?: unknown }).createImageBitmap = jest
+      .fn<() => Promise<ImageBitmap>>()
+      .mockRejectedValue(new Error("decode failed"));
+    await expect(downscaleImageDataUrl(file, original)).resolves.toBe(original);
+    expect(globalThis.createImageBitmap).toHaveBeenCalledWith(file);
   });
 });
 
