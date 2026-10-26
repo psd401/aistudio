@@ -387,6 +387,7 @@ describe("OpenAI image operation", () => {
     size: "1024x1024",
     quality: "medium",
     background: "auto",
+    referenceDataUrl: null,
   }
 
   beforeEach(() => {
