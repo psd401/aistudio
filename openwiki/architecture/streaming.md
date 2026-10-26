@@ -70,6 +70,7 @@ openwiki:
     - bun test lib/streaming/__tests__/sse-keepalive.test.ts
     - bun test lib/streaming/__tests__/deferred-ui-message-stream.test.ts
     - bunx jest --silent lib/streaming/__tests__/empty-turn-notice.test.ts lib/streaming/__tests__/stream-error-message.test.ts lib/streaming/__tests__/stream-deadline.test.ts
+    - bunx jest --silent lib/streaming/__tests__/client-stream-error.test.ts
 ---
 
 # Streaming Architecture
@@ -463,6 +464,44 @@ Caption: decision order for the notice shape in `classifyEmptyTurn`. The `requir
 
 Ordering matters: a `504 gateway timeout` must classify as a timeout, not as an outage, so the timeout rule comes first and the broad 5xx rule comes last.
 
+### Browser Transport Failures Are Rewritten (#1966)
+
+The server cannot sanitize a failure that happens in the browser. When the connection is cut after the 200 has started streaming (an ALB idle timeout, a proxy truncating a chunked body, a dropped network), the `fetch` body reader rejects with the browser's own network-stack text. Firefox showed "Error in input stream" on the first prompt of a chat, and that text never passed through `sanitizeStreamErrorMessage`.
+
+`lib/streaming/client-stream-error.ts` is the client-side guard, and `MessageError` in `components/assistant-ui/thread.tsx` is its only caller:
+
+- `MessageError` reads the message status with `useMessage()`. It takes the error only when `status.type` is `incomplete` and `reason` is `error`, then passes `toDisplayableChatError(error)` as the children of `ErrorPrimitive.Message`. The root carries `data-testid="assistant-message-error"`.
+- `isBrowserTransportFailure(error)` lower-cases the text, strips an optional `TypeError: ` or `net::` prefix, and matches at the start of the message. The signatures cover Firefox, Chrome/Edge, Safari, and the HTTP/2 and chunked-encoding codes. The bare text `terminated` (undici) matches exactly only.
+- A match returns `STREAM_INTERRUPTED_MESSAGE`. Any other text passes through unchanged, including server-sanitized messages and client messages such as "Session expired".
+
+```mermaid
+flowchart TD
+    A[Assistant message status: incomplete, reason error] --> B{Error object present?}
+    B -- no --> N1[children undefined: nothing rendered]
+    B -- yes --> C{isBrowserTransportFailure?}
+    C -- yes --> D[STREAM_INTERRUPTED_MESSAGE]
+    C -- no --> E[Error text unchanged]
+```
+
+Caption: how `MessageError` chooses the text shown in the error box. Only browser transport failures are replaced.
+
+**Why anchored matching**: substring matching let "Upload failed" match "load failed" and let any app-authored sentence containing "network error" be replaced. Those messages are now kept, which the `client-stream-error` tests assert.
+
+**Boundary**: this guard covers only the browser's read of the body. Provider errors still come through the server path above, and the root cause of a given stream cut is outside this code. The retry path is the existing Refresh action in the error box.
+
+**Change guidance**:
+- To add a browser message, add its lower-cased opening to `TRANSPORT_FAILURE_SIGNATURES`. Add a generic bare phrase to `EXACT_TRANSPORT_FAILURES` only, never as a prefix.
+- Do not put server message text in these lists. Server text is already fixed by `STREAM_ERROR_MESSAGES`.
+- If the copy in `STREAM_INTERRUPTED_MESSAGE` changes, update the e2e assertion that compares against the same constant.
+
+**Focused tests**:
+- `lib/streaming/__tests__/client-stream-error.test.ts` — `toDisplayableChatError (#1966)`: each browser transport text is replaced; all six `STREAM_ERROR_MESSAGES` pass through; app-authored text passes through, including "terminated" inside a sentence; app-authored text that contains a transport phrase mid-message is kept; the raw "input stream" text is never returned.
+- `tests/e2e/nexus-chat-stream-error-handling.functional.spec.ts` — browser proof. An init script makes the chat `fetch` return a 200 SSE body that errors with `TypeError("Error in input stream")`. The spec asserts the error box shows exactly `STREAM_INTERRUPTED_MESSAGE`, the raw text is absent, streaming stops, and the Refresh action is present.
+
+**Minimal validation**: `bunx jest --silent lib/streaming/__tests__/client-stream-error.test.ts`.
+
+**Conditional check**: `bun run test:e2e:local tests/e2e/nexus-chat-stream-error-handling.functional.spec.ts` (script: `scripts/test/e2e-local.sh`, which forwards extra arguments to Playwright). Run it only when `MessageError` markup or the error path changes, because it starts the full app stack with Postgres in Docker. Plain `page.route` cannot reproduce this failure; the spec injects the failure in the page.
+
 ### Persistence Keeps the Prompt Answered
 
 The user message is saved before streaming starts, so a reply that is never written leaves the prompt looking unanswered after a reload. `app/api/nexus/chat/route.ts` (`createOnFinishCallback`) and `app/api/nexus/chat/chat-helpers.ts` implement this:
@@ -693,6 +732,20 @@ controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
  streaming service
 - `/docs/guides/silent-failure-patterns.md` — SSE transport pitfalls
+ransport pitfalls
+port pitfalls
+ransport pitfalls
+falls
+ransport pitfalls
+lls
+port pitfalls
+ransport pitfalls
+falls
+ransport pitfalls
+port pitfalls
+falls
+ransport pitfalls
+atterns.md` — SSE transport pitfalls
 ransport pitfalls
 port pitfalls
 ransport pitfalls
