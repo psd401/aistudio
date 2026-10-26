@@ -367,6 +367,25 @@ The admin picker in `app/(protected)/admin/settings/_components/nexus-router-set
 
 **Scope boundary**: the rule covers only the Standard instructional route. Advanced mode with a family set is governed by the family filter, not this exemption. The documented behavior lives in `docs/features/nexus-model-routing.md`, which must agree with the predicate.
 
+#### Stale Client Fallback Model (#1975)
+
+Every turn carries `fallbackModelId`, the model the browser tab had selected. A tab opened before an admin replaced or removed that model keeps sending the old ID until reload. `routeNexusRequest()` in `lib/nexus/model-router/router.ts` looks the ID up in the unfiltered enabled-model list. When no enabled model matches and routing is on (`shadow` or `active`), `substituteFallback()` picks a stand-in from the routable models. Routable means the provider credential is configured, the model is accessible to the user, and it is not an image-generation or Deep Research model. The preference order is:
+
+1. Medium-tier candidates for the requested Advanced family (skipped when the family is Auto), so a ChatGPT tab stays on ChatGPT where possible.
+2. `config.auto.medium`.
+3. Medium-tier candidates of the anthropic, openai, and google families.
+4. Every remaining text model, in table order.
+
+The router logs a warning with `requestedFallbackModelId` and `substituteModelId`, then continues the turn. The substitute applies only when the requested ID matches no enabled model. A model the client still names is never swapped out here.
+
+With `NEXUS_ROUTER_MODE` set to `off`, a deleted fallback still throws `The fallback Nexus model is unavailable`. Legacy selection has no router to absorb the change, so the error is kept. This is the same failure the earlier explicit-pick rule preserved.
+
+**Focused tests**: `lib/nexus/model-router/__tests__/router.test.ts`, suite `defineNexusModelRouterStaleFallbackSuite`, called from `defineNexusModelRouterSuite1`. Its tests are `does not fail an active-mode turn whose client fallback model was deleted`, `substitutes the configured Auto medium-tier model for a deleted fallback`, `keeps an Advanced tab's deleted fallback within its requested family`, and `still fails an explicit pick of a deleted model when routing is off`.
+
+**Minimal validation**: `bunx jest --silent lib/nexus/model-router/__tests__/router.test.ts`
+
+**Scope boundary**: the substitute is a safety net for stale tabs, not a classification decision. It does not change the tier or the intent rules. Changing the preference order means changing `substituteFallback()` and the matching router tests together.
+
 ### Conversation Architecture
 
 - Hierarchical conversations with folders
