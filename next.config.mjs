@@ -130,6 +130,12 @@ const nextConfig = {
       bodySizeLimit: '100mb',
       timeout: 300,
     },
+    // Next buffers a request body for middleware/proxy (middleware.ts matches
+    // /api/nexus/chat) and SILENTLY TRUNCATES it at 10MB by default. A Nexus
+    // turn resends the whole history, inline images included, so a large one
+    // arrived cut off and failed JSON.parse with a 500 (#1850). Images are now
+    // downscaled client-side; this is the safety net above that.
+    proxyClientMaxBodySize: '50mb',
     // Enables the `forbidden()` / `unauthorized()` navigation interrupts used by
     // the Atrium reader (app/(protected)/c/[slug]) to return a true 403 for
     // out-of-audience users (#1051).
