@@ -411,7 +411,7 @@ Caption: stored keys win only outside Lambda and only when both keys are set. Ev
 - `tests/e2e/nexus-bedrock-openai.functional.spec.ts` runs a live two-turn Nexus conversation against Bedrock. It is gated by `PLAYWRIGHT_AUTH_ENABLED` and `E2E_RUN_EXTERNAL=1`, and skips unless `NEXUS_ROUTER_MODE` is `off`. Run it only for changes that need live provider proof, because it calls the external service. No unit test verifies the ECS `project/default` grant, and the change itself was not synthesized in that commit (`cdk synth` is the only available check).
 - `tests/e2e/admin-model-default-reasoning-effort.functional.spec.ts` drives the admin form against a database. It is skipped unless `PLAYWRIGHT_AUTH_ENABLED` is `true` (it needs the authenticated dev server). It sets None on a Bedrock GPT row, checks that the value persists in `provider_metadata`, checks that unrelated metadata survives, and checks that "Model default" removes the key. It also checks that a Claude row shows no such field. It calls no model. Run it when the admin field or its persistence changes.
 
-**Known limits** (from the commit's live checks): reasoning summaries come back empty from Bedrock, and Bedrock rejects `https://` image URLs for these models (only `data:` and `s3://` work). Nexus sends data URLs.
+**Known limits** (from the commit's live checks): reasoning summaries come back empty from Bedrock, and Bedrock rejects `https://` image URLs for these models (only `data:` and `s3://` work). Nexus sends data URLs, and the client shrinks each inline photo before it is sent (see [Image Downscaling](../app-features/overview.md#image-downscaling-and-the-proxied-body-limit-1850)).
 
 ## Answer-less Turns and Error Notices (#1899)
 
