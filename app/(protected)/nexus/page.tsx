@@ -221,7 +221,7 @@ function nexusErrorTitle(status: number, code?: string): string {
   if (code === "SKILL_NOT_AVAILABLE" || code === "SKILL_BINDING_CONFLICT") {
     return "Skill unavailable"
   }
-  if (status === 404) return "Model unavailable"
+  if (status === 404 || code === "PROVIDER_NOT_CONFIGURED") return "Model unavailable"
   if (status === 409) return "Request cannot continue"
   return "Chat request failed"
 }
