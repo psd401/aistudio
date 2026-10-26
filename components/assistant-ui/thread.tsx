@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
+import { toDisplayableChatError } from "@/lib/streaming/client-stream-error";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -588,10 +589,21 @@ const ComposerAction: FC<ComposerActionProps> = ({ processingAttachments, extraA
 };
 
 const MessageError: FC = () => {
+  const message = useMessage();
+  const error =
+    message.status?.type === "incomplete" && message.status.reason === "error"
+      ? message.status.error
+      : undefined;
   return (
     <MessagePrimitive.Error>
-      <ErrorPrimitive.Root className="border-destructive bg-destructive/10 dark:bg-destructive/5 text-destructive mt-2 rounded-md border p-3 text-sm dark:text-red-200">
-        <ErrorPrimitive.Message className="line-clamp-2" />
+      <ErrorPrimitive.Root
+        data-testid="assistant-message-error"
+        className="border-destructive bg-destructive/10 dark:bg-destructive/5 text-destructive mt-2 rounded-md border p-3 text-sm dark:text-red-200"
+      >
+        {/* #1966: never show the browser's raw transport error text. */}
+        <ErrorPrimitive.Message className="line-clamp-2">
+          {error === undefined ? undefined : toDisplayableChatError(error)}
+        </ErrorPrimitive.Message>
       </ErrorPrimitive.Root>
     </MessagePrimitive.Error>
   );
