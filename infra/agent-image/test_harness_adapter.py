@@ -3024,10 +3024,6 @@ class TestStructuralMarks(unittest.TestCase):
         self.assertEqual(harness_adapter._structural_marks(None), "{}")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SilentReplyTextTests(unittest.TestCase):
     """Mirror of OpenClaw's isSilentReplyText (pinned 2026.7.2-beta.5)."""
 
@@ -3042,3 +3038,230 @@ class SilentReplyTextTests(unittest.TestCase):
                      "Nothing new: NO_REPLY", "No reply needed", "NO REPLY"):
             with self.subTest(text=text):
                 self.assertFalse(harness_adapter.is_silent_reply_text(text))
+
+
+def _assistant_text(timestamp, text):
+    return {
+        "type": "message",
+        "message": {
+            "role": "assistant",
+            "timestamp": timestamp,
+            "content": [{"type": "text", "text": text}],
+        },
+    }
+
+
+class MediaDirectiveParsingTests(unittest.TestCase):
+    """OpenClaw's system prompt teaches `MEDIA:<path>` as the way to attach a
+    file. Google Chat carries text only, so on 2026-10-26 a dev turn ended with
+    `MEDIA:/home/node/.openclaw/work/largest_states.csv` and the user got
+    "Here's the CSV" with no file. These pin which lines count."""
+
+    extract = staticmethod(harness_adapter.extract_media_directive_targets)
+
+    def test_finds_the_directive_line_the_model_wrote(self):
+        self.assertEqual(
+            self.extract([
+                "MEDIA:/home/node/.openclaw/work/largest_states.csv\n\n"
+                "Here's the CSV with the 5 largest states."
+            ]),
+            ["/home/node/.openclaw/work/largest_states.csv"],
+        )
+
+    def test_strips_wrappers_scheme_and_is_case_insensitive(self):
+        self.assertEqual(
+            self.extract([
+                "media: `work/a.png`",
+                'MEDIA: "file:///tmp/b.pdf"',
+                "MEDIA:<work/c.csv>",
+            ]),
+            ["work/a.png", "/tmp/b.pdf", "work/c.csv"],
+        )
+
+    def test_ignores_examples_inside_code_fences_and_mid_line_mentions(self):
+        self.assertEqual(
+            self.extract([
+                "Use psd-publish-file, not a line like\n"
+                "```\nMEDIA:/home/node/.openclaw/work/x.csv\n```\n"
+                "and never write MEDIA: inline either."
+            ]),
+            [],
+        )
+
+    def test_dedupes_across_text_blocks_in_order(self):
+        self.assertEqual(
+            self.extract(["MEDIA:work/a.png", "MEDIA:work/b.png\nMEDIA:work/a.png"]),
+            ["work/a.png", "work/b.png"],
+        )
+
+
+class MediaDirectiveTranscriptReadTests(unittest.TestCase):
+    """The chat event OpenClaw broadcasts has the directive line removed, so
+    the targets are read from this turn's raw assistant records."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.adapter = OpenClawAdapter()
+        self.adapter.WORKSPACE_DIR = self.tmp.name
+        agent_dir = pathlib.Path(self.tmp.name) / "agents" / "main" / "agent"
+        agent_dir.mkdir(parents=True)
+        self.db_path = agent_dir / "openclaw-agent.sqlite"
+
+    def test_reads_only_this_turns_assistant_records_for_this_session(self):
+        _transcript_db(str(self.db_path), _rows("s1", [
+            _assistant_text(1_000, "MEDIA:work/previous-turn.csv"),
+            {"type": "message", "message": {
+                "role": "user", "timestamp": 5_000,
+                "content": [{"type": "text", "text": "MEDIA:work/user-typed.csv"}],
+            }},
+            _assistant_text(6_000, "MEDIA:work/this-turn.csv\n\nHere it is."),
+        ]) + _rows("s2", [
+            _assistant_text(6_000, "MEDIA:work/other-session.csv"),
+        ]))
+        self.assertEqual(
+            self.adapter._read_turn_media_targets("s1", None, 5_000),
+            ["work/this-turn.csv"],
+        )
+
+    def test_missing_database_or_unsafe_ids_yield_nothing(self):
+        self.assertEqual(self.adapter._read_turn_media_targets("s1", None, 0), [])
+        self.assertEqual(self.adapter._read_turn_media_targets("..", None, 0), [])
+        self.assertEqual(self.adapter._read_turn_media_targets(None, None, 0), [])
+
+
+class MediaDirectiveDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.adapter = OpenClawAdapter()
+        self.adapter.WORKSPACE_DIR = self.tmp.name
+        # The production roots, re-based onto the temp workspace.
+        self.adapter.MEDIA_DIRECTIVE_ROOTS = tuple(
+            os.path.join(self.tmp.name, os.path.relpath(root, "/home/node/.openclaw"))
+            for root in OpenClawAdapter.MEDIA_DIRECTIVE_ROOTS
+        )
+        root = pathlib.Path(self.tmp.name)
+        (root / "work").mkdir()
+        (root / "work" / "states.csv").write_text("state,sq_mi\nAlaska,665384\n")
+        agent = root / "agents" / "main" / "agent"
+        agent.mkdir(parents=True)
+        (agent / "openclaw-agent.sqlite").write_bytes(b"SQLite format 3\x00")
+        (root / "openclaw.json").write_text("{}")
+        self.failures = mock.patch.object(harness_adapter, "record_failure").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _completed(self, returncode, payload, stderr=""):
+        # publish.js success output is pretty-printed across lines
+        # (JSON.stringify(obj, null, 2)); its errors are a single line.
+        stdout = json.dumps(payload, indent=2 if returncode == 0 else None)
+        return mock.Mock(returncode=returncode, stdout=stdout + "\n", stderr=stderr)
+
+    def test_production_roots_are_work_and_attachments_only(self):
+        self.assertEqual(OpenClawAdapter.MEDIA_DIRECTIVE_ROOTS, (
+            "/home/node/.openclaw/work",
+            "/home/node/.openclaw/attachments",
+        ))
+        real = OpenClawAdapter()
+        for target in (
+            "/home/node/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+            "/home/node/.openclaw/openclaw.json",
+            "agents/main/agent/openclaw-agent.sqlite",
+            "/tmp/anything.png",
+        ):
+            with self.subTest(target=target):
+                path, reason = real._resolve_media_path(target)
+                self.assertIsNone(path)
+                self.assertEqual(reason, "outside the folders files can be sent from")
+
+    def test_the_transcript_database_and_config_are_never_published(self):
+        # Injected text in an uploaded document could steer the model into
+        # writing these MEDIA: lines; the DB holds every session's transcript.
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives([
+                os.path.join(self.tmp.name, "agents/main/agent/openclaw-agent.sqlite"),
+                "agents/main/agent/openclaw-agent.sqlite",
+                "openclaw.json",
+                "work/../openclaw.json",
+            ], "sess", "model")
+        run.assert_not_called()
+        self.assertEqual(text.count("outside the folders files can be sent from"), 4)
+
+    def test_a_local_file_is_published_to_drive_and_linked(self):
+        url = "https://drive.google.com/file/d/abc/view"
+        with mock.patch.object(harness_adapter.subprocess, "run",
+                               return_value=self._completed(0, {
+                                   "url": url, "fileName": "states.csv"})) as run:
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:2], ["node", OpenClawAdapter.MEDIA_PUBLISH_SCRIPT])
+        # Default destination: no --to, so the private Drive path.
+        self.assertEqual(argv[2:], [
+            "--file", os.path.realpath(os.path.join(self.tmp.name, "work/states.csv"))])
+        # The URL sits on its own line so Chat renders it as a link.
+        self.assertEqual(text.splitlines(), ["states.csv:", url])
+        self.failures.assert_not_called()
+
+    def test_a_refused_delivery_is_named_in_the_reply_and_recorded(self):
+        with mock.patch.object(harness_adapter.subprocess, "run",
+                               return_value=self._completed(1, {
+                                   "error": "unsupported_type",
+                                   "message": ".mp3 cannot go to Drive"})):
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        self.assertIn("I couldn't send this file", text)
+        self.assertIn("states.csv: .mp3 cannot go to Drive", text)
+        kwargs = self.failures.call_args.kwargs
+        self.assertEqual(kwargs["error_class"], "MediaDirectiveDeliveryFailed")
+        # A file name can identify a student; the record carries codes only.
+        self.assertNotIn("states", kwargs["error_message"])
+        self.assertNotIn("states", json.dumps(kwargs["context"]))
+        self.assertIn("unsupported_type", kwargs["error_message"])
+
+    def test_a_path_outside_the_allowed_roots_is_never_published(self):
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives(
+                ["/etc/passwd", "work/../../outside.csv", "work/missing.csv"],
+                "sess", "model")
+        run.assert_not_called()
+        self.assertIn("passwd: outside the folders files can be sent from", text)
+        self.assertIn("outside.csv: outside the folders files can be sent from", text)
+        self.assertIn("missing.csv: file not found", text)
+
+    def test_unparseable_publisher_output_is_a_failure_not_a_crash(self):
+        with mock.patch.object(harness_adapter.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stdout="}\n",
+                                                      stderr="")):
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        self.assertIn("states.csv: delivery failed", text)
+
+    def test_the_turn_budget_stops_further_deliveries(self):
+        self.adapter.MEDIA_DELIVERY_BUDGET_S = 0
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives(
+                ["work/states.csv"], "sess", "model")
+        run.assert_not_called()
+        self.assertIn("out of time to send it this turn", text)
+
+    def test_an_https_target_is_passed_through_as_a_link(self):
+        url = "https://psd-agents-dev.s3.amazonaws.com/public-images/x/y.png"
+        with mock.patch.object(harness_adapter.subprocess, "run") as run:
+            text = self.adapter._deliver_media_directives([url], "sess", "model")
+        run.assert_not_called()
+        self.assertEqual(text, url)
+
+    def test_at_most_five_files_are_sent(self):
+        targets = [f"https://example.com/{i}.png" for i in range(7)]
+        text = self.adapter._deliver_media_directives(targets, "sess", "model")
+        links = [line for line in text.splitlines() if line.startswith("https://")]
+        self.assertEqual(len(links), 5)
+        self.assertIn("2 more file(s) were not sent (limit 5 per reply).", text)
+        self.assertNotIn("I couldn't send", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
