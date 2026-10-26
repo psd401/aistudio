@@ -108,11 +108,15 @@ ARG OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT="The previous assistant turn completed
 # `ca-certificates` for the downloads, and the python3 venv stack for the
 # AgentCore SDK. (The exact Python version tracks the base image's distro;
 # verify with: docker run --rm psd-agent-base:latest python3 --version)
+# `jq`, `poppler-utils` (pdftotext/pdftoppm) and `file` are tools the model
+# reaches for in `exec` on its own: between 2026-10-04 and 10-26 they failed
+# "not found" 47 times across ~25 users. Same layer, no new RUN.
 RUN grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_LOG}" /app/dist && \
     grep -RFq -- "${OPENCLAW_SETTLED_TOOL_RECOVERY_PROMPT}" /app/dist && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      python3 python3-pip python3-venv tzdata ca-certificates curl unzip && \
+      python3 python3-pip python3-venv tzdata ca-certificates curl unzip \
+      jq poppler-utils file && \
     rm -rf /var/lib/apt/lists/*
 
 # Pin versions for supply-chain safety. Update these as needed.

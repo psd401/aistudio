@@ -278,3 +278,57 @@ describe("email-task route confinement", () => {
     expect(executeWorkspaceCommandMock).not.toHaveBeenCalled()
   })
 })
+
+describe("scheduled GitHub access", () => {
+  let githubPost: typeof import("@/app/api/agent/github-execute/route").POST
+
+  beforeAll(async () => {
+    ;({ POST: githubPost } = await import(
+      "@/app/api/agent/github-execute/route"
+    ))
+  })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    verifyContextMock.mockResolvedValue({
+      ownerEmail: "owner@example.com",
+      actorEmail: "owner@example.com",
+      mode: "scheduled",
+      sessionId: "scheduled-session",
+      nonce: "scheduled-nonce",
+    })
+    getSecretStringMock.mockResolvedValue("owner-github-token")
+    executeGitHubCommandMock.mockResolvedValue({ stdout: "[]", stderr: "" })
+  })
+
+  it("accepts owner, scheduled and email-task invocations for GitHub", async () => {
+    await githubPost(
+      request({ argv: ["issue", "list", "--repo", "owner/tasks"] }) as never,
+    )
+    expect(verifyContextMock).toHaveBeenCalledWith(expect.anything(), {
+      allowedModes: ["owner", "scheduled", "email-task"],
+    })
+  })
+
+  it("lets a scheduled run read GitHub but refuses writes", async () => {
+    const write = await githubPost(
+      request({
+        argv: ["pr", "review", "12", "--repo", "owner/repo", "--approve"],
+      }) as never,
+    )
+    expect(write.status).toBe(400)
+    await expect(write.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/Scheduled runs may only read from GitHub/),
+    })
+    expect(getSecretStringMock).not.toHaveBeenCalled()
+    expect(executeGitHubCommandMock).not.toHaveBeenCalled()
+
+    const read = await githubPost(
+      request({
+        argv: ["pr", "list", "--repo", "owner/repo", "--state", "open"],
+      }) as never,
+    )
+    expect(read.status).toBe(200)
+    expect(executeGitHubCommandMock).toHaveBeenCalledTimes(1)
+  })
+})
