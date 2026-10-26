@@ -56,6 +56,22 @@ async function restoreStandardMode(page: Page): Promise<void> {
   await expect(page.getByRole('button', { name: 'Nexus routing mode' })).toContainText('Standard')
 }
 
+/** Remove a fixture model this spec inserted, with the test turns that reference it. */
+async function deleteFixtureModel(
+  database: ReturnType<typeof createDatabase>,
+  modelId: number,
+): Promise<void> {
+  const conversations = await database<{ conversation_id: string }[]>`
+    SELECT DISTINCT conversation_id FROM nexus_messages WHERE model_id = ${modelId}
+  `
+  await database`DELETE FROM nexus_messages WHERE model_id = ${modelId}`
+  for (const { conversation_id: conversationId } of conversations) {
+    await database`DELETE FROM nexus_messages WHERE conversation_id = ${conversationId}`
+    await database`DELETE FROM nexus_conversations WHERE id = ${conversationId}`
+  }
+  await database`DELETE FROM ai_models WHERE id = ${modelId}`
+}
+
 async function assistantProviders(
   database: ReturnType<typeof createDatabase>,
   conversationId: string,
@@ -118,11 +134,13 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
 
     const database = createDatabase()
     let advancedSelected = false
+    let insertedModelId: number | null = null
     try {
       // Insert the fixture only when absent: an existing row (e.g. a real
       // deployment's GPT-6 Luna) is never modified, and the test skips if that
-      // row cannot serve the ChatGPT family on Bedrock.
-      await database`
+      // row cannot serve the ChatGPT family on Bedrock. A row this test
+      // inserts is deleted again in `finally`.
+      const inserted = await database<{ id: number }[]>`
         INSERT INTO ai_models (name, model_id, provider, capabilities, active, nexus_enabled, architect_enabled)
         VALUES (
           ${GPT_MODEL_NAME}, ${GPT_MODEL_ID}, 'amazon-bedrock',
@@ -130,10 +148,13 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
           true, true, true
         )
         ON CONFLICT (model_id) DO NOTHING
+        RETURNING id
       `
+      insertedModelId = inserted[0]?.id ?? null
       const [model] = await database<{ id: number; provider: string; active: boolean; nexus_enabled: boolean }[]>`
         SELECT id, provider, active, nexus_enabled FROM ai_models WHERE model_id = ${GPT_MODEL_ID}
       `
+      test.skip(!model, `Could not insert or find a ${GPT_MODEL_ID} row`)
       test.skip(
         model.provider !== 'amazon-bedrock' || !model.active || !model.nexus_enabled,
         `Existing ${GPT_MODEL_ID} row is not an active Nexus Bedrock model; not modifying it`,
@@ -148,8 +169,11 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
         timeout: 60_000,
       })
 
+      // The ?id= query param lands shortly after the first turn streams.
+      await expect
+        .poll(() => getConversationIdFromUrl(page), { timeout: 15_000 })
+        .toBeTruthy()
       const conversationId = getConversationIdFromUrl(page)
-      expect(conversationId).toBeTruthy()
       await expect
         .poll(() => assistantProviders(database, conversationId!), {
           timeout: 30_000,
@@ -164,6 +188,7 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
       })
     } finally {
       if (advancedSelected) await restoreStandardMode(page)
+      if (insertedModelId !== null) await deleteFixtureModel(database, insertedModelId)
       await database.end()
     }
   })
