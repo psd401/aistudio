@@ -13,6 +13,7 @@ openwiki:
     - lib/streaming/provider-adapters/claude-adapter.ts
     - lib/streaming/provider-adapters/index.ts
     - lib/ai/bedrock-openai.ts
+    - lib/ai/claude-output-cap.ts
     - lib/ai/provider-factory.ts
     - lib/streaming/nexus/nexus-streaming-service.ts
     - lib/streaming/empty-turn-notice.ts
@@ -412,6 +413,36 @@ Caption: stored keys win only outside Lambda and only when both keys are set. Ev
 - `tests/e2e/admin-model-default-reasoning-effort.functional.spec.ts` drives the admin form against a database. It is skipped unless `PLAYWRIGHT_AUTH_ENABLED` is `true` (it needs the authenticated dev server). It sets None on a Bedrock GPT row, checks that the value persists in `provider_metadata`, checks that unrelated metadata survives, and checks that "Model default" removes the key. It also checks that a Claude row shows no such field. It calls no model. Run it when the admin field or its persistence changes.
 
 **Known limits** (from the commit's live checks): reasoning summaries come back empty from Bedrock, and Bedrock rejects `https://` image URLs for these models (only `data:` and `s3://` work). Nexus sends data URLs, and the client shrinks each inline photo before it is sent (see [Image Downscaling](../app-features/overview.md#image-downscaling-and-the-proxied-body-limit-1850)).
+
+## Claude Default Output Cap (#1979)
+
+**Location**: `lib/ai/claude-output-cap.ts` exports `DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS` (32,000) and `defaultClaudeMaxOutputTokens(modelId)`. `ClaudeAdapter.enhanceStreamConfig` (`lib/streaming/provider-adapters/claude-adapter.ts`) applies it to every Converse-path Claude stream. The direct `streamText` callers in `app/api/compare/route.ts` (`createTextGenerator`) and `lib/ai-helpers.ts` (`streamCompletion`) apply it themselves; see [Model Compare](../app-features/overview.md#model-compare).
+
+**Why it exists**: With no `maxOutputTokens`, Bedrock Converse caps Claude at 4,096 output tokens. Claude 5.x adaptive thinking counts against the same cap, so a long answer (grading a class set, a long rewrite) ended with `finishReason: length` and no visible text. The cap is a ceiling, not a target: output is billed per token generated, so a high ceiling costs nothing on short turns.
+
+**Rules that define the behavior**:
+- `defaultClaudeMaxOutputTokens` is an allowlist. It returns 32,000 only for Claude 4.x and 5.x IDs in their Bedrock, alias, or dotted spellings (`us.anthropic.claude-sonnet-5-5`, `claude-opus-4-6-v1`, `claude-haiku-4.5`). Claude 2.x and 3.x IDs and non-Claude IDs return `undefined`, so no cap is sent. Older families have a 4K to 8K maximum and would reject the default.
+- `enhanceStreamConfig` sets `maxTokens` only when it is `== null`. A cap the caller set (for example 2048) is kept.
+- The cap is set on the stream config, not in `getProviderOptions()`. It is not a provider option, so the `BaseProviderAdapter.streamWithEnhancements` gap described under [Request Defaults](#request-defaults-and-why-they-exist) does not affect it.
+- Bedrock GPT IDs (`openai.gpt-*`) take the Responses path above and are not covered by this cap logic.
+
+**Extension point**: to support another Claude family, change only the `CLAUDE_4_OR_5` pattern in `lib/ai/claude-output-cap.ts`, and add its ID to the matching list in the test. To change the ceiling, change `DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS`. Any new direct `streamText` call for a Claude model must pass `maxOutputTokens: defaultClaudeMaxOutputTokens(modelId)` itself, because the adapter override does not run for it.
+
+**Focused tests**: `lib/streaming/__tests__/claude-adapter-max-output.test.ts`. Its `defaultClaudeMaxOutputTokens` block checks each Claude 4/5 ID (capped) and each older or non-Claude ID (uncapped). Its `ClaudeAdapter default output cap` block checks these behaviors: the default is applied when the caller sets no cap ("applies the default when the caller sets no cap"), a caller cap is kept ("keeps a cap the caller set"), and an older Claude model gets no cap ("sends no cap for an older Claude model"). `tests/unit/api/compare-claude-output-cap.test.ts` is a source-text check that `app/api/compare/route.ts` and `lib/ai-helpers.ts` contain a `maxOutputTokens: defaultClaudeMaxOutputTokens(` call. It catches a regression in a direct caller, which the adapter test cannot see.
+
+**Minimal validation**: `bunx jest --silent lib/streaming/__tests__/claude-adapter-max-output.test.ts tests/unit/api/compare-claude-output-cap.test.ts`. Add `bun run typecheck` when the function signature changes.
+
+**Scope boundary**: this changes only the output ceiling. It does not change routing, the Converse request shape for Claude, or the GPT Responses defaults. The compare route's source-text test can pass even if the value is wrong, so behavior changes need the adapter test as well.
+
+```mermaid
+flowchart TD
+    A["Stream config has maxTokens?"] -- yes --> K["Keep caller value"]
+    A -- no --> B["defaultClaudeMaxOutputTokens(modelId)"]
+    B -- "Claude 4.x or 5.x ID" --> C["maxTokens = 32000"]
+    B -- "older or non-Claude ID" --> D["undefined: send no cap"]
+```
+
+Caption: the cap decision inside `ClaudeAdapter.enhanceStreamConfig`. Direct `streamText` callers run the same function before their call.
 
 ## Answer-less Turns and Error Notices (#1899)
 
