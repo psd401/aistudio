@@ -119,17 +119,25 @@ test.describe('Nexus ChatGPT provider errors (#1849)', () => {
     const database = createDatabase()
     let advancedSelected = false
     try {
-      const [model] = await database<{ id: number }[]>`
+      // Insert the fixture only when absent: an existing row (e.g. a real
+      // deployment's GPT-6 Luna) is never modified, and the test skips if that
+      // row cannot serve the ChatGPT family on Bedrock.
+      await database`
         INSERT INTO ai_models (name, model_id, provider, capabilities, active, nexus_enabled, architect_enabled)
         VALUES (
           ${GPT_MODEL_NAME}, ${GPT_MODEL_ID}, 'amazon-bedrock',
           '["chat", "function_calling", "image_analysis", "streaming", "reasoning"]',
           true, true, true
         )
-        ON CONFLICT (model_id) DO UPDATE
-          SET active = true, nexus_enabled = true, provider = 'amazon-bedrock'
-        RETURNING id
+        ON CONFLICT (model_id) DO NOTHING
       `
+      const [model] = await database<{ id: number; provider: string; active: boolean; nexus_enabled: boolean }[]>`
+        SELECT id, provider, active, nexus_enabled FROM ai_models WHERE model_id = ${GPT_MODEL_ID}
+      `
+      test.skip(
+        model.provider !== 'amazon-bedrock' || !model.active || !model.nexus_enabled,
+        `Existing ${GPT_MODEL_ID} row is not an active Nexus Bedrock model; not modifying it`,
+      )
 
       await gotoNexus(page)
       await chooseAdvancedChatGPT(page)
