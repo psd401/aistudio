@@ -1,5 +1,6 @@
 import {
   and,
+  asc,
   eq,
   gt,
   inArray,
@@ -17,6 +18,7 @@ import {
   knowledgeRepositories,
   nexusConversations,
   nexusRepositoryBindings,
+  repositoryItemChunks,
   repositoryItemVersions,
   repositoryItems,
   repositoryUploadSessions,
@@ -837,7 +839,9 @@ async function queryBoundAttachmentSources(
             isNotNull(repositoryItemVersions.objectKey)
           )
         ),
-    `nexus.resolveAttachment:${itemType}`
+    itemType === "image"
+      ? "nexus.resolveAttachmentImageSources"
+      : "nexus.resolveAttachmentPdfSources"
   );
 }
 
@@ -892,6 +896,25 @@ export async function resolveNexusAttachmentImageSources(input: {
 }
 
 /**
+ * The extracted text of one item version, in chunk order. Used to run an
+ * attached PDF through the same content-safety check retrieved chunks get
+ * before the PDF itself is shown to a model.
+ */
+export async function loadItemVersionText(itemVersionId: string): Promise<string> {
+  assertUuid(itemVersionId, "Item version id");
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ content: repositoryItemChunks.content })
+        .from(repositoryItemChunks)
+        .where(eq(repositoryItemChunks.itemVersionId, itemVersionId))
+        .orderBy(asc(repositoryItemChunks.chunkIndex)),
+    "nexus.loadItemVersionText"
+  );
+  return rows.map((row) => row.content).join("\n");
+}
+
+/**
  * The current turn's PDF attachments as owner-bound canonical sources, so the
  * model can read the pages themselves (circled answers, handwriting) and not
  * only the extracted text. Unlike the image resolver this returns the subset
@@ -919,16 +942,14 @@ export async function resolveNexusAttachmentPdfSources(input: {
     assertPositiveId(reference.itemId, "Item id");
   }
   const rows = await queryBoundAttachmentSources(input, uniqueReferences, "document");
-  return rows
-    .filter(
-      (row): row is typeof row & { objectKey: string } =>
-        !!row.objectKey &&
-        (row.detectedContentType ?? row.declaredContentType ?? "")
-          .split(";", 1)[0]
-          .trim()
-          .toLowerCase() === "application/pdf"
-    )
-    .map((row) => ({ ...row, objectKey: row.objectKey }));
+  return rows.filter(
+    (row): row is typeof row & { objectKey: string } =>
+      !!row.objectKey &&
+      (row.detectedContentType ?? row.declaredContentType ?? "")
+        .split(";", 1)[0]
+        .trim()
+        .toLowerCase() === "application/pdf"
+  );
 }
 
 /**

@@ -4,11 +4,14 @@
  * now also sent as documents the model reads visually (prod, 2026-10-26).
  */
 import { describe, it, expect, jest } from "@jest/globals";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { UIMessage } from "ai";
 import {
   MAX_PDF_DOCUMENTS,
   MAX_PDF_DOCUMENTS_TOTAL_BYTES,
   bedrockSafePdfFilename,
+  pdfContentSafetyCheck,
   modelReadsPdfDocuments,
   withAttachedPdfDocuments,
 } from "../pdf-attachment-documents";
@@ -41,6 +44,7 @@ function run(overrides: Partial<Parameters<typeof withAttachedPdfDocuments>[0]> 
     conversationId: "00000000-0000-4000-8000-000000000002",
     modelConfig: CLAUDE,
     log,
+    isPdfContentAllowed: async () => true,
     resolveSources: async () => [source(7)],
     loadPdf: async () => PDF,
     ...overrides,
@@ -64,12 +68,8 @@ describe("withAttachedPdfDocuments", () => {
     expect(messages[2].parts).toHaveLength(1);
   });
 
-  it("works for Gemini", async () => {
-    const result = await run({ modelConfig: { provider: "google", model_id: "gemini-3.8-flash" } });
-    expect(result.attachedCount).toBe(1);
-  });
-
   it.each([
+    { provider: "google", model_id: "gemini-3.8-flash" }, // accepts PDFs, but unverified on our ids
     { provider: "amazon-bedrock", model_id: "us.openai.gpt-6-sol" },
     { provider: "openai", model_id: "gpt-image-2.5-flare" },
     { provider: "latimer", model_id: "gpt-4o-mini" },
@@ -92,6 +92,22 @@ describe("withAttachedPdfDocuments", () => {
     expect(thrown.messages).toBe(messages);
     const loadFails = await run({ loadPdf: async () => { throw new Error("s3 down"); } });
     expect(loadFails.messages).toBe(messages);
+  });
+
+  it("skips only the PDF that fails and still attaches the others", async () => {
+    const result = await run({
+      resolveSources: async () => [source(1, "a.pdf"), source(2, "b.pdf")],
+      loadPdf: async s => { if (s.itemId === 1) throw new Error("s3 down"); return PDF; },
+    });
+    expect(result.attachedCount).toBe(1);
+    expect(result.messages[2].parts[0]).toMatchObject({ filename: "b.pdf" });
+  });
+
+  it("does not attach a PDF the content-safety check refuses (and does not load it)", async () => {
+    const loadPdf = jest.fn(async () => PDF);
+    const result = await run({ isPdfContentAllowed: async () => false, loadPdf });
+    expect(result.messages).toBe(messages);
+    expect(loadPdf).not.toHaveBeenCalled();
   });
 
   it("skips PDFs the loader rejects (too large, not a PDF)", async () => {
@@ -119,10 +135,53 @@ describe("bedrockSafePdfFilename", () => {
 });
 
 describe("modelReadsPdfDocuments", () => {
-  it("covers Claude 4.x/5.x on Bedrock and Gemini only", () => {
+  it("covers only the verified path: Claude 4.x/5.x on Bedrock", () => {
     expect(modelReadsPdfDocuments(CLAUDE)).toBe(true);
     expect(modelReadsPdfDocuments({ provider: "amazon-bedrock", model_id: "us.anthropic.claude-haiku-5-5" })).toBe(true);
-    expect(modelReadsPdfDocuments({ provider: "google", model_id: "gemini-4-argon" })).toBe(true);
+    expect(modelReadsPdfDocuments({ provider: "google", model_id: "gemini-4-argon" })).toBe(false);
     expect(modelReadsPdfDocuments({ provider: "amazon-bedrock", model_id: "us.openai.gpt-6-luna" })).toBe(false);
+  });
+});
+
+describe("pdfContentSafetyCheck", () => {
+  const allow = { allowed: true, processedContent: "", requestId: "r", processingTimeMs: 0, contentModified: false };
+  const block = { ...allow, allowed: false };
+
+  it("allows without loading text when guardrails are off", async () => {
+    const loadText = jest.fn(async () => "text");
+    const check = pdfContentSafetyCheck("sub", {
+      safety: { isEnabled: () => false, processInput: jest.fn(async () => allow) as never },
+      loadText,
+    });
+    await expect(check(source(7))).resolves.toBe(true);
+    expect(loadText).not.toHaveBeenCalled();
+  });
+
+  it("checks the extracted text in slices and refuses on any blocked slice", async () => {
+    const processInput = jest.fn(async (text: string, _sessionId: string) => (text.startsWith("bad") ? block : allow));
+    const check = pdfContentSafetyCheck("sub", {
+      safety: { isEnabled: () => true, processInput: processInput as never },
+      loadText: async () => "x".repeat(20_000) + "bad content",
+    });
+    await expect(check(source(7))).resolves.toBe(false);
+    expect(processInput).toHaveBeenCalledTimes(2);
+    expect(processInput).toHaveBeenLastCalledWith("bad content", "sub");
+  });
+
+  it("allows when every slice passes", async () => {
+    const check = pdfContentSafetyCheck("sub", {
+      safety: { isEnabled: () => true, processInput: jest.fn(async () => allow) as never },
+      loadText: async () => "clean text",
+    });
+    await expect(check(source(7))).resolves.toBe(true);
+  });
+});
+
+describe("route wiring", () => {
+  it("streams the model copy with PDFs and the content-safety check", () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- fixed path to the sibling route module.
+    const route = readFileSync(join(__dirname, "..", "route.ts"), "utf8");
+    expect(route).toMatch(/messages: await modelMessagesWithAttachedPdfs\(/);
+    expect(route).toMatch(/isPdfContentAllowed: pdfContentSafetyCheck\(prepared\.session\.sub\)/);
   });
 });

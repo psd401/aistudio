@@ -12,19 +12,26 @@
  * Scope is deliberately narrow:
  *  - only the CURRENT turn's attachments (later turns keep repository search),
  *  - only owner-bound, clean, processed PDFs (same rules as image references),
- *  - only models known to read PDFs visually,
+ *  - only Claude 4.x/5.x on Bedrock — the one path verified end to end (Gemini
+ *    accepts PDFs too, but has not been verified on our model ids),
+ *  - only after the PDF's extracted text passes the same content-safety check
+ *    retrieved chunks get (`protectRetrievedChunk`), so the model never sees a
+ *    PDF that the search path would have refused to return,
  *  - bounded size, and
- *  - fail-open: any problem leaves the turn exactly as it was before.
+ *  - fail-open: a PDF that fails any step is simply not attached, and the turn
+ *    proceeds on text retrieval exactly as before. Nothing here blocks a turn.
  * The bytes go only into the model's copy of the message; nothing is persisted.
  */
 
 import type { UIMessage } from "ai";
 import type { createLogger } from "@/lib/logger";
 import {
+  loadItemVersionText,
   resolveNexusAttachmentPdfSources,
   type NexusAttachmentImageSource,
   type NexusAttachmentReference,
 } from "@/lib/nexus/ephemeral-repository-service";
+import { getContentSafetyService } from "@/lib/safety";
 import { isRepositorySourceObjectKey } from "@/lib/repositories/content-platform/object-key";
 import { getObjectStream } from "@/lib/aws/s3-client";
 
@@ -35,14 +42,12 @@ export const MAX_PDF_DOCUMENTS_TOTAL_BYTES = 24 * 1024 * 1024;
 /** Bedrock Converse accepts at most 5 documents per request. */
 export const MAX_PDF_DOCUMENTS = 5;
 
-/** Models that read PDF pages visually when the PDF is in the request. */
+/** Models verified to read PDF pages visually when the PDF is in the request. */
 export function modelReadsPdfDocuments(modelConfig: { provider: string; model_id: string }): boolean {
-  const provider = modelConfig.provider.toLowerCase();
-  if (provider === "google") return /gemini/i.test(modelConfig.model_id);
-  if (provider === "amazon-bedrock") {
-    return /claude-(?:(?:opus|sonnet|haiku|fable)-[45]\b|[45]\b)/i.test(modelConfig.model_id);
-  }
-  return false;
+  return (
+    modelConfig.provider.toLowerCase() === "amazon-bedrock" &&
+    /claude-(?:(?:opus|sonnet|haiku|fable)-[45]\b|[45]\b)/i.test(modelConfig.model_id)
+  );
 }
 
 /**
@@ -59,6 +64,33 @@ export function bedrockSafePdfFilename(name: string, index: number): string {
     .slice(0, 100)
     .trim();
   return `${safe || `attachment ${index + 1}`}.pdf`;
+}
+
+/** Guardrail input size per call; longer extracted text is checked in slices. */
+const SAFETY_SLICE_CHARS = 20_000;
+
+/**
+ * The content-safety check retrieved attachment chunks pass
+ * (`protectRetrievedChunk`), applied to the PDF's extracted text before the PDF
+ * itself goes to the model. With guardrails off it allows without loading text.
+ */
+export function pdfContentSafetyCheck(
+  sessionId: string,
+  deps: {
+    safety?: Pick<ReturnType<typeof getContentSafetyService>, "isEnabled" | "processInput">;
+    loadText?: (itemVersionId: string) => Promise<string>;
+  } = {}
+): (source: NexusAttachmentImageSource) => Promise<boolean> {
+  return async (source) => {
+    const safety = deps.safety ?? getContentSafetyService();
+    if (!safety.isEnabled()) return true;
+    const text = await (deps.loadText ?? loadItemVersionText)(source.itemVersionId);
+    for (let start = 0; start < text.length; start += SAFETY_SLICE_CHARS) {
+      const result = await safety.processInput(text.slice(start, start + SAFETY_SLICE_CHARS), sessionId);
+      if (!result.allowed) return false;
+    }
+    return true;
+  };
 }
 
 async function readPdf(source: NexusAttachmentImageSource): Promise<Buffer | null> {
@@ -82,6 +114,32 @@ async function readPdf(source: NexusAttachmentImageSource): Promise<Buffer | nul
   }
   const bytes = Buffer.concat(chunks);
   return bytes.subarray(0, 5).toString("latin1") === "%PDF-" ? bytes : null;
+}
+
+/**
+ * One PDF's bytes if the content-safety check allows it and it loads; null
+ * otherwise. Each PDF stands alone: one that fails is skipped, the rest attach.
+ */
+async function loadAllowedPdf(
+  source: NexusAttachmentImageSource,
+  params: {
+    log: ReturnType<typeof createLogger>;
+    isPdfContentAllowed: (source: NexusAttachmentImageSource) => Promise<boolean>;
+    loadPdf?: (source: NexusAttachmentImageSource) => Promise<Buffer | null>;
+  }
+): Promise<Buffer | null> {
+  try {
+    if (!(await params.isPdfContentAllowed(source))) {
+      params.log.info("PDF not attached for visual reading: content-safety check did not allow it");
+      return null;
+    }
+    return await (params.loadPdf ?? readPdf)(source);
+  } catch (error) {
+    params.log.warn("Could not attach one PDF for visual reading; skipping it", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /** Index of the last user message, or -1. */
@@ -109,6 +167,11 @@ export async function withAttachedPdfDocuments(params: {
   conversationId: string;
   modelConfig: { provider: string; model_id: string };
   log: ReturnType<typeof createLogger>;
+  /**
+   * Whether the PDF's content may be shown to the model — the same check
+   * retrieved chunks pass. Resolves false to skip the PDF (never to block).
+   */
+  isPdfContentAllowed: (source: NexusAttachmentImageSource) => Promise<boolean>;
   resolveSources?: typeof resolveNexusAttachmentPdfSources;
   loadPdf?: (source: NexusAttachmentImageSource) => Promise<Buffer | null>;
 }): Promise<PdfDocumentAttachmentResult> {
@@ -128,7 +191,7 @@ export async function withAttachedPdfDocuments(params: {
     const parts: UIMessage["parts"] = [];
     let total = 0;
     for (const source of sources.slice(0, MAX_PDF_DOCUMENTS)) {
-      const bytes = await (params.loadPdf ?? readPdf)(source);
+      const bytes = await loadAllowedPdf(source, params);
       if (!bytes || total + bytes.byteLength > MAX_PDF_DOCUMENTS_TOTAL_BYTES) continue;
       total += bytes.byteLength;
       parts.push({

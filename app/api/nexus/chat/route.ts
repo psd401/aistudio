@@ -155,7 +155,7 @@ import {
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
 import { buildNexusStreamHeaders } from './stream-headers';
-import { withAttachedPdfDocuments } from './pdf-attachment-documents';
+import { pdfContentSafetyCheck, withAttachedPdfDocuments } from './pdf-attachment-documents';
 import {
   isProviderConfigurationError,
   providerConfigurationErrorResponse,
@@ -3281,7 +3281,11 @@ function buildRepositoryPromptFragment(params: {
  * pdf-attachment-documents.ts).
  */
 async function modelMessagesWithAttachedPdfs(
-  prepared: { attachmentPreflight: { references: NexusAttachmentReference[] }; userId: number },
+  prepared: {
+    attachmentPreflight: { references: NexusAttachmentReference[] };
+    userId: number;
+    session: { sub: string };
+  },
   resolved: { modelConfig: { provider: string; model_id: string } },
   conversation: { conversationId: string },
   repositories: { lightweightMessages: UIMessage[] },
@@ -3294,6 +3298,7 @@ async function modelMessagesWithAttachedPdfs(
     conversationId: conversation.conversationId,
     modelConfig: resolved.modelConfig,
     log,
+    isPdfContentAllowed: pdfContentSafetyCheck(prepared.session.sub),
   });
   return messages;
 }
