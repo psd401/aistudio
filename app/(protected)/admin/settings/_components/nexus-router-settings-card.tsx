@@ -281,7 +281,7 @@ function ModelTierGrid({
 interface SpecialistGridProps {
   config: NexusRouterConfig
   connectors: NexusRouterConnectorOption[]
-  googleTextModels: NexusRouterModelOption[]
+  textModels: NexusRouterModelOption[]
   googleWebSearchModels: NexusRouterModelOption[]
   imageModels: NexusRouterModelOption[]
   setConfig: SetRouterConfig
@@ -308,9 +308,9 @@ function SpecialistGrid(props: SpecialistGridProps) {
         <RouterModelSelect
           value={firstAvailableCandidate(
             props.config.specialists.instructionModels,
-            props.googleTextModels
+            props.textModels
           )}
-          models={props.googleTextModels}
+          models={props.textModels}
           automaticLabel="Automatic Gemini"
           testId="nexus-router-instruction-model"
           onChange={modelId => updateModels("instructionModels", modelId)}
@@ -470,13 +470,9 @@ export function NexusRouterSettingsCard({
     [models]
   )
   const imageModels = useMemo(() => models.filter(model => model.imageGeneration), [models])
-  const googleTextModels = useMemo(
-    () => textModels.filter(model => model.family === "google"),
-    [textModels]
-  )
   const googleWebSearchModels = useMemo(
-    () => googleTextModels.filter(model => model.webSearch),
-    [googleTextModels]
+    () => textModels.filter(model => model.family === "google" && model.webSearch),
+    [textModels]
   )
 
   const save = async () => {
@@ -538,7 +534,7 @@ export function NexusRouterSettingsCard({
         <SpecialistGrid
           config={config}
           connectors={connectors}
-          googleTextModels={googleTextModels}
+          textModels={textModels}
           googleWebSearchModels={googleWebSearchModels}
           imageModels={imageModels}
           setConfig={setConfig}

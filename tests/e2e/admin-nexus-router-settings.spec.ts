@@ -78,4 +78,22 @@ test.describe('Admin Nexus router settings', () => {
     await expect(reloadedCard.getByTestId('assistant-architect-router-admin-mode')).toContainText('Active')
     await expect(reloadedCard.getByTestId('nexus-router-classifier-model')).toHaveValue('us.amazon.nova-micro-v1:0')
   })
+
+  test('offers every text model family for instructional questions', async ({ page }) => {
+    const optionNames = async (testId: string): Promise<string[]> => {
+      await page.getByTestId(testId).click()
+      const names = await page.getByRole('option').allTextContents()
+      await page.keyboard.press('Escape')
+      return names.map(name => name.trim())
+    }
+
+    const claudeModels = (await optionNames('nexus-router-anthropic-medium'))
+      .filter(name => name !== 'Automatic')
+    test.skip(claudeModels.length === 0, 'No Claude models seeded in this database')
+
+    const instructionModels = await optionNames('nexus-router-instruction-model')
+    for (const name of claudeModels) {
+      expect(instructionModels).toContain(name)
+    }
+  })
 })

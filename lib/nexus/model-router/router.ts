@@ -295,7 +295,14 @@ function selectModel(args: {
       !hasCapability(model.capabilities, "imageGeneration")
       && !hasCapability(model.capabilities, "deepResearch")
       && meetsMinTier(model, args.minTier)
-      && (args.intent !== "instruction" || args.family !== "auto" || inferFamily(model) === "google")
+      // A configured instructional specialist may be any family. Everything
+      // else on the instructional route - the unconfigured ("Automatic Gemini")
+      // case and the fallback sweep when no configured specialist is
+      // accessible - stays on Google.
+      && (args.intent !== "instruction" || args.family !== "auto"
+        || args.config.specialists.instructionModels.includes(model.modelId)
+        || args.config.specialists.instructionModels.includes(String(model.id))
+        || inferFamily(model) === "google")
       && (args.intent !== "web-search" || args.family !== "auto" || inferFamily(model) === "google"),
   })
   if (routed) return { model: routed.model as NexusModelRow, fallbackUsed: routed.fallbackUsed }
