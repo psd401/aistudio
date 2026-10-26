@@ -26,8 +26,11 @@ function parseGitHubArgv(raw: unknown): string[] | null {
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
+  // "scheduled" is allowed like every other owner route: a schedule runs as
+  // its owner, and without it every scheduled `gh` call (e.g. the morning
+  // brief's Life OS tasks and ready PRs) failed here with a bare 403.
   const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner", "email-task"],
+    allowedModes: ["owner", "scheduled", "email-task"],
   });
   if (!context)
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

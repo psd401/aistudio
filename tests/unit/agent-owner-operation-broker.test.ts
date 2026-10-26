@@ -1,10 +1,14 @@
 /** @jest-environment node */
 
 const getUserOnlyMock = jest.fn()
+const getMock = jest.fn()
 const putMock = jest.fn()
 
 jest.mock("@/lib/agent-credentials/broker", () => ({
   AgentCredentialBroker: class {
+    get(...args: unknown[]) {
+      return getMock(...args)
+    }
     getUserOnly(...args: unknown[]) {
       return getUserOnlyMock(...args)
     }
@@ -15,6 +19,8 @@ jest.mock("@/lib/agent-credentials/broker", () => ({
 }))
 
 import {
+  AGENT_IMAGE_MODEL_ID,
+  executeOpenAiImageOperation,
   executePlaudOperation,
   executePsdDataOperation,
 } from "@/lib/agent-credentials/owner-operation-broker"
@@ -372,3 +378,65 @@ const defineOwnerOnlyOperationCredentialBrokerSuite1 = () => {
 };
 
 describe("owner-only operation credential broker", defineOwnerOnlyOperationCredentialBrokerSuite1)
+
+describe("OpenAI image operation", () => {
+  const imageInput = {
+    ownerEmail: "owner@psd401.net",
+    sessionId: "session-1",
+    prompt: "A purple husky badge",
+    size: "1024x1024",
+    quality: "medium",
+    background: "auto",
+  }
+
+  beforeEach(() => {
+    getMock.mockResolvedValue({
+      name: "openai_api_key",
+      value: "shared-openai-key",
+      scope: "shared",
+    })
+  })
+
+  it("requests the current agent image model", async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: "aGVsbG8=" }] }))
+    globalThis.fetch = fetchMock as typeof fetch
+    await expect(executeOpenAiImageOperation(imageInput)).resolves.toEqual({
+      imageBase64: "aGVsbG8=",
+    })
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body))
+    expect(AGENT_IMAGE_MODEL_ID).toBe("gpt-image-2.5-flare")
+    expect(body.model).toBe(AGENT_IMAGE_MODEL_ID)
+  })
+
+  // 2026-10-26: a retired model logged only "Image provider HTTP 403", which
+  // read like a credential fault. OpenAI's code and message must reach the log.
+  it("carries OpenAI's error code and message into the thrown error", async () => {
+    globalThis.fetch = jest.fn().mockResolvedValueOnce(
+      jsonResponse(
+        {
+          error: {
+            message:
+              "Project `proj_x` does not have access to model `gpt-image-2`",
+            type: "invalid_request_error",
+            code: "model_not_found",
+          },
+        },
+        { status: 403 },
+      ),
+    ) as typeof fetch
+    await expect(executeOpenAiImageOperation(imageInput)).rejects.toThrow(
+      "Image provider HTTP 403 (model_not_found: Project `proj_x` does not have access to model `gpt-image-2`)",
+    )
+  })
+
+  it("still reports the bare status when the error body is unreadable", async () => {
+    globalThis.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(emptyResponse(502)) as typeof fetch
+    await expect(executeOpenAiImageOperation(imageInput)).rejects.toThrow(
+      /^Image provider HTTP 502$/,
+    )
+  })
+})

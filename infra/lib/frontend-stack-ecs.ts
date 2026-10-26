@@ -648,8 +648,8 @@ export const AI_BODY_PATH_PREFIXES = [NEXUS_CHAT_PREFIX, AGENT_API_PREFIX] as co
 /**
  * Every managed rule that inspects the request body, per rule group, with the
  * namespace of the label it adds. Names come from
- * `aws wafv2 describe-managed-rule-group` (2026-09-22); the label is the rule
- * name with `_BODY` written `_Body`, e.g.
+ * `aws wafv2 describe-managed-rule-group` (2026-09-22, re-checked
+ * 2026-10-26); the label is the rule name with `_BODY` written `_Body`, e.g.
  * `awswaf:managed:aws:core-rule-set:CrossSiteScripting_Body`.
  *
  * Why not just exclude these rules on the AI paths with a scope-down? A
@@ -685,7 +685,11 @@ export const BODY_SIGNATURE_RULES = {
   // AWSManagedRulesSQLiRuleSet
   sqli: {
     labelNamespace: 'awswaf:managed:aws:sql-database:',
-    rules: ['SQLi_BODY'],
+    // SQLiExtendedPatterns_BODY ships in Version_2.5 of the group (the ACL
+    // runs the default version, unpinned). From 2026-10-21 it blocked the
+    // agent runtime's `psd-data query` calls to /api/agent/credentials —
+    // 161 bare 403s in five days — while `tables`/`schema` still worked.
+    rules: ['SQLi_BODY', 'SQLiExtendedPatterns_BODY'],
   },
 } as const;
 

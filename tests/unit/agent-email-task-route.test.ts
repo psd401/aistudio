@@ -191,6 +191,15 @@ describe("email-task route confinement", () => {
     expect(executeGitHubCommandMock).toHaveBeenCalledTimes(1)
   })
 
+  it("accepts owner, scheduled and email-task invocations for GitHub", async () => {
+    await githubPost(
+      request({ argv: ["issue", "list", "--repo", "owner/tasks"] }) as never,
+    )
+    expect(verifyContextMock).toHaveBeenCalledWith(expect.anything(), {
+      allowedModes: ["owner", "scheduled", "email-task"],
+    })
+  })
+
   it("allows Google task insertion but blocks all other Workspace access", async () => {
     const rejected = await workspacePost(
       request({

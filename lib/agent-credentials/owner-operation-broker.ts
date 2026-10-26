@@ -627,11 +627,18 @@ function validatedImageOperation(
   };
 }
 
+// gpt-image-2 stopped being served to the district's OpenAI project on
+// 2026-10-26 (403 `model_not_found`: "does not have access to model"), which
+// failed every psd-image-gen call. gpt-image-2.5-flare is the model Nexus
+// image generation already uses in prod. Keep psd-image-gen's MODEL_ID and
+// SKILL.md in step with this value.
+export const AGENT_IMAGE_MODEL_ID = "gpt-image-2.5-flare";
+
 function openAiImageRequestBody(
   input: ValidatedImageOperation,
 ): Record<string, unknown> {
   return {
-    model: "gpt-image-2",
+    model: AGENT_IMAGE_MODEL_ID,
     prompt: input.prompt,
     ...(input.size !== "auto" ? { size: input.size } : {}),
     ...(input.quality !== "auto" ? { quality: input.quality } : {}),
@@ -655,6 +662,27 @@ function imageBase64FromPayload(payload: unknown): string {
     throw new Error("Image provider returned invalid image data");
   }
   return first.b64_json;
+}
+
+/**
+ * OpenAI's error `code` and `message` for the broker log, e.g.
+ * ` (model_not_found: Project … does not have access to model …)`. Without it
+ * a 400 moderation refusal, a 400 bad parameter and a 403 retired model all
+ * logged as a bare status. Never throws; the caller still sees only the
+ * generic 502.
+ */
+async function openAiErrorDetail(response: Response): Promise<string> {
+  try {
+    const payload = await readBoundedJson(response, 64 * 1024);
+    const error = isRecord(payload) && isRecord(payload.error) ? payload.error : null;
+    const code = typeof error?.code === "string" ? error.code : null;
+    const message =
+      typeof error?.message === "string" ? error.message.slice(0, 300) : null;
+    const detail = [code, message].filter(Boolean).join(": ");
+    return detail ? ` (${detail})` : "";
+  } catch {
+    return "";
+  }
 }
 
 export async function executeOpenAiImageOperation(
@@ -696,7 +724,9 @@ export async function executeOpenAiImageOperation(
     },
   );
   if (!response.ok) {
-    throw new Error(`Image provider HTTP ${response.status}`);
+    throw new Error(
+      `Image provider HTTP ${response.status}${await openAiErrorDetail(response)}`,
+    );
   }
   const payload = await readBoundedJson(response, 32 * 1024 * 1024);
   return { imageBase64: imageBase64FromPayload(payload) };
