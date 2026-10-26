@@ -36,7 +36,9 @@ openwiki:
     - lib/streaming/__tests__/stream-error-message.test.ts
     - app/api/nexus/chat/__tests__/incomplete-turn.test.ts
     - app/api/nexus/chat/__tests__/assistant-turn-persistence.test.ts
+    - app/api/nexus/chat/__tests__/configuration-error-response.test.ts
     - tests/unit/lib/nexus/chat-step-budget.test.ts
+    - tests/e2e/nexus-chatgpt-provider-error.functional.spec.ts
     - tests/e2e/nexus-chat-slow-stream-visible-error.functional.spec.ts
     - tests/e2e/nexus-empty-turn-notice.functional.spec.ts
     - tests/e2e/assistant-architect-slow-chain-visible-error.functional.spec.ts
@@ -581,6 +583,52 @@ Caption: the builder omits a header by passing `undefined`; only the routing val
 
 **Minimal validation**: `bunx jest --silent app/api/nexus/chat/__tests__/stream-headers.test.ts`. Run the route-level checks only when the route's header call sites change, using the `incomplete-turn` and `assistant-turn-persistence` suites listed above.
 
+## Pre-stream Provider Configuration Errors (#1849)
+
+When a model's provider credentials are missing or invalid, the failure happens before any stream opens. Provider adapters and the provider factory throw `ErrorFactories.sysConfigurationError(...)`, which carries code `SYS_CONFIGURATION_ERROR`. An explicitly selected model keeps that error instead of being rerouted. Before #1849, `buildChatErrorResponse` in `app/api/nexus/chat/route.ts` had no case for it, so every turn showed the generic 500 "Failed to process chat request", which users read as "An Error Occurred".
+
+This is a different path from the mid-stream rules above. [Stream Errors Are Sanitized](#stream-errors-are-sanitized) covers errors after the stream has started; this section covers the pre-stream POST error that the route turns into a JSON response.
+
+`app/api/nexus/chat/configuration-error-response.ts` owns the mapping:
+
+- `isProviderConfigurationError(error)` matches an `Error` whose `code` is `ErrorCode.SYS_CONFIGURATION_ERROR`. It is provider-agnostic and matches on the code, not on the message text.
+- `providerConfigurationErrorResponse(requestId)` returns HTTP 503 with `{ error, code: "PROVIDER_NOT_CONFIGURED", requestId }` and an `X-Request-Id` header. `error` is `PROVIDER_NOT_CONFIGURED_MESSAGE`: the model's provider is not set up, so the user should switch to Standard mode or another model family and tell an administrator.
+
+```mermaid
+flowchart TD
+    A[Pre-stream POST error] --> B{Existing typed cases match?}
+    B -- yes --> R1[Their existing response]
+    B -- no --> C{isProviderConfigurationError?}
+    C -- yes --> D[log error, timer reason provider_not_configured]
+    D --> R2[503 PROVIDER_NOT_CONFIGURED]
+    C -- no --> R3[Generic 500 Failed to process chat request]
+```
+
+Caption: the provider-configuration check runs after the typed cases in `buildChatErrorResponse` and before the generic 500 fallthrough.
+
+**Invariants**:
+- Only `SYS_CONFIGURATION_ERROR` maps to 503. Other errors still reach the generic 500.
+- The technical message is logged, never returned. It names the missing credential, which is operator detail. The response body contains no credential text.
+- The check runs after the existing typed cases and before the generic branch. A source-contract test pins this ordering.
+
+**Client half**: `nexusErrorTitle` in `app/(protected)/nexus/page.tsx` titles a `PROVIDER_NOT_CONFIGURED` response "Model unavailable", the same title as a 404. The existing error handler shows the server's `error` string as the toast description, so the actionable copy comes from the server, not the client.
+
+**Change guidance**:
+- To map another failure class to a user-facing response, add its own predicate and branch in `buildChatErrorResponse`. Do not widen `isProviderConfigurationError`, because the code is the single key for this contract.
+- Change `PROVIDER_NOT_CONFIGURED_MESSAGE` and the toast title together. The e2e spec asserts the message text and the toast title.
+- The `PROVIDER_NOT_CONFIGURED` code is a client-visible value. Keep it in sync with the `code` check in `nexusErrorTitle`.
+
+**Focused tests** (`app/api/nexus/chat/__tests__/configuration-error-response.test.ts`):
+- "recognises the error the provider adapters throw for a missing key" uses the real `ErrorFactories.sysConfigurationError`.
+- "does not claim unrelated errors" checks the negative case.
+- "returns a 503 with an actionable message and no credential detail" checks status, code, and that the body has no "api key" text.
+- "is checked in buildChatErrorResponse before the generic 500 fallthrough" is the source-contract test for ordering.
+- `tests/e2e/nexus-chatgpt-provider-error.functional.spec.ts`, "an unconfigured provider shows an actionable message, not the generic failure", serves the 503 body through `page.route` and checks the "Model unavailable" toast. The spec mocks the network because the router excludes unconfigured providers from routed selection, so a live turn cannot reach this error. The second test, "Advanced ChatGPT answers on the Bedrock-hosted GPT model", is skipped unless `E2E_RUN_EXTERNAL=1`.
+
+**Minimal validation**: `bunx jest --silent app/api/nexus/chat/__tests__/configuration-error-response.test.ts`. The Playwright spec is conditional: run it when the toast title, the 503 body, or the message text changes, because it needs the authenticated app stack.
+
+**Scope boundary**: the mapping only covers the POST response. The provider adapters and the provider factory still own the decision to throw `SYS_CONFIGURATION_ERROR`, and changing that is covered by the provider pages above, not by this check.
+
 ## Change Guidance
 
 ### When to Modify Keep-Alive
@@ -648,5 +696,13 @@ controller.enqueue(new TextEncoder().encode(': keep-alive\n\n'))
 ransport pitfalls
 port pitfalls
 ransport pitfalls
+falls
+ransport pitfalls
+lls
+port pitfalls
+ransport pitfalls
+falls
+ransport pitfalls
+port pitfalls
 falls
 ransport pitfalls

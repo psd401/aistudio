@@ -26,7 +26,7 @@ AI Studio is an open-source platform that provides K-12 educators and students w
 
 ### Architecture & Infrastructure
 - **[architecture/overview.md](architecture/overview.md)** — Technology stack, design patterns, layered architecture, and key concepts
-- **[architecture/streaming.md](architecture/streaming.md)** — SSE streaming architecture, keep-alive implementation, provider adapters (#1698), Nexus stream response headers (#1947)
+- **[architecture/streaming.md](architecture/streaming.md)** — SSE streaming architecture, keep-alive implementation, provider adapters (#1698), Nexus stream response headers (#1947), pre-stream provider configuration errors (#1849)
 - **[infrastructure/overview.md](infrastructure/overview.md)** — AWS CDK infrastructure, ECS deployment, Aurora database, Lambda functions
 - **[data-models/overview.md](data-models/overview.md)** — Drizzle ORM schema, key database tables, migrations
 
@@ -187,6 +187,13 @@ Start from the row that matches your change. Each validation command is the narr
 The following areas have substantial existing documentation and are deferred from this wiki:
 
 - **API Reference**: See `/docs/API_REFERENCE.md`
+- **Deployment Guide**: See `/docs/DEPLOYMENT.md`
+- **Testing Guide**: See `/docs/guides/TESTING.md`
+- **K-12 Content Safety**: See `/docs/features/k12-content-safety.md`
+- **Individual Skill Docs**: See `/infra/agent-image/skills/*/SKILL.md`
+- **Database Migrations**: See `/docs/database/drizzle-migration-guide.md`
+- **Agent Eval Suite**: Eval harness, graders, and suites under `/infra/agent-image/eval/` (README at `/infra/agent-image/eval/README.md`); only its CI trigger state is recorded in [infrastructure/overview.md](infrastructure/overview.md). Deferred because the suite has its own README. The repository write evals it registers are covered in [app-features/overview.md](app-features/overview.md#repository-mcp-tools-1266-1907).
+REFERENCE.md`
 - **Deployment Guide**: See `/docs/DEPLOYMENT.md`
 - **Testing Guide**: See `/docs/guides/TESTING.md`
 - **K-12 Content Safety**: See `/docs/features/k12-content-safety.md`
