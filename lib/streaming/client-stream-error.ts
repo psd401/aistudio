@@ -19,8 +19,10 @@ export const STREAM_INTERRUPTED_MESSAGE =
   "if it keeps happening, check your network connection or try a different browser.";
 
 /**
- * Lower-cased fragments of the errors browsers and runtimes raise when a response
- * body read or request fails at the transport level. Matched as substrings.
+ * Lower-cased openings of the errors browsers and runtimes raise when a response
+ * body read or request fails at the transport level. Matched at the START of the
+ * message (after an optional "TypeError: " / "net::" prefix), so app-authored text
+ * that merely contains a phrase — "Upload failed", "…a network error…" — is kept.
  */
 const TRANSPORT_FAILURE_SIGNATURES: readonly string[] = [
   "error in input stream", // Firefox: truncated/corrupted chunked body mid-read
@@ -34,18 +36,19 @@ const TRANSPORT_FAILURE_SIGNATURES: readonly string[] = [
   "error in body stream",
 ];
 
-/** Too generic to match as substrings; only the bare error text counts. */
+/** Too generic to match as a prefix; only the bare error text counts. */
 const EXACT_TRANSPORT_FAILURES: readonly string[] = [
   "terminated", // undici: connection closed mid-body
-  "typeerror: terminated",
 ];
 
+const RUNTIME_PREFIX = /^(?:typeerror:\s*|net::)/;
+
 export function isBrowserTransportFailure(error: unknown): boolean {
-  const text = errorText(error).trim().toLowerCase();
+  const text = errorText(error).trim().toLowerCase().replace(RUNTIME_PREFIX, "");
   if (!text) return false;
   return (
     EXACT_TRANSPORT_FAILURES.includes(text) ||
-    TRANSPORT_FAILURE_SIGNATURES.some(signature => text.includes(signature))
+    TRANSPORT_FAILURE_SIGNATURES.some(signature => text.startsWith(signature))
   );
 }
 

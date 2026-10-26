@@ -20,6 +20,7 @@ describe("toDisplayableChatError (#1966)", () => {
     "The network connection was lost.",
     new TypeError("terminated"), // undici
     "net::ERR_INCOMPLETE_CHUNKED_ENCODING",
+    "TypeError: Failed to fetch",
   ])("replaces the browser transport failure %p with the sanitized message", error => {
     expect(isBrowserTransportFailure(error)).toBe(true);
     expect(toDisplayableChatError(error)).toBe(STREAM_INTERRUPTED_MESSAGE);
@@ -37,6 +38,15 @@ describe("toDisplayableChatError (#1966)", () => {
     expect(toDisplayableChatError("The session was terminated by an administrator.")).toBe(
       "The session was terminated by an administrator."
     );
+  });
+
+  it.each([
+    "Upload failed",
+    "The file could not be processed because of a network error on the storage service.",
+    "Image download failed to fetch the source URL.",
+  ])("keeps app-authored text that merely contains a transport phrase: %p", message => {
+    expect(isBrowserTransportFailure(message)).toBe(false);
+    expect(toDisplayableChatError(new Error(message))).toBe(message);
   });
 
   it("never returns the raw transport text", () => {
