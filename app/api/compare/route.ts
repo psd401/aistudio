@@ -9,6 +9,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { modelComparisons, aiModels } from '@/lib/db/schema';
 import { hasCapabilityAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
+import { defaultClaudeMaxOutputTokens } from '@/lib/ai/claude-output-cap';
 import { filterAccessibleResourceIds } from '@/lib/db/drizzle/resource-access';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { generateImageForNexus } from '@/lib/ai/image-generation-service';
@@ -171,6 +172,8 @@ async function* createTextGenerator(
     const streamResult = streamText({
       model,
       messages: [{ role: 'user', content: prompt }],
+      // Bedrock otherwise caps Claude at 4,096 output tokens.
+      maxOutputTokens: defaultClaudeMaxOutputTokens(String(modelConfig.modelId)),
     });
 
     for await (const chunk of streamResult.textStream) {

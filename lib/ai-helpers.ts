@@ -1,3 +1,4 @@
+import { defaultClaudeMaxOutputTokens } from '@/lib/ai/claude-output-cap';
 import {
   generateText,
   generateObject,
@@ -167,6 +168,8 @@ export async function streamCompletion(
         messages,
         tools,
         maxRetries: 5,
+        // Bedrock otherwise caps Claude at 4,096 output tokens.
+        maxOutputTokens: defaultClaudeMaxOutputTokens(modelConfig.modelId),
         onChunk: ({ chunk }) => {
           if (chunk.type === 'text-delta' && options?.onToken) {
             options.onToken((chunk as { text?: string }).text || '');

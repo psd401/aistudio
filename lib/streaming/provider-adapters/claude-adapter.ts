@@ -4,6 +4,7 @@ import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
 import { getBedrockCredentialProvider } from '@/lib/ai/bedrock-credentials';
+import { defaultClaudeMaxOutputTokens } from '@/lib/ai/claude-output-cap';
 import { BaseProviderAdapter } from './base-adapter';
 import type { StreamingCallbacks } from '../types';
 import type { ProviderCapabilities, StreamRequest, StreamConfig } from '../types';
@@ -271,6 +272,12 @@ export class ClaudeAdapter extends BaseProviderAdapter {
     // Add Claude-specific enhancements
     if (config.providerOptions?.anthropic) {
       enhanced.providerOptions = config.providerOptions;
+    }
+
+    // Bedrock otherwise caps Claude at 4,096 output tokens (see claude-output-cap).
+    if (enhanced.maxTokens == null) {
+      const modelId = typeof config.model === 'string' ? config.model : config.model.modelId;
+      enhanced.maxTokens = defaultClaudeMaxOutputTokens(modelId);
     }
     
     return enhanced;
