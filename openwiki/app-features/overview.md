@@ -10,6 +10,7 @@ openwiki:
     - lib/repositories/repository-catalog-service.ts
     - lib/nexus/conversation-repository-service.ts
     - app/api/nexus/chat/route.ts
+    - app/api/nexus/chat/pdf-attachment-documents.ts
     - app/api/nexus/chat/image-generation-handler.ts
     - lib/ai/generated-image-bucket.ts
     - lib/ai/image-generation-service.ts
@@ -656,6 +657,61 @@ File attachments (documents and images) are handled through a unified adapter sy
 **Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service. Images are the exception on a standard chat turn: they carry the marker and the inline data URL, and the model sees the data URL for the current turn and for every prior turn the client resends. Only the image-generation/edit route treats caller-carried pixels as untrusted: it reads the canonical attachment from storage by its `s3Key` (`getAttachmentFromS3` in `app/api/nexus/chat/image-generation-handler.ts`).
 
 **Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners. The repository upload keeps the original file; only the inline copy is downscaled.
+
+**PDFs** are the other exception, and only for the current turn. Extracted text drops anything drawn on the page, so see [Current-Turn PDFs for Visual Reading (#1982)](#current-turn-pdfs-for-visual-reading-1982) below.
+
+### Current-Turn PDFs for Visual Reading (#1982)
+
+Repository-backed attachments reach the model as extracted text through `searchNexusAttachments`. Extraction keeps printed characters and drops drawings, so a scanned answer sheet with circled letters read "A B C D" for every item and the model could not score it. For the current turn only, Nexus also gives the model the PDF bytes as a document it reads visually. Later turns still use repository search, and the bytes are never persisted or written to the durable history.
+
+```mermaid
+flowchart TD
+    A[resolveToolsAndStream] --> B[modelMessagesWithAttachedPdfs]
+    B --> C{references present and Bedrock Claude 4.x or 5.x?}
+    C -- no --> U[messages unchanged]
+    C -- yes --> D[resolveNexusAttachmentPdfSources]
+    D --> E[pdfContentSafetyCheck per PDF]
+    E -- refused, or no extracted text with guardrails on --> S[skip this PDF]
+    E -- allowed --> F["readPdf: repository key, 20MB cap, PDF magic"]
+    F -- fails --> S
+    F -- ok --> G{under 5 documents and 24MB total?}
+    G -- no --> S
+    G -- yes --> P[prepend file part to last user message]
+    P --> X[executeStreaming gets model copy]
+    B -. any thrown error .-> U
+```
+
+Caption: the model's copy of the message gains PDF file parts. The stored conversation and the earlier turns are not touched.
+
+**Where it sits.** `resolveToolsAndStream()` in `app/api/nexus/chat/route.ts` calls `modelMessagesWithAttachedPdfs()`, which wraps `withAttachedPdfDocuments()` in `app/api/nexus/chat/pdf-attachment-documents.ts`. The injection runs after inline-attachment canonicalization, persistence, and `processMessagesWithAttachments`, so none of those see the bytes. The routing rule in [Image turns in Project and Skill conversations (#1950)](#image-turns-in-project-and-skill-conversations-1950) is unchanged: a PDF in the message keeps `searchNexusAttachments` and the text route, and the PDF is attached in addition.
+
+**Eligibility** (`modelReadsPdfDocuments()`): provider `amazon-bedrock` with a Claude 4.x or 5.x model ID. This is the only path verified end to end on Bedrock. Gemini accepts PDFs, but its model IDs were not verified, so Gemini turns keep text retrieval. Bedrock GPT models are also excluded, because PDF input on the Responses endpoint is unverified.
+
+**Source resolution** (`lib/nexus/ephemeral-repository-service.ts`). `resolveNexusAttachmentPdfSources()` shares `queryBoundAttachmentSources()` with the image resolver, so both apply the same owner, conversation, active, clean, and processed rules. It filters to `document` items whose content type is `application/pdf` and returns the subset that resolves, because a turn can mix PDFs with other files. Unlike the image resolver, it does not fail the whole turn. `loadItemVersionText()` reads the item's extracted text (text layer and OCR) in chunk order for the safety check.
+
+**Content-safety gate.** `pdfContentSafetyCheck(sessionId)` applies the same `processInput` check that retrieved chunks pass. With guardrails off it allows without loading text. With guardrails on it checks the extracted text in 20,000-character slices and allows the PDF only if every slice passes. A PDF with no extracted text is refused, because the pages the model would see were never screened. Refusing a PDF only skips the visual copy. It never blocks the turn.
+
+**Bounds and failure handling.** At most 5 PDFs (`MAX_PDF_DOCUMENTS`, Bedrock's per-request maximum), 20MB each (`MAX_PDF_DOCUMENT_BYTES`), and 24MB combined (`MAX_PDF_DOCUMENTS_TOTAL_BYTES`). `readPdf()` enforces the size cap while streaming and rejects bytes without a `%PDF-` header. Each PDF is isolated in `loadAllowedPdf()`, so one failure skips only that PDF. Any error in `withAttachedPdfDocuments()` logs a warning and returns the input unchanged. `bedrockSafePdfFilename()` restricts names to Bedrock's document-name charset.
+
+**Invariants**
+- Only the current turn's references are considered, and only owner-bound, clean, processed PDFs.
+- A PDF whose content-safety check did not allow it, or that failed to load, is never attached.
+- The injected parts go only into the model's copy. The persisted message and the earlier turns stay unchanged.
+- Fail-open: the turn proceeds on text retrieval when anything here fails.
+
+**Focused tests**: `app/api/nexus/chat/__tests__/pdf-attachment-documents.test.ts`, describe blocks `withAttachedPdfDocuments` (prepend to the last user message, unchanged for GPT, OpenAI image, Latimer, and Claude 3.x, skip-one-failure, caps, refused PDFs never loaded), `pdfContentSafetyCheck` (guardrails off, no-text refusal, slice-level refusal), `modelReadsPdfDocuments`, `bedrockSafePdfFilename`, and `route wiring` (the route streams `modelMessagesWithAttachedPdfs` and passes `pdfContentSafetyCheck`).
+
+**Conditional live check**: `tests/e2e/nexus-pdf-visual-reading.functional.spec.ts` attaches a generated sheet whose answers exist only as drawn circles. It runs only with `E2E_RUN_EXTERNAL=1`, Bedrock credentials, and repository-backed attachments. It skips on a local stack without content-processing workers. Run it only when the Bedrock PDF path changes.
+
+**Minimal validation**: `bunx jest --silent app/api/nexus/chat/__tests__/pdf-attachment-documents.test.ts`.
+
+**Scope boundary:** the server does not render pages or OCR. The model reads the PDF bytes directly. Changing the router's attachment rule or the image path does not require changes here unless the eligibility or the content-safety gate changes.
+
+**Key Sources**:
+- `app/api/nexus/chat/pdf-attachment-documents.ts` — `withAttachedPdfDocuments`, `pdfContentSafetyCheck`, `modelReadsPdfDocuments`, bounds and filename rules
+- `app/api/nexus/chat/route.ts` — `modelMessagesWithAttachedPdfs`, `resolveToolsAndStream`
+- `lib/nexus/ephemeral-repository-service.ts` — `resolveNexusAttachmentPdfSources`, `queryBoundAttachmentSources`, `loadItemVersionText`
+- `docs/features/nexus-conversation-architecture.md` — the repository's own description of the current-turn PDF exception
 
 ### Image Downscaling and the Proxied Body Limit (#1850)
 
