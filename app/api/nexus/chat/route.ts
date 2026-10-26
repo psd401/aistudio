@@ -155,6 +155,7 @@ import {
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
 import { buildNexusStreamHeaders } from './stream-headers';
+import { withAttachedPdfDocuments } from './pdf-attachment-documents';
 import {
   isProviderConfigurationError,
   providerConfigurationErrorResponse,
@@ -3274,6 +3275,29 @@ function buildRepositoryPromptFragment(params: {
   return fragments.join("\n\n---\n\n") || undefined;
 }
 
+/**
+ * Let the model SEE this turn's attached PDFs (circled answers, handwriting),
+ * not only their extracted text. Model copy only; fail-open (see
+ * pdf-attachment-documents.ts).
+ */
+async function modelMessagesWithAttachedPdfs(
+  prepared: { attachmentPreflight: { references: NexusAttachmentReference[] }; userId: number },
+  resolved: { modelConfig: { provider: string; model_id: string } },
+  conversation: { conversationId: string },
+  repositories: { lightweightMessages: UIMessage[] },
+  log: ReturnType<typeof createLogger>,
+): Promise<UIMessage[]> {
+  const { messages } = await withAttachedPdfDocuments({
+    messages: repositories.lightweightMessages,
+    references: prepared.attachmentPreflight.references,
+    ownerId: prepared.userId,
+    conversationId: conversation.conversationId,
+    modelConfig: resolved.modelConfig,
+    log,
+  });
+  return messages;
+}
+
 async function resolveToolsAndStream(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -3389,7 +3413,8 @@ async function resolveToolsAndStream(params: {
     toolsBound: !!memoryContext.tools,
   });
   return executeStreaming({
-    messages: repositories.lightweightMessages,
+    // The model's copy also carries this turn's PDFs to read visually.
+    messages: await modelMessagesWithAttachedPdfs(prepared, resolved, conversation, repositories, log),
     modelConfig: resolved.modelConfig,
     userId: prepared.userId,
     sessionId: prepared.session.sub,

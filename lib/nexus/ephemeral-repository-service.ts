@@ -124,6 +124,8 @@ export interface NexusAttachmentReference {
 
 export interface NexusAttachmentImageSource {
   bindingId: string;
+  /** The item's display name (e.g. the uploaded file name). */
+  itemName?: string;
   repositoryId: number;
   itemId: number;
   itemVersionId: string;
@@ -754,29 +756,21 @@ export async function resolveNexusAttachmentReference(
  * source pixels from the owner-bound immutable version instead of trusting an
  * unrelated inline image part carried beside an opaque marker.
  */
-export async function resolveNexusAttachmentImageSources(input: {
-  ownerId: number;
-  conversationId: string;
-  references: NexusAttachmentReference[];
-  now?: Date;
-}): Promise<NexusAttachmentImageSource[] | null> {
-  assertPositiveId(input.ownerId, "Owner id");
-  assertUuid(input.conversationId, "Conversation id");
-  if (input.references.length === 0 || input.references.length > 20) {
-    throw new Error("Between 1 and 20 Nexus attachment references are required");
-  }
-  const uniqueReferences = [
-    ...new Map(
-      input.references.map((reference) => [
-        `${reference.bindingId}:${reference.itemId}`,
-        reference,
-      ])
-    ).values(),
-  ];
-  for (const reference of uniqueReferences) {
-    assertUuid(reference.bindingId, "Binding id");
-    assertPositiveId(reference.itemId, "Item id");
-  }
+/**
+ * Owner- and conversation-bound, active, clean, fully processed current
+ * versions of the referenced items of one type. Shared by the image and PDF
+ * resolvers so both apply the same access and inspection rules.
+ */
+async function queryBoundAttachmentSources(
+  input: {
+    ownerId: number;
+    conversationId: string;
+    references: NexusAttachmentReference[];
+    now?: Date;
+  },
+  uniqueReferences: NexusAttachmentReference[],
+  itemType: "image" | "document"
+) {
   const now = input.now ?? new Date();
   const referencePredicate = or(
     ...uniqueReferences.map((reference) =>
@@ -786,13 +780,14 @@ export async function resolveNexusAttachmentImageSources(input: {
       )
     )
   );
-  const rows = await executeQuery(
+  return executeQuery(
     (db) =>
       db
         .select({
           bindingId: nexusRepositoryBindings.id,
           repositoryId: knowledgeRepositories.id,
           itemId: repositoryItems.id,
+          itemName: repositoryItems.name,
           itemVersionId: repositoryItemVersions.id,
           objectKey: repositoryItemVersions.objectKey,
           declaredContentType: repositoryItemVersions.declaredContentType,
@@ -830,7 +825,7 @@ export async function resolveNexusAttachmentImageSources(input: {
               isNull(knowledgeRepositories.expiresAt),
               gt(knowledgeRepositories.expiresAt, now)
             ),
-            eq(repositoryItems.type, "image"),
+            eq(repositoryItems.type, itemType),
             eq(repositoryItems.lifecycleStatus, "active"),
             eq(repositoryItems.processingStatus, "embedded"),
             eq(repositoryItemVersions.storageStatus, "available"),
@@ -842,8 +837,34 @@ export async function resolveNexusAttachmentImageSources(input: {
             isNotNull(repositoryItemVersions.objectKey)
           )
         ),
-    "nexus.resolveAttachmentImageSources"
+    `nexus.resolveAttachment:${itemType}`
   );
+}
+
+export async function resolveNexusAttachmentImageSources(input: {
+  ownerId: number;
+  conversationId: string;
+  references: NexusAttachmentReference[];
+  now?: Date;
+}): Promise<NexusAttachmentImageSource[] | null> {
+  assertPositiveId(input.ownerId, "Owner id");
+  assertUuid(input.conversationId, "Conversation id");
+  if (input.references.length === 0 || input.references.length > 20) {
+    throw new Error("Between 1 and 20 Nexus attachment references are required");
+  }
+  const uniqueReferences = [
+    ...new Map(
+      input.references.map((reference) => [
+        `${reference.bindingId}:${reference.itemId}`,
+        reference,
+      ])
+    ).values(),
+  ];
+  for (const reference of uniqueReferences) {
+    assertUuid(reference.bindingId, "Binding id");
+    assertPositiveId(reference.itemId, "Item id");
+  }
+  const rows = await queryBoundAttachmentSources(input, uniqueReferences, "image");
   const rowsByReference = new Map(
     rows.map((row) => [`${row.bindingId}:${row.itemId}`, row])
   );
@@ -868,6 +889,46 @@ export async function resolveNexusAttachmentImageSources(input: {
       objectKey: row.objectKey,
     };
   });
+}
+
+/**
+ * The current turn's PDF attachments as owner-bound canonical sources, so the
+ * model can read the pages themselves (circled answers, handwriting) and not
+ * only the extracted text. Unlike the image resolver this returns the subset
+ * that resolves: a turn may mix PDFs with other attachments.
+ */
+export async function resolveNexusAttachmentPdfSources(input: {
+  ownerId: number;
+  conversationId: string;
+  references: NexusAttachmentReference[];
+  now?: Date;
+}): Promise<NexusAttachmentImageSource[]> {
+  assertPositiveId(input.ownerId, "Owner id");
+  assertUuid(input.conversationId, "Conversation id");
+  if (input.references.length === 0) return [];
+  const uniqueReferences = [
+    ...new Map(
+      input.references.map((reference) => [
+        `${reference.bindingId}:${reference.itemId}`,
+        reference,
+      ])
+    ).values(),
+  ].slice(0, 20);
+  for (const reference of uniqueReferences) {
+    assertUuid(reference.bindingId, "Binding id");
+    assertPositiveId(reference.itemId, "Item id");
+  }
+  const rows = await queryBoundAttachmentSources(input, uniqueReferences, "document");
+  return rows
+    .filter(
+      (row): row is typeof row & { objectKey: string } =>
+        !!row.objectKey &&
+        (row.detectedContentType ?? row.declaredContentType ?? "")
+          .split(";", 1)[0]
+          .trim()
+          .toLowerCase() === "application/pdf"
+    )
+    .map((row) => ({ ...row, objectKey: row.objectKey }));
 }
 
 /**

@@ -419,6 +419,14 @@ untrusted, ignores them, and reloads the exact inspected current version from
 the owner-bound repository. `VisionImageAdapter` therefore downscales the inline
 copy (longest edge 2048px; see `lib/attachments/image-downscale.ts`) so resent
 history stays well under the proxied request-body limit (#1850).
+
+PDFs are the other exception: extracted text loses anything drawn on the page
+(circled answers, handwriting, diagrams). For the CURRENT turn only, the route
+also hands models that read PDFs visually (Claude 4.x/5.x on Bedrock, Gemini)
+the owner-bound, clean, processed PDF bytes as a `file` part in the model's
+copy of the last user message (`app/api/nexus/chat/pdf-attachment-documents.ts`:
+at most 5 PDFs, 20MB each, 24MB total; fail-open; never persisted). Later turns
+keep using repository search.
 Durable history stores only image-presence metadata and the repository
 reference.
 
