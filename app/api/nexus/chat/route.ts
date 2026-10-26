@@ -155,6 +155,10 @@ import {
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
 import { buildNexusStreamHeaders } from './stream-headers';
+import {
+  isProviderConfigurationError,
+  providerConfigurationErrorResponse,
+} from './configuration-error-response';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -3582,7 +3586,9 @@ export async function POST(req: Request) {
 
 /**
  * Map a pre-stream POST error to an HTTP Response. Content-safety blocks return
- * 400 with category detail; everything else returns a generic 500. Extracted
+ * 400 with category detail; a provider-configuration error (missing/invalid
+ * provider credentials) returns 503 PROVIDER_NOT_CONFIGURED (#1849); everything
+ * else returns a generic 500. Extracted
  * from POST to keep the route handler's cyclomatic complexity within bounds.
  */
 function buildChatErrorResponse(
@@ -3643,6 +3649,14 @@ function buildChatErrorResponse(
       }),
       { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
     );
+  }
+
+  if (isProviderConfigurationError(error)) {
+    log.error('Nexus model provider is not configured', {
+      error: { message: error.message, name: error.name, code: error.code },
+    });
+    timer({ status: 'error', reason: 'provider_not_configured' });
+    return providerConfigurationErrorResponse(requestId);
   }
 
   log.error('Nexus chat API error', {
