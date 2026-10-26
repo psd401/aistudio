@@ -11,6 +11,29 @@ import type { ProviderCapabilities, StreamRequest, StreamConfig } from '../types
 const log = createLogger({ module: 'claude-adapter' });
 
 /**
+ * Output-token cap for a Claude 4.x/5.x stream whose caller set none.
+ *
+ * With no `maxOutputTokens`, Bedrock Converse caps Claude at 4,096 output tokens
+ * (verified 2026-10-26: Sonnet 5.5 stopped with `max_tokens` at exactly 4096).
+ * Claude 5.x thinks adaptively by default and that thinking counts against the
+ * same cap, so a long answer — grading a class set, a long rewrite — ran out
+ * mid-thought and the turn ended with no text at all (`finishReason: length`,
+ * "This turn ended without a written answer"). Output is billed per token
+ * generated, not per token allowed, so a high ceiling costs nothing extra on
+ * short turns. Every Claude 4.x/5.x model supports at least 64K.
+ */
+export const DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS = 32_000;
+
+/**
+ * Claude 3.x tops out at 4K-8K output tokens and would reject the default, and
+ * GPT models served through this adapter use the Responses API, whose own
+ * default is the model maximum.
+ */
+function needsDefaultOutputCap(modelId: string): boolean {
+  return /claude/i.test(modelId) && !/claude-3/i.test(modelId) && !isBedrockOpenAIModel(modelId);
+}
+
+/**
  * Claude provider adapter (via Amazon Bedrock) with support for:
  * - Claude 4 Opus/Sonnet with thinking capabilities
  * - Extended thinking budgets (1024-6553 tokens)
@@ -267,12 +290,17 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   
   protected enhanceStreamConfig(config: StreamConfig): StreamConfig {
     const enhanced = super.enhanceStreamConfig(config);
-    
+
     // Add Claude-specific enhancements
     if (config.providerOptions?.anthropic) {
       enhanced.providerOptions = config.providerOptions;
     }
-    
+
+    const modelId = typeof config.model === 'string' ? config.model : config.model.modelId;
+    if (enhanced.maxTokens == null && needsDefaultOutputCap(modelId)) {
+      enhanced.maxTokens = DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS;
+    }
+
     return enhanced;
   }
   
