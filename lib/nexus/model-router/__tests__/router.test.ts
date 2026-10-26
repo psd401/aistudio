@@ -6,6 +6,7 @@ const mockGetConfig = jest.fn()
 const mockClassify = jest.fn()
 const mockExecuteQuery = jest.fn()
 const mockGetConfiguredChatProviders = jest.fn()
+const mockLogWarn = jest.fn()
 
 jest.mock("@/lib/db/drizzle", () => ({ getNexusEnabledModels: () => mockGetNexusEnabledModels() }))
 jest.mock("@/lib/ai/provider-credentials", () => ({
@@ -18,7 +19,12 @@ jest.mock("@/lib/db/drizzle-client", () => ({ executeQuery: (...args: unknown[])
 jest.mock("../config", () => ({ getNexusRouterConfig: () => mockGetConfig() }))
 jest.mock("../classifier", () => ({ classifyNexusRequest: (...args: unknown[]) => mockClassify(...args) }))
 jest.mock("@/lib/logger", () => ({
-  createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
+  createLogger: () => ({
+    info: jest.fn(),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
 }))
 
 import { mergeRoutedToolNames, routeNexusRequest } from "../router"
@@ -468,6 +474,69 @@ function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family w
   })
 }
 
+/** A tab opened before an admin replaced its saved model (2026-10-26 prod). */
+function defineNexusModelRouterStaleFallbackSuite() {
+  const STALE_WARNING = expect.stringContaining("no longer available")
+
+  it("does not fail an active-mode turn whose client fallback model was deleted", async () => {
+    // A tab opened before an admin replaced the model it has saved keeps
+    // sending the deleted id; with routing on, the turn must still be answered.
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      experienceMode: "advanced", requestedFamily: "anthropic", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(mockLogWarn).toHaveBeenCalledWith(STALE_WARNING, {
+      requestedFallbackModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      substituteModelId: "us.anthropic.claude-sonnet",
+    })
+  })
+
+  it("substitutes the configured Auto medium-tier model for a deleted fallback", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["gpt-terra"], high: [] },
+      }),
+      mode: "shadow",
+    })
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    // Shadow mode with no required tools executes the fallback, so the
+    // substitute is exactly what runs (and differs from table order).
+    expect(result.modelId).toBe("gpt-terra")
+    expect(mockLogWarn).toHaveBeenCalledWith(STALE_WARNING, expect.objectContaining({
+      substituteModelId: "gpt-terra",
+    }))
+  })
+
+  it("keeps an Advanced tab's deleted fallback within its requested family", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["us.anthropic.claude-sonnet"], high: [] },
+      }),
+      mode: "shadow",
+    })
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "advanced",
+      requestedFamily: "openai", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("still fails an explicit pick of a deleted model when routing is off", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+    await expect(routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("The fallback Nexus model is unavailable")
+    expect(mockLogWarn).not.toHaveBeenCalledWith(STALE_WARNING, expect.anything())
+  })
+}
+
 function defineNexusModelRouterBoundImageSuite() {
   /**
    * A Project/Skill/Assistant binding adds its repository tools to EVERY turn,
@@ -569,6 +638,7 @@ const defineNexusModelRouterSuite1 = () => {
   defineNexusModelRouterSuite1Part1()
   defineNexusModelRouterSuite1Part2()
   defineNexusModelRouterSuite1Part3()
+  defineNexusModelRouterStaleFallbackSuite()
   defineNexusModelRouterImageAttachmentSuite()
   defineNexusModelRouterBoundImageSuite()
 };
