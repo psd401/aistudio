@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, harness delivery of files named in MEDIA reply lines, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -62,6 +62,7 @@ openwiki:
     - tests/unit/agent-atrium-owner-operation.test.ts
     - lib/agents/__tests__/platform-model.test.ts
     - infra/agent-image/test_harness_adapter.py
+    - tests/unit/agent-image-skill-scratch-dir.test.ts
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
     - infra/agent-image/skills/psd-atrium/run.test.js
     - tests/unit/agent-credential-entry.test.ts
@@ -509,7 +510,68 @@ sequenceDiagram
 - `bun run test -- tests/unit/lib/agent-workspace/drive-delivery.test.ts tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts tests/unit/agent-image-drive-delivery-drift.test.ts` (root Jest, narrow paths).
 - Consumer boundary: the drift test and `infra/test/agent-skill-cdn-allowlist.test.ts` (which allowlists `drive.google.com` for returned Drive links) are the checks that cross from broker code into the shipped skill. Changing the skill files requires rebuilding the agent image; the source of truth for skill text is `infra/agent-image/skills/`.
 
-**Scope boundaries**: this path does not change public-artifact lifecycle or the public reconciliation ledger (see [Workspace Checkpoint Recovery](#workspace-checkpoint-recovery)). Mint and Drive token details live in [Google Workspace Integration](#google-workspace-integration). `drive +upload` remains refused by the Workspace command allowlists in `command-executor.ts`; the broker operations above are the replacement, not a relaxation of that refusal.
+**Scope boundaries**: this path does not change public-artifact lifecycle or the public reconciliation ledger (see [Workspace Checkpoint Recovery](#workspace-checkpoint-recovery)). Mint and Drive token details live in [Google Workspace Integration](#google-workspace-integration). `drive +upload` remains refused by the Workspace command allowlists in `command-executor.ts`; the broker operations above are the replacement, not a relaxation of that refusal. A file the model names in a reply `MEDIA:` line takes the same private Drive path in the harness; see [MEDIA Directive Delivery](#media-directive-delivery).
+
+### MEDIA Directive Delivery
+
+**When to consult**: any change to how a file the model mentions in its reply reaches the user (`MEDIA:` lines, `_deliver_media_directives` in `harness_adapter.py`), the file-delivery rules in `psd-rules`, or the folders a `MEDIA:` path may resolve into.
+
+**Why it exists**: OpenClaw's own system prompt teaches the model to attach a file by ending its reply with a `MEDIA:<path>` line. OpenClaw strips that line from the reply and hands the file to its native channel delivery. This deployment never uses that channel: replies reach Google Chat through the router, which carries text only. The file was silently dropped while the reply still said "here's the CSV" (dev report 2026-10-26; the same symptom in prod on 2026-10-21). The harness now delivers those files itself, through the same private Drive path as `psd-publish-file`.
+
+**Flow**: `OpenClawAdapter._process_once` runs this after the model has finished and before the reply is returned. The directive line is read from the transcript database, not from the chat event, because OpenClaw removes the line from the text it broadcasts.
+
+```mermaid
+sequenceDiagram
+    participant Turn as _process_once
+    participant DB as openclaw-agent.sqlite read-only
+    participant Parse as extract_media_directive_targets
+    participant Pub as psd-publish-file publish.js
+    participant Log as record_failure
+    Turn->>DB: assistant events LIKE MEDIA since chat_send_at
+    DB-->>Turn: raw assistant text of this turn
+    Turn->>Parse: parse MEDIA lines, skip fenced code, de-duplicate
+    alt no targets
+        Turn-->>Turn: reply returned unchanged
+    else targets found
+        loop first 5 targets
+            alt https URL
+                Turn-->>Turn: append URL as a link
+            else local path inside work or attachments
+                Turn->>Pub: node publish.js --file realpath, default destination
+                Pub-->>Turn: JSON with https url
+                Turn-->>Turn: append file name line and URL line
+            else refused or failed
+                Turn-->>Turn: name the file and reason in the reply
+            end
+        end
+        Turn->>Log: warn MediaDirectiveDeliveryFailed with codes only
+    end
+```
+
+*The appendix is added after the model's text. If the model wrote no text, the appendix becomes the whole reply.*
+
+**Runtime invariants**:
+- **This turn only.** `_read_turn_media_targets` reads assistant records for the session and agent whose timestamp is at or after `chat_send_at`. It opens the database read-only with a 0.1 s timeout and never raises; an unreadable store yields no targets.
+- **Containment.** `_resolve_media_path` follows symlinks with `realpath` and accepts only a regular file strictly inside `MEDIA_DIRECTIVE_ROOTS`: `/home/node/.openclaw/work` and `/home/node/.openclaw/attachments`. The state directory is excluded because it holds every session's transcript and `openclaw.json`. `/tmp` is excluded because it is not the documented output location.
+- **Model text is not authority.** Text in an uploaded document can steer the model into writing a `MEDIA:` line, so the roots are the only trust boundary. Targets outside them are reported as "outside the folders files can be sent from" and never reach `subprocess`.
+- **Default destination only.** Local files go to `psd-publish-file` with no `--to`, so the file lands in the agent's private Drive and is shared with the caller alone. The call runs inside the turn so the broker proxy still holds this invocation's signed context.
+- **Limits.** At most `MEDIA_DIRECTIVE_MAX_FILES` (5) targets per reply. Each publish has a `MEDIA_PUBLISH_TIMEOUT_S` (120 s) timeout, and all deliveries share one `MEDIA_DELIVERY_BUDGET_S` (180 s) budget, which must stay inside the turn deadline.
+- **Links stay links.** An `https://` target is appended as-is and is not fetched or published. A published file is listed as `<name>:` followed by its URL on its own line, so Chat renders it as a link.
+- **Failures are named, not silent.** Each undelivered file is named in the reply with its reason. `record_failure` (see [Failure Telemetry Hygiene](#failure-telemetry-hygiene)) receives only counts and error codes, never file names, because a file name can identify a student.
+
+**Skill parity.** `psd-rules/SKILL.md` carries the model-side half of this. It says that "show me", "send me", or "give me" a file or image means run `psd-publish-file` in the same turn and put the returned link in the reply. Viewing an image with the `image` tool does not show it to the user, and offering to publish is not delivery. The rule keeps the default private destination and forbids `--to public` for student or staff data. It also says not to write a `MEDIA:` line, because Chat does not show one; the harness fallback is only a backstop. The self-check's R16 item requires delivery with a delivery skill. The rule text ships in the agent image, so a change to it needs an image rebuild.
+
+**Extension seams and non-goals**: adding a root, raising the file cap, or sending to a public destination changes the trust boundary and needs explicit review. Do not widen `MEDIA_DIRECTIVE_ROOTS` to the state directory or `/tmp` to make one file work. Changing the wording of the model-side rule and the harness behavior together is the only consistent way to change delivery.
+
+**Focused tests**:
+- `infra/agent-image/test_harness_adapter.py`, class `MediaDirectiveParsingTests`: the directive line is found; wrapper quotes, `file://`, and lower-case `media:` are handled.
+- Same file, class `MediaDirectiveTranscriptReadTests`: only this turn's assistant records for this session are read; missing databases and unsafe session ids yield nothing.
+- Same file, class `MediaDirectiveDeliveryTests`: production roots are only `work` and `attachments`; the transcript database and config are never published; a local file is published with the default destination and its link on its own line; a refused publish is named in the reply and recorded with codes only; out-of-root and missing paths never run `subprocess`; unparseable publisher output is a failure, not a crash; the budget stops further deliveries; an https target passes through; at most five files are sent.
+- `tests/unit/agent-image-skill-scratch-dir.test.ts`, test "tells the agent that 'show me' means publish now, privately": pins the `psd-rules` wording, including the no-`MEDIA:` rule and the FERPA routing sentence.
+
+**Minimal validation (quiet)**: `cd infra/agent-image && python -m pytest -q test_harness_adapter.py -k MediaDirective` and `bunx jest --silent tests/unit/agent-image-skill-scratch-dir.test.ts`. The `-q` and `--silent` flags suppress passing output and keep failure diagnostics.
+
+**Escalation**: run the full `test_harness_adapter.py` when `_process_once` or the transcript read changes, since the reply path is shared with silent-reply and usage handling. The publish call depends on `psd-publish-file`; run `bun run test:skill:publish-file` when `publish.js` changes. The `MEDIA:` rule text and harness code must stay consistent: they are validated separately, so change both in the same edit.
 
 ### Artifact Content Security Policy (#1750)
 
