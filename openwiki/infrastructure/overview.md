@@ -761,6 +761,7 @@ AWS WAF protects the ALB with managed rule groups, but body-inspection signature
 **Problem** (2026-09-22):
 - `CrossSiteScripting_BODY` blocked Nexus chat when conversation history contained Gemini Google Search grounding HTML (`<style>…` markup in tool results)
 - `SQLi_BODY` blocked agent runtime credential fetches during scheduled briefs
+- From 2026-10-21, `SQLiExtendedPatterns_BODY` (SQL database group Version_2.5, which the ACL runs unpinned) blocked `psd-data query` calls to `/api/agent/credentials` with 161 bare 403s in five days, while `tables` and `schema` still worked
 - Requests returned HTTP 403 without reaching the app, making attribution impossible
 
 **Solution**: Label-based pattern for AI body paths:
@@ -779,7 +780,7 @@ AWS WAF protects the ALB with managed rule groups, but body-inspection signature
 **Body Signatures Covered**:
 - Core: `CrossSiteScripting_BODY`, `GenericLFI_BODY`, `EC2MetaDataSSRF_BODY`
 - Known Bad Inputs: `JavaDeserializationRCE_BODY`, `Log4JRCE_BODY`, `ReactJSRCE_BODY`
-- SQLi: `SQLi_BODY`
+- SQLi: `SQLi_BODY`, `SQLiExtendedPatterns_BODY` (added 2026-10-26; both labels are `awswaf:managed:aws:sql-database:…`)
 
 **Long-standing COUNT rules**: `SizeRestrictions_BODY` and `GenericRFI_BODY` remain COUNT-only everywhere (8 KB cap breaks uploads, RFI fires on normal prompts). These are NOT re-blocked.
 
@@ -804,8 +805,11 @@ Full WAF request logging to CloudWatch Logs for forensic attribution:
 1. **All credential headers MUST be redacted** — any header that authenticates a request must not appear in logs
 2. **Body signatures block on non-AI paths** — XSS, SQLi, LFI, SSRF protections remain enforced for form posts
 3. **Label strings are exact** — wrong label name silently disables that signature everywhere, so test pins verbatim strings from `aws wafv2 describe-managed-rule-group`
+4. **Every `_BODY` rule is listed** — AWS can add a body rule to a managed group. `BODY_SIGNATURE_RULES` and the test's `MANAGED_BODY_RULES` must both grow, or the new rule blocks AI bodies again. Re-check the groups with `describe-managed-rule-group` when a new 403 appears on `/api/agent/*` or `/api/nexus/chat`.
 
 **Focused Tests**: `/infra/test/frontend-waf-body-signatures.test.ts` — 7 tests validating rule configuration, AI path exemptions, credential header redaction, and label names
+
+**Minimal validation (quiet)**: `cd infra && bunx jest --silent test/frontend-waf-body-signatures.test.ts`. This is a configuration check; it does not call AWS. The expected rule and label lists come from a `describe-managed-rule-group` snapshot, so a live check against AWS is needed only when the managed rule version changes.
 
 ---
 

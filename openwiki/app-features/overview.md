@@ -1789,7 +1789,7 @@ The sandbox host's 45s clock covers the entire server turn, including network la
 
 **Dispatch Acknowledgment**: When a queued request starts, the parent posts `atrium-artifact-data-ack` to the frame. The host runs a queue-tolerant 315s pre-ack budget, then re-arms the real 45s server budget on the ack. This ensures the frame's timeout clock starts when work BEGINS, not when the page POSTED.
 
-**SQL Base64 Encoding**: The request body carries `sqlBase64` (UTF-8 base64) rather than raw SQL because the edge WAF's `SQLi_BODY` managed rule blocks request bodies that match SQL patterns with a bare 403 the app never sees. This is transport encoding only — the decoded SQL is validated and executed by the same code path as before, under the viewer's row-level permissions.
+**SQL Base64 Encoding**: The request body carries `sqlBase64` (UTF-8 base64) rather than raw SQL because the edge WAF's SQL-injection body rules (`SQLi_BODY`, `SQLiExtendedPatterns_BODY`; see [WAF body signatures](../infrastructure/overview.md#web-application-firewall-waf)) block request bodies that match SQL patterns with a bare 403 the app never sees. This is transport encoding only — the decoded SQL is validated and executed by the same code path as before, under the viewer's row-level permissions.
 
 **Key Sources**:
 - `/app/api/atrium/artifacts/[id]/query/route.ts` — Route handler with base64 decoding

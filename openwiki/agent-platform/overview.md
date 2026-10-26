@@ -27,6 +27,8 @@ openwiki:
     - lib/content/people-search.ts
     - lib/agent-workspace/atrium-owner-operation.ts
     - lib/agent-workspace/command-executor.ts
+    - lib/agent-github/command-executor.ts
+    - lib/agent-credentials/owner-operation-broker.ts
     - lib/agents/platform-model.ts
     - infra/agent-image/openclaw.json
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
@@ -109,7 +111,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-media` — ffprobe inspection + ffmpeg transcode via named presets (`social-mp4`, `web-mp4`, `audio-mp3`); routes through agent-media Lambda
 - `psd-transcribe` — Speech-to-text using Amazon Transcribe over audio/video in owner's private workspace; routes through agent-media Lambda
 - `psd-pdf-to-markdown` — PDF to Markdown conversion; scanned/image-only PDFs rendered to page images via `--rasterize-pages`
-- `psd-image-gen` — Image generation
+- `psd-image-gen` — Image generation through the owner-gated broker; the model ID is pinned in one broker constant (see [Agent Image Generation](#agent-image-generation-psd-image-gen))
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
 - `psd-instructional-vision` — PSD instructional framework (Instructional Essentials, UDL, MTSS) from live repository
 - `psd-publish-file` — Hands a generated local file to the requesting user. Default: a private Drive file in the agent's account, shared with that one user (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)). `--to public` remains an unsigned public-by-link S3 URL that expires after 30 days
@@ -128,7 +130,7 @@ infra/agent-image/skills/{skill-name}/
 - `quartile-growth-report` — Growth-by-quartile spreadsheet generator for elementary school principals (one tab per grade, data-only output)
 - `psd-failure-report` — Failure analysis and reporting
 - `psd-last30days` — Recent activity analysis
-- `psd-github` — GitHub integration
+- `psd-github` — GitHub integration through the owner-bound `gh` broker; scheduled runs may only read (see [GitHub Command Broker and Scheduled Read-Only Access](github-access.md))
 - `psd-summarize` — Content summarization
 - `psd-tts` — Text-to-speech
 - `psd-strategic-plan` — Peninsula 2030 strategic plan queries from live repository 166
@@ -407,6 +409,32 @@ Skills run in the agent container defined by `/infra/agent-image/Dockerfile`. Th
 2. Validates governance policies via Cedar
 3. Executes skill logic with requested capabilities
 4. Audits all credential reads and tool invocations
+
+The Dockerfile installs `jq`, `poppler-utils` (`pdftotext`, `pdftoppm`), and `file` in the same apt layer as the base tools. The model reaches for them in `exec` on its own. Its own comment records 47 "not found" failures across about 25 users between 2026-10-04 and 2026-10-26. Add a tool to that layer when the model keeps calling it directly, and keep the install in the existing `RUN` rather than adding a new one.
+
+### Agent Image Generation (`psd-image-gen`)
+
+**When to consult**: changing the image model, the OpenAI image request body, or the error text an image failure produces. Nexus chat image generation is a separate path. It is documented in [app-features/overview.md](../app-features/overview.md#gemini-image-model-ids-1967).
+
+**Flow**: `infra/agent-image/skills/psd-image-gen/generate.js` calls the agent broker with `kind: "openai-image"` on `/api/agent/credentials`. That route checks `canAccessSkill(ownerEmail, "skill.image-gen")` and then calls `executeOpenAiImageOperation` in `lib/agent-credentials/owner-operation-broker.ts`. The broker reads the shared `openai_api_key` through `AgentCredentialBroker.get` with `sharedOnly`, posts to OpenAI's image endpoint, and returns the base64 image. The skill then stores the image under the workspace `public-images/` prefix and returns an unsigned link, as described in `SKILL.md`.
+
+**Model pin**: `AGENT_IMAGE_MODEL_ID` (`"gpt-image-2.5-flare"`) is exported from `owner-operation-broker.ts` and written into the request body by `openAiImageRequestBody`. The skill's `MODEL_ID` only reports the model back, but it must equal the broker value. The `SKILL.md` text and the skill's `package.json` description also name it. On 2026-10-26 OpenAI stopped serving `gpt-image-2` to the district project, and every call failed with 403 `model_not_found`.
+
+**Error detail**: `openAiErrorDetail` reads up to 64 KiB of an error body and appends OpenAI's `error.code` and a clipped `error.message` (300 characters) to the thrown `Image provider HTTP <status>`. It never throws. An unreadable body keeps the bare status. Before this change a retired model logged the same text as a credential fault.
+
+**Invariants**
+- The broker value and the skill's `MODEL_ID` change together. A skill that reports a different model than the broker used gives the user a wrong answer.
+- A caller without `skill.image-gen` gets 403 before any credential is read. A missing or user-scoped `openai_api_key` throws `Image generation credential is not configured`.
+- Image bytes are never returned from the failure path, only the bounded error text.
+
+**Change navigation**
+- Start in `executeOpenAiImageOperation`, then `validatedImageOperation` for the accepted size, quality, and background values and `openAiImageRequestBody` for the outgoing body.
+- Changing the model requires three edits: `AGENT_IMAGE_MODEL_ID`, `MODEL_ID` in `generate.js`, and `SKILL.md`. The skill ships in the agent image, so it needs an image rebuild.
+- Non-goal: the skill directory has no unit test file. Behavior is covered from the broker side.
+
+**Focused tests**: `tests/unit/agent-owner-operation-broker.test.ts`, describe `OpenAI image operation`. It checks that the request uses `AGENT_IMAGE_MODEL_ID`, that OpenAI's code and message reach the thrown error, and that an unreadable error body leaves the bare `HTTP 502`.
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/agent-owner-operation-broker.test.ts`.
 
 ### Media Relay Transport
 
@@ -1132,6 +1160,7 @@ cd infra/lambdas/agent-router && bun test --test-name-pattern="front-door reject
 - `/infra/agent-image/workspace_contract.py` — Contract fingerprint extraction
 - `/infra/agent-image/build-and-push.sh` — CI integration
 - `/infra/agent-image/test_workspace_contract.py` — Tests
+- `/infra/agent-image/test_cutover_guard.py` — Exit-status handling of the build script's cutover decision
 
 When deploying a new agent image, a rolling update briefly runs old and new writers simultaneously. This is only dangerous when the two disagree about something **persisted**: the proof string format, the checkpoint manifest or journal shape, the object-key layout, or the generation schema.
 
@@ -1168,6 +1197,10 @@ The guard runs during `build-and-push.sh`:
 - **Exit 0**: Contract unchanged — no cutover required
 - **Exit 1**: Contract changed — full cutover procedure required
 - **Exit 2**: Extraction failed — fail closed, treat as cutover required
+
+The build script runs under `set -euo pipefail`, so the status must be captured with `|| CONTRACT_STATUS=$?`. A bare `CONTRACT_STATUS=$?` on the next line would exit the script on a non-zero status before the `WORKSPACE CUTOVER REQUIRED` notice printed. That happened on 2026-10-26, when a changed contract (exit 1) ended the build silently. Keep the capture form when editing the block. `CutoverDecisionSurvivesErrexit` in `infra/agent-image/test_cutover_guard.py` runs the extracted decision block under a stub `python3` for statuses 0, 1, and 2 and asserts the notice and the end marker.
+
+**Minimal validation (quiet)**: `python -m unittest infra/agent-image/test_cutover_guard.py` (the same suite CI runs in its agent-image unittest step). Run `test_workspace_contract.py` as well when the contract extraction changes.
 
 ---
 
@@ -1527,6 +1560,8 @@ Schedule management routes use a **read/write split** for authorization:
 This allows scheduled runs to audit their own schedules without mutating them. A scheduled-mode turn that attempts `create`, `update`, or `delete` receives a 403 after the same cryptographic verification as owner-mode requests.
 
 The `SCHEDULED_READ_OPERATIONS` allowlist ensures new write operations default to owner-only rather than silently inheriting scheduled access.
+
+The GitHub broker applies the same split. A scheduled run may call `github-execute` only for the read-only `gh` commands, and a write is refused with 400 before the owner's token is read. See [GitHub Command Broker and Scheduled Read-Only Access](github-access.md).
 
 Expression validation (the EventBridge cron dialect rules), the `description` and `nextRuns` read-back that every schedule response carries, the duplicate and name refusals on create and update, and the read-only audit of stored schedules are documented in **[agent-schedules.md](agent-schedules.md)**. What happens when a schedule keeps failing (the run statuses, the `failing` marker on `list`, and the owner DM) is documented in **[schedule-failure-notices.md](schedule-failure-notices.md)**.
 
