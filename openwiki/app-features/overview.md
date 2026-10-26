@@ -653,9 +653,50 @@ File attachments (documents and images) are handled through a unified adapter sy
 | `VisionImageAdapter` | JPEG, PNG, WebP, GIF | Base64 inline for vision models; 20MB limit; optional repository canonical reference |
 | `CompositeAttachmentAdapter` | Combines multiple adapters | `createEnhancedNexusAttachmentAdapter()` for Nexus; `createDocumentAttachmentAdapter()` for Assistant Architect (images excluded) |
 
-**Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service.
+**Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service. Images are the exception on a standard chat turn: they carry the marker and the inline data URL, and the model sees the data URL for the current turn and for every prior turn the client resends. Only the image-generation/edit route treats caller-carried pixels as untrusted: it reads the canonical attachment from storage by its `s3Key` (`getAttachmentFromS3` in `app/api/nexus/chat/image-generation-handler.ts`).
 
-**Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners.
+**Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners. The repository upload keeps the original file; only the inline copy is downscaled.
+
+### Image Downscaling and the Proxied Body Limit (#1850)
+
+Phone photos are 5-10MB, about a third larger again as base64. Because the AI SDK resends the whole conversation every turn, one or two full-size photos pushed a Nexus chat request past the 10MB body that Next.js buffers for proxied routes. The body was truncated, `JSON.parse` failed, and the turn returned a 500. The fix has two layers: the client shrinks the inline copy, and the server raises the proxied body cap as a safety net.
+
+```mermaid
+flowchart TD
+    A[VisionImageAdapter.send] --> B[downscaleImageDataUrl file, original data URL]
+    B --> C{createImageBitmap and document available?}
+    C -- no --> O[send original]
+    C -- yes --> D[planImageDownscale width, height, bytes, type]
+    D -- null: GIF, unknown size, or within 2048px and 1.5MB --> O
+    D -- plan --> E[canvas re-encode at plan size]
+    E --> F{encoder produced the requested type and result is smaller?}
+    F -- no --> O
+    F -- yes --> R[send re-encoded data URL]
+    B -. decode or canvas error .-> O
+```
+
+Caption: every failure path returns the original data URL, so shrinking is an optimization and never loses the attachment.
+
+**Shrink rules** (`lib/attachments/image-downscale.ts`):
+- The longest edge is capped at `MAX_IMAGE_EDGE_PX` (2048). Aspect ratio is kept.
+- Images at or under both the 2048px edge and `MAX_UNTOUCHED_IMAGE_BYTES` (1.5MB) are sent untouched. Animated GIFs are never re-encoded, because a canvas round-trip would drop the animation.
+- PNG and WebP keep their format so transparency is not flattened. Other types become JPEG at quality 0.85.
+- If the browser's encoder falls back to PNG (for example WebP on older Safari), or the re-encode is larger, the original is sent.
+- `planImageDownscale` is pure and holds the rules. `downscaleImageDataUrl` owns the browser work and closes the `ImageBitmap` in `finally`.
+
+**Server-side safety net** (`next.config.mjs`, `experimental.proxyClientMaxBodySize: '50mb'`): Next buffers the body for middleware, and middleware matches `/api/nexus/chat`. The default silently truncates at 10MB. The limit is global, not per route, and Next buffers the body before the middleware auth check. This was an accepted risk recorded in the config comment: an unauthenticated client can make a request hold up to 50MB. The chat route is the only caller that needs more than 10MB. Revisit the value if memory pressure or abuse appears.
+
+**Why the 20MB pre-check stays.** `VisionImageAdapter.send` still rejects files over 20MB before any downscale, so the original size rule is unchanged.
+
+**Invariant:** the inline data URL on a standard chat turn must stay under the proxied body limit even after the history accumulates photos. The `contentType` on the completed attachment comes from the data URL's declared media type (`dataUrlMediaType`), so it matches the re-encoded bytes.
+
+**Focused tests**:
+- `lib/attachments/__tests__/image-downscale.test.ts` — `planImageDownscale` (portrait, WebP and PNG format keeping, GIF and small-image pass-through, unknown dimensions), `downscaleImageDataUrl` fail-open when `createImageBitmap` is missing or decoding fails, `dataUrlMediaType`, and a source check that `next.config.mjs` sets `proxyClientMaxBodySize: '50mb'`.
+- `tests/e2e/nexus-chat-photo-attachment.functional.spec.ts` (flow `nexus-chat-photo-attachment`) — conditional browser check at the network boundary: the request body stays under 10MB as photos accumulate, and each inline image is at most 2048px on its longest edge. It needs the authenticated app stack, so run it only when the adapter, the downscale rules, or the body limit change.
+
+**Minimal validation**: `bunx jest --silent lib/attachments/__tests__/image-downscale.test.ts lib/attachments/__tests__/chat-attachment-adapters.test.ts`. Run the Playwright spec only when the browser path changes, not for wording or threshold-only edits that the unit suite covers.
+
+**Scope boundary:** the server does not downscale. The 2048px rule applies only to the client's inline copy, so a change to the body limit is a Next config change and needs no adapter change.
 
 **Adapter Configuration**:
 - `purpose` — Product surface attribution (`"nexus"` or `"assistant-architect"`)
@@ -667,6 +708,7 @@ File attachments (documents and images) are handled through a unified adapter sy
 **Key Sources**:
 - `/lib/attachments/chat-attachment-adapters.ts` — Adapter implementations
 - `/lib/attachments/use-chat-attachments.ts` — Shared hook for attachment wiring
+- `/lib/attachments/image-downscale.ts` — Client-side photo shrink for the inline image copy (#1850)
 - `/components/assistant-ui/attachment.tsx` — Attachment UI primitives
 - `/components/assistant-ui/thread.tsx` — Processing-spinner rendering
 
@@ -2215,3 +2257,4 @@ Atrium
 - **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
+API access to these features
