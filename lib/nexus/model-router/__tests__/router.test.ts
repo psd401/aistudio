@@ -468,6 +468,44 @@ function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family w
   })
 }
 
+/** A tab opened before an admin replaced its saved model (2026-10-26 prod). */
+function defineNexusModelRouterStaleFallbackSuite() {
+  it("routes a turn whose client fallback model was deleted instead of failing it", async () => {
+    // A tab opened before an admin replaced the model it has saved keeps
+    // sending the deleted id; with routing on, the turn must still be answered.
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      experienceMode: "advanced", requestedFamily: "anthropic", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+  })
+
+  it("substitutes the configured medium-tier model for a deleted fallback", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["gpt-terra"], high: [] },
+      }),
+      mode: "shadow",
+    })
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    // Shadow mode with no required tools executes the fallback, so the
+    // substitute is exactly what runs.
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("still fails an explicit pick of a deleted model when routing is off", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+    await expect(routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("The fallback Nexus model is unavailable")
+  })
+}
+
 function defineNexusModelRouterBoundImageSuite() {
   /**
    * A Project/Skill/Assistant binding adds its repository tools to EVERY turn,
@@ -569,6 +607,7 @@ const defineNexusModelRouterSuite1 = () => {
   defineNexusModelRouterSuite1Part1()
   defineNexusModelRouterSuite1Part2()
   defineNexusModelRouterSuite1Part3()
+  defineNexusModelRouterStaleFallbackSuite()
   defineNexusModelRouterImageAttachmentSuite()
   defineNexusModelRouterBoundImageSuite()
 };

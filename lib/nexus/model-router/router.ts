@@ -952,6 +952,32 @@ async function routeWithConfiguredRouter(options: {
   })
 }
 
+/**
+ * Stand-in for a client fallback model that no longer exists: the first
+ * accessible, executable text model, preferring the configured medium-tier
+ * candidates (Auto, then each family) over table order.
+ */
+function substituteFallback(
+  models: NexusModelRow[],
+  accessibleIds: Set<string>,
+  config: NexusRouterConfig
+): NexusModelRow | undefined {
+  const textModels = models.filter(model =>
+    !hasCapability(model.capabilities, "imageGeneration")
+    && !hasCapability(model.capabilities, "deepResearch")
+  )
+  const preferredIds = [
+    ...config.auto.medium,
+    ...config.families.anthropic.medium,
+    ...config.families.openai.medium,
+    ...config.families.google.medium,
+  ]
+  const preferred = preferredIds
+    .map(id => textModels.find(model => model.modelId === id || String(model.id) === id))
+    .filter((model): model is NexusModelRow => model !== undefined)
+  return firstAccessibleModel([...preferred, ...textModels], accessibleIds) ?? undefined
+}
+
 export async function routeNexusRequest(
   args: RouteNexusRequestArgs
 ): Promise<NexusRouteResult> {
@@ -965,11 +991,10 @@ export async function routeNexusRequest(
   // The fallback (the model the client explicitly selected) is looked up in
   // the unfiltered list on purpose: an explicit selection keeps its honest
   // provider-configuration error instead of being silently rerouted.
-  const fallback = models.find(model =>
+  const requestedFallback = models.find(model =>
     model.modelId === args.fallbackModelId
     || String(model.id) === args.fallbackModelId
   )
-  if (!fallback) throw new Error("The fallback Nexus model is unavailable")
   // Routed selection must never pick a model whose provider credential is not
   // configured — provider creation would throw at stream time and fail the
   // whole request, which the router's fallback cannot catch.
@@ -977,6 +1002,18 @@ export async function routeNexusRequest(
   const routableModels = models.filter(model =>
     configuredProviders.has(model.provider.toLowerCase())
   )
+  const fallback = requestedFallback
+    ?? (mode === "off" ? undefined : substituteFallback(routableModels, accessibleIds, config))
+  if (!fallback) throw new Error("The fallback Nexus model is unavailable")
+  if (!requestedFallback) {
+    // A browser tab opened before an admin replaced/removed the model it has
+    // saved keeps sending the old id until reload. With routing on, that id is
+    // only a safety net, so a stale one must not fail the turn.
+    log.warn("Client fallback model no longer exists; substituting a routable default", {
+      requestedFallbackModelId: args.fallbackModelId,
+      substituteModelId: fallback.modelId,
+    })
+  }
   if (routableModels.length < models.length) {
     const excludedProviders = [...new Set(
       models
