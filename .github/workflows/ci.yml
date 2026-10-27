@@ -391,6 +391,15 @@ jobs:
       env:
         CI: true
 
+    # group-sync (#1989). Same gap as agent-cron above: root jest ignores
+    # /infra/ and infra's `lambdas` project only matches __tests__/, so the
+    # reconciler's fail-safety tests and the keyless directory-auth tests ran
+    # nowhere. Needs its own install (@googleapis/cloudidentity).
+    - name: Run group-sync Lambda tests (Bun)
+      run: bun run test:lambda:group-sync
+      env:
+        CI: true
+
     # agent-media (#1738). Root jest ignores /infra/, so like agent-cron above
     # this container Lambda's suite would otherwise never run. It needs its own
     # install: the handler resolves @aws-sdk/client-s3 and client-transcribe

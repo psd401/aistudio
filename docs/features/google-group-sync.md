@@ -1,7 +1,7 @@
 # Google Directory Group Sync
 
 Group membership from Google Workspace becomes a first-class authorization source
-in AI Studio: an hourly service-account sync mirrors selected Google groups (and
+in AI Studio: an hourly keyless sync mirrors selected Google groups (and
 their transitive membership) into the database, and that membership drives two
 things — a user's **roles** (via group→role mappings) and **per-resource access
 grants** on models, assistants, and agent skills. Authentication does **not**
@@ -20,7 +20,7 @@ Google Workspace Directory
         │  (hourly EventBridge rule + admin "Sync now")
         ▼
   group-sync Lambda  ── infra/lambdas/group-sync
-        │  service account (Cloud Identity API, or Admin SDK via DWD)
+        │  shared groups reader via keyless WIF (Cloud Identity API)
         │  1. resolve selection (picks ∪ prefix rules)
         │  2. fetch transitive membership per group
         │  3. full-replace group_members per group (last-known-good fail-safety)
@@ -84,10 +84,20 @@ read identically by the app (`lib/groups/settings.ts`) and the Lambda
 
 | Setting key | Meaning |
 |---|---|
-| `GROUP_SYNC_ENABLED` | Master switch. Only the exact string `true` enables the **hourly** run. Manual "Sync now" runs whenever a SA secret is configured, even while paused. |
-| `GOOGLE_DIRECTORY_SA_SECRET_ARN` | Secrets Manager ARN of the Google service-account JSON key. Must match the `aistudio-<env>-google-directory-*` name family the Lambda's IAM role is scoped to. |
-| `GOOGLE_DIRECTORY_CUSTOMER_ID` | Cloud Identity customer id (e.g. `C0xxxxxxx`). Required for the Cloud Identity path. |
-| `GOOGLE_DIRECTORY_DWD_SUBJECT` | Optional admin email to impersonate. **Set** → Admin SDK Directory API via domain-wide delegation. **Unset** → Cloud Identity API with a Groups-Reader service account (no impersonation, preferred). |
+| `GROUP_SYNC_ENABLED` | Master switch. Only the exact string `true` enables the **hourly** run. Manual "Sync now" runs whenever the customer id is configured, even while paused. |
+| `GOOGLE_DIRECTORY_CUSTOMER_ID` | Cloud Identity customer id (e.g. `C0xxxxxxx`). Required: without it every run is skipped (`not-configured`). |
+
+**Google auth is not a setting** (#1989). The Lambda's execution role
+(`psd-group-sync-<env>-execution-role-<env>`) federates through AWS → Google
+workload identity to the `directory-reader` provider and impersonates the
+district's shared, keyless groups reader
+`directory-groups-reader@psd-org-tooling`, which holds the Workspace **Groups
+Reader** admin role. CDK sets `GOOGLE_DIRECTORY_WIF_AUDIENCE` and
+`GOOGLE_DIRECTORY_SERVICE_ACCOUNT_EMAIL` on the Lambda. The account, the provider
+and the role names it trusts live in `psd401/psd-gcp-infra`
+(`bootstrap/directory-reader.tf`, `directory-reader.tf`, RUNBOOK §16). There is no
+key and no domain-wide delegation; the old `GOOGLE_DIRECTORY_SA_SECRET_ARN` and
+`GOOGLE_DIRECTORY_DWD_SUBJECT` settings are no longer read.
 
 **Selection** (Admin → Groups) is stored in `group_selection_rules`: `pick` rows name
 an exact group email; `prefix` rows select every directory group whose email starts
@@ -115,12 +125,12 @@ that stack owns email and other delivery subscriptions:
 | `psd-group-sync-staleness-<env>` | `SyncRunSucceeded` sum < 1 across 3 consecutive hours, **treat-missing-as-breaching** | no successful sync recently — including the case where the schedule stopped firing entirely (a dead Lambda emits nothing, so a self-emitted "seconds since last sync" gauge could not detect it). |
 
 > **New-environment note:** when group sync is intentionally not configured
-> (`GOOGLE_DIRECTORY_SA_SECRET_ARN` unset), the Lambda returns `skipped` before
+> (`GOOGLE_DIRECTORY_CUSTOMER_ID` unset), the Lambda returns `skipped` before
 > emitting `SyncRunSucceeded`, so the metric is permanently absent and
 > `psd-group-sync-staleness-<env>` sits in **ALARM** by design (`treatMissingData:
 > BREACHING`). This is expected onboarding noise, not an incident — notifications are
 > delivered through the shared monitoring topic. It clears on the first successful
-> sync once the service account is configured. Before enabling group sync in a new
+> sync once the customer id is configured. Before enabling group sync in a new
 > environment, deploy MonitoringStack and confirm at least one delivery endpoint. If
 > an environment will never use group sync, disable the alarm rather than leaving it
 > red.
@@ -131,8 +141,8 @@ an aggregate "Failed syncs" count (`groups.last_sync_error IS NOT NULL AND is_ac
 
 ### Test-firing the alarms after deploy
 
-1. **Failure alarm**: temporarily point `GOOGLE_DIRECTORY_SA_SECRET_ARN` at a bad
-   secret (or invoke with the SA secret revoked) so a run throws; confirm
+1. **Failure alarm**: temporarily set `GOOGLE_DIRECTORY_CUSTOMER_ID` to a customer
+   id the reader cannot see (e.g. `C00000000`) so a run throws; confirm
    `psd-group-sync-failure-<env>` → ALARM and the shared monitoring notification
    fires; restore the setting.
 2. **Staleness alarm**: set `GROUP_SYNC_ENABLED=false` and let 3 hourly windows pass
@@ -146,8 +156,10 @@ an aggregate "Failed syncs" count (`groups.last_sync_error IS NOT NULL AND is_ac
 ### Sync failure (alarm: `psd-group-sync-failure`)
 
 1. Read the Lambda logs: `/aws/lambda/psd-group-sync-<env>` (structured JSON).
-2. Common causes: expired/rotated SA key (fix the secret, then "Sync now"),
-   Directory API permission loss (re-grant Groups Reader / re-check DWD scopes),
+2. Common causes: WIF trust loss (`403` / `invalid_grant` from Google STS or
+   `generateAccessToken`: check the role name against psd-gcp-infra
+   `directory-reader.tf`), Directory permission loss (re-assign Groups Reader to
+   `directory-groups-reader@psd-org-tooling`, RUNBOOK §16 in psd-gcp-infra),
    Aurora unreachable (VPC/security-group/credentials).
 3. **Membership is safe** while you fix it: each failing group keeps its
    last-known-good membership (`last_sync_error` is set, `last_synced_at` is not
@@ -235,7 +247,7 @@ retired branch); both call sites already guard on a `null` return.
 ## Key source locations
 
 - Lambda: `infra/lambdas/group-sync/` (`index.ts` handler, `sync.ts` reconciler core,
-  `directory-client.ts`, `db.ts`, `config.ts`)
+  `directory-client.ts`, `directory-auth.ts`, `db.ts`, `config.ts`)
 - CDK: `infra/lib/processing-stack.ts` (Lambda, hourly rule, alarms)
 - Reconcilers: `lib/db/drizzle/user-roles.ts` (`reconcileUserManagedRoles`),
   `infra/lambdas/group-sync/db.ts` (`reconcileManagedRoles` bulk pass)
