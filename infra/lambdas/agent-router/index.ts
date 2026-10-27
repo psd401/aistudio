@@ -26,7 +26,8 @@
  *   DATABASE_RESOURCE_ARN  — Aurora cluster ARN
  *   DATABASE_SECRET_ARN    — Aurora credentials secret ARN
  *   DATABASE_NAME          — Aurora database name
- *   GOOGLE_CREDENTIALS_SECRET_ARN — Secrets Manager ARN for Google service account JSON
+ *   GOOGLE_CHAT_WIF_AUDIENCE — Google STS audience for the chat-app WIF provider
+ *   GOOGLE_CHAT_SERVICE_ACCOUNT_EMAIL — Chat app service account to impersonate
  *   TOKEN_LIMIT_PER_INTERACTION — Alerting threshold for token usage (default 100000)
  *   ALLOWED_DOMAINS        — Comma-separated list of allowed email domains (default: 'psd401.net')
  */
@@ -67,6 +68,7 @@ import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 
 import * as crypto from 'node:crypto';
 import type { Readable } from 'node:stream';
 import * as chatPkg from '@googleapis/chat';
+import { createGoogleChatWifAuth } from './google-chat-wif';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 import { extractRichEnvelope, recomposeRichText } from './rich-envelope';
@@ -205,8 +207,6 @@ const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_HOST = process.env.DATABASE_HOST || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const DATABASE_PORT = parseInt(process.env.DATABASE_PORT || '5432', 10);
-const GOOGLE_CREDENTIALS_SECRET_ARN =
-  process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const TOKEN_LIMIT = parseInt(
   process.env.TOKEN_LIMIT_PER_INTERACTION || '100000',
   10
@@ -649,23 +649,11 @@ function logUnavailableSlashCommand(
 // Cached secrets
 // ---------------------------------------------------------------------------
 
-let cachedGoogleCredentials: string | null = null;
-let credentialsCachedAt: number | null = null;
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-// Cached Google Chat API client — reuses OAuth token across warm invocations.
-// Invalidated when credentials are refreshed (TTL expiry or parse error).
-function createGoogleChatAuth(
-  credentials: Record<string, unknown>
-) {
-  return new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/chat.bot'],
-  });
-}
-
-type GoogleChatAuth = ReturnType<typeof createGoogleChatAuth>;
-let cachedChatAuth: GoogleChatAuth | null = null;
+// Cached Google Chat API client — keyless WIF auth (#1989). The auth client
+// caches its access token and refreshes it on expiry, so one instance serves
+// every warm invocation.
 let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
 
 // Cache SSM lookups at module scope to avoid redundant API calls on every invocation.
@@ -1246,31 +1234,9 @@ async function getDbClient(): Promise<postgres.Sql> {
   return pgClient;
 }
 
-async function getGoogleCredentials(): Promise<string> {
-  if (
-    cachedGoogleCredentials &&
-    credentialsCachedAt &&
-    Date.now() - credentialsCachedAt < CREDENTIALS_TTL_MS
-  ) {
-    return cachedGoogleCredentials;
-  }
-  if (!GOOGLE_CREDENTIALS_SECRET_ARN) {
-    throw new Error('GOOGLE_CREDENTIALS_SECRET_ARN not configured');
-  }
-  const result = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN })
-  );
-  cachedGoogleCredentials = result.SecretString || '';
-  credentialsCachedAt = Date.now();
-  // Invalidate the Chat API client so it picks up fresh credentials
-  cachedChatAuth = null;
-  cachedChatClient = null;
-  return cachedGoogleCredentials;
-}
-
 // Internal API key for calling the Next.js app's /api/agent/* endpoints
 // (#1233 account-request). Prefers the direct env var (local/dev), else the
-// Secrets Manager value; TTL-cached like getGoogleCredentials. Returns null if
+// Secrets Manager value; TTL-cached. Returns null if
 // unconfigured so callers can no-op fail-closed.
 let cachedInternalApiKey: string | null = null;
 let internalApiKeyCachedAt: number | null = null;
@@ -2581,35 +2547,15 @@ async function invokeAgentCore(
  * Build (or reuse) the authenticated Google Chat API client. The `chat.bot`
  * scope covers both message sends AND `media.download` of message
  * attachments, so the same client serves responses and attachment fetches.
- * Cached across warm invocations to avoid an OAuth token round-trip; the
- * cache is invalidated when credentials refresh (TTL expiry or parse error).
+ * Auth is keyless workload identity federation (google-chat-wif.ts); an
+ * exchange failure surfaces from the API call, not from building the client.
  */
-async function getChatAuth(): Promise<GoogleChatAuth> {
-  const credentialsJson = await getGoogleCredentials();
-  let credentials: Record<string, unknown>;
-  try {
-    credentials = JSON.parse(credentialsJson) as Record<string, unknown>;
-  } catch {
-    // Clear the cache so the next invocation fetches fresh credentials from
-    // Secrets Manager in case the secret was recently updated/fixed.
-    cachedGoogleCredentials = null;
-    credentialsCachedAt = null;
-    cachedChatAuth = null;
-    cachedChatClient = null;
-    throw new Error('Google credentials secret contains invalid JSON');
-  }
-
-  if (!cachedChatAuth) {
-    cachedChatAuth = createGoogleChatAuth(credentials);
-  }
-
-  return cachedChatAuth;
-}
-
 async function getChatClient(): Promise<NonNullable<typeof cachedChatClient>> {
-  const googleAuth = await getChatAuth();
   if (!cachedChatClient) {
-    cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
+    cachedChatClient = chatPkg.chat({
+      version: 'v1',
+      auth: createGoogleChatWifAuth(),
+    });
   }
   return cachedChatClient;
 }

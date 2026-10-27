@@ -22,11 +22,9 @@ import {
   GetCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
 import * as chatPkg from "@googleapis/chat";
+
+import { createGoogleChatWifAuth } from "./google-chat-wif";
 
 import {
   type DailyStat,
@@ -68,30 +66,15 @@ interface TriageRow {
 
 const REGION = process.env.AWS_REGION ?? "us-east-1";
 const TRIAGE_TABLE = process.env.TRIAGE_TABLE ?? "";
-const GOOGLE_CREDENTIALS_SECRET_ARN =
-  process.env.GOOGLE_CREDENTIALS_SECRET_ARN ?? "";
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
-const sm = new SecretsManagerClient({ region: REGION });
 
+// Keyless WIF auth (#1989); the auth client refreshes its own token.
 let cachedClient: ReturnType<typeof chatPkg.chat> | null = null;
-let cachedCredsAt = 0;
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
-  if (cachedClient && Date.now() - cachedCredsAt < 10 * 60_000) {
-    return cachedClient;
-  }
-  const resp = await sm.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN }),
-  );
-  if (!resp.SecretString) throw new Error("Chat credentials secret empty");
-  const credentials = JSON.parse(resp.SecretString);
-  const auth = new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/chat.bot"],
-  });
-  cachedClient = chatPkg.chat({ version: "v1", auth });
-  cachedCredsAt = Date.now();
+  if (cachedClient) return cachedClient;
+  cachedClient = chatPkg.chat({ version: "v1", auth: createGoogleChatWifAuth() });
   return cachedClient;
 }
 

@@ -9,9 +9,9 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.0.0",
-    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/credential-provider-node": "^3.0.0",
     "@aws-sdk/lib-dynamodb": "^3.0.0",
-    "@googleapis/chat": "^5.0.0"
+    "@googleapis/chat": "^47.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
