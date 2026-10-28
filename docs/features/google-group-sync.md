@@ -95,7 +95,7 @@ district's shared, keyless groups reader
 Reader** admin role. CDK sets `GOOGLE_DIRECTORY_WIF_AUDIENCE` and
 `GOOGLE_DIRECTORY_SERVICE_ACCOUNT_EMAIL` on the Lambda. The account, the provider
 and the role names it trusts live in `psd401/psd-gcp-infra`
-(`bootstrap/directory-reader.tf`, `directory-reader.tf`, RUNBOOK §16). There is no
+(`bootstrap/directory-reader.tf`, `directory-reader.tf`, RUNBOOK §17). There is no
 key and no domain-wide delegation; the old `GOOGLE_DIRECTORY_SA_SECRET_ARN` and
 `GOOGLE_DIRECTORY_DWD_SUBJECT` settings are no longer read.
 
@@ -159,7 +159,7 @@ an aggregate "Failed syncs" count (`groups.last_sync_error IS NOT NULL AND is_ac
 2. Common causes: WIF trust loss (`403` / `invalid_grant` from Google STS or
    `generateAccessToken`: check the role name against psd-gcp-infra
    `directory-reader.tf`), Directory permission loss (re-assign Groups Reader to
-   `directory-groups-reader@psd-org-tooling`, RUNBOOK §16 in psd-gcp-infra),
+   `directory-groups-reader@psd-org-tooling`, RUNBOOK §17 in psd-gcp-infra),
    Aurora unreachable (VPC/security-group/credentials).
 3. **Membership is safe** while you fix it: each failing group keeps its
    last-known-good membership (`last_sync_error` is set, `last_synced_at` is not
