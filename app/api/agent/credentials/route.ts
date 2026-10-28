@@ -12,6 +12,7 @@ import {
   executeDeepResearchStatusOperation,
   executeOpenAiImageOperation,
   executePlaudOperation,
+  executePrrOperation,
   executePsdDataOperation,
   executeFreshserviceOperation,
 } from "@/lib/agent-credentials/owner-operation-broker"
@@ -31,18 +32,17 @@ type AgentInvocation = NonNullable<
   Awaited<ReturnType<typeof verifyAgentInvocationContext>>
 >
 
-async function executeCredentialOperation(
+/**
+ * Operations that act on an upstream integration with the caller's OWN
+ * owner-scoped credential (or, for PSD Data, their own Cognito session).
+ * Returns null for any other operation. Split out of
+ * `executeCredentialOperation` to keep each switch readable.
+ */
+async function executeOwnerIntegrationOperation(
   body: Record<string, unknown>,
   invocation: AgentInvocation
-): Promise<NextResponse> {
-  const broker = new AgentCredentialBroker()
+): Promise<NextResponse | null> {
   switch (body.operation) {
-    case "get":
-    case "list":
-      return NextResponse.json(
-        { error: "Plaintext credential access is not supported" },
-        { status: 403 }
-      )
     case "psd-data-mcp":
       return NextResponse.json(
         await executePsdDataOperation({
@@ -61,6 +61,54 @@ async function executeCredentialOperation(
           toolName: body.toolName,
           toolArgs: body.toolArgs,
         })
+      )
+    case "prr-mcp":
+      // Like Freshservice, PRR uses the caller's OWN personal access token
+      // (slot `prr_pat`), so that token is the authorization and PRR enforces
+      // roles server-side. Allowed in owner and scheduled mode alike: a daily
+      // PRR check is a schedule. The token never leaves the web tier.
+      return NextResponse.json(
+        await executePrrOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          method: body.method,
+          toolName: body.toolName,
+          toolArgs: body.toolArgs,
+        })
+      )
+    case "freshservice": {
+      // Freshservice uses the caller's own owner-scoped key, so that
+      // credential is the authorization. Unlike operations backed by a shared
+      // district credential, this operation must not gain an ungrantable
+      // capability gate between the signed owner context and the broker.
+      return NextResponse.json(
+        await executeFreshserviceOperation({
+          ownerEmail: invocation.ownerEmail,
+          sessionId: invocation.sessionId,
+          path: body.path,
+          method: body.method,
+          body: body.body,
+        })
+      )
+    }
+    default:
+      return null
+  }
+}
+
+async function executeCredentialOperation(
+  body: Record<string, unknown>,
+  invocation: AgentInvocation
+): Promise<NextResponse> {
+  const integration = await executeOwnerIntegrationOperation(body, invocation)
+  if (integration) return integration
+  const broker = new AgentCredentialBroker()
+  switch (body.operation) {
+    case "get":
+    case "list":
+      return NextResponse.json(
+        { error: "Plaintext credential access is not supported" },
+        { status: 403 }
       )
     case "openai-image": {
       const granted = await broker.canAccessSkill(
@@ -102,21 +150,6 @@ async function executeCredentialOperation(
           interactionId: body.interactionId,
         })
       )
-    case "freshservice": {
-      // Freshservice uses the caller's own owner-scoped key, so that
-      // credential is the authorization. Unlike operations backed by a shared
-      // district credential, this operation must not gain an ungrantable
-      // capability gate between the signed owner context and the broker.
-      return NextResponse.json(
-        await executeFreshserviceOperation({
-          ownerEmail: invocation.ownerEmail,
-          sessionId: invocation.sessionId,
-          path: body.path,
-          method: body.method,
-          body: body.body,
-        })
-      )
-    }
     case "put":
       if (invocation.mode !== "owner") {
         return NextResponse.json({ error: "Forbidden" }, { status: 403 })

@@ -20,6 +20,7 @@ const canAccessSkillMock = jest.fn()
 const brokerConstructorMock = jest.fn()
 const executeOpenAiImageOperationMock = jest.fn()
 const executeFreshserviceOperationMock = jest.fn()
+const executePrrOperationMock = jest.fn()
 const executeDeepResearchStartOperationMock = jest.fn()
 const executeDeepResearchStatusOperationMock = jest.fn()
 
@@ -88,6 +89,8 @@ jest.mock("@/lib/agent-credentials/owner-operation-broker", () => {
     executePsdDataOperation: jest.fn(),
     executeFreshserviceOperation: (...args: unknown[]) =>
       executeFreshserviceOperationMock(...args),
+    executePrrOperation: (...args: unknown[]) =>
+      executePrrOperationMock(...args),
   }
 })
 
@@ -130,6 +133,10 @@ beforeEach(() => {
     status: 200,
     ok: true,
     data: { tickets: [] },
+  })
+  executePrrOperationMock.mockReset().mockResolvedValue({
+    status: "ok",
+    result: { tools: [] },
   })
   executeDeepResearchStartOperationMock.mockReset().mockResolvedValue({
     interactionId: "interaction-1",
@@ -394,5 +401,70 @@ describe("POST /api/agent/credentials upstream timeouts", () => {
     expect(await response.json()).toEqual({
       error: "Credential operation failed",
     })
+  })
+})
+
+describe("POST /api/agent/credentials prr-mcp", () => {
+  const prrBody = {
+    operation: "prr-mcp",
+    method: "tools/call",
+    toolName: "psd_prr_overdue_requests_list",
+    toolArgs: { limit: 10 },
+  }
+
+  it.each(["owner", "scheduled"] as const)(
+    "relays a PRR tool call in %s mode with the signed owner",
+    async (mode) => {
+      context = { ...context!, mode }
+      const response = await POST(request(prrBody))
+
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({
+        status: "ok",
+        result: { tools: [] },
+      })
+      expect(executePrrOperationMock).toHaveBeenCalledWith({
+        ownerEmail: "owner@psd401.net",
+        sessionId: "session-1",
+        method: "tools/call",
+        toolName: "psd_prr_overdue_requests_list",
+        toolArgs: { limit: 10 },
+      })
+      // The caller's own token is the authorization; no capability gate.
+      expect(canAccessSkillMock).not.toHaveBeenCalled()
+    }
+  )
+
+  it("passes a missing-token result through for the skill to act on", async () => {
+    executePrrOperationMock.mockResolvedValueOnce({
+      status: "needs-auth",
+      reason: "PRR personal access token is not stored",
+      code: "prr_token_missing",
+    })
+    const response = await POST(request(prrBody))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      status: "needs-auth",
+      code: "prr_token_missing",
+    })
+  })
+
+  it("rejects an owner selector in the body", async () => {
+    const response = await POST(
+      request({ ...prrBody, ownerEmail: "someone-else@psd401.net" })
+    )
+    expect(response.status).toBe(400)
+    expect(executePrrOperationMock).not.toHaveBeenCalled()
+  })
+
+  it("reports a disallowed PRR tool as a 400 input error", async () => {
+    executePrrOperationMock.mockRejectedValueOnce(
+      new AgentCredentialInputError("Unsupported PRR tool")
+    )
+    const response = await POST(
+      request({ ...prrBody, toolName: "psd_prr_request_close" })
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: "Unsupported PRR tool" })
   })
 })

@@ -410,3 +410,56 @@ describe("submitCredentialEntry — value validation", () => {
     }
   })
 })
+
+describe("submitCredentialEntry — PRR personal access token (prr_pat)", () => {
+  it.each([
+    ["a value without the prr_pat_ prefix", "ghp_abcdefghijklmnop"],
+    ["just the prefix", "prr_pat_"],
+    ["the prefix in the wrong case", "PRR_PAT_abc_def123"],
+  ])("rejects %s without spending the link", async (_label, value) => {
+    verifyResult = payload({ cred: "prr_pat" })
+    const broker = brokerStub()
+    const outcome = await submitCredentialEntry(
+      { token: "t", sessionEmail: OWNER, value },
+      broker
+    )
+    expect(outcome).toMatchObject({
+      status: "invalid-value",
+      credentialName: "prr_pat",
+    })
+    expect(JSON.stringify(outcome)).toContain("prr_pat_")
+    expect(JSON.stringify(outcome)).toContain("prr.psd401.net/agent-access")
+    // The prefix itself appears in the guidance; any other value must not.
+    if (value !== "prr_pat_") expect(JSON.stringify(outcome)).not.toContain(value)
+    expect(executeQueryMock).not.toHaveBeenCalled()
+    expect(broker.put).not.toHaveBeenCalled()
+  })
+
+  it("stores a prr_pat_ token (surrounding whitespace allowed)", async () => {
+    verifyResult = payload({ cred: "prr_pat" })
+    const broker = brokerStub()
+    const outcome = await submitCredentialEntry(
+      { token: "t", sessionEmail: OWNER, value: "  prr_pat_abc123_secretvalue  " },
+      broker
+    )
+    expect(outcome.status).toBe("stored")
+    expect(broker.put).toHaveBeenCalledWith(
+      OWNER,
+      "prr_pat",
+      "  prr_pat_abc123_secretvalue  "
+    )
+  })
+
+  it.each(["freshservice_api_key", "constructor", "__proto__"])(
+    "does not apply a prefix rule to the %s slot",
+    async (cred) => {
+      verifyResult = payload({ cred })
+      const broker = brokerStub()
+      const outcome = await submitCredentialEntry(
+        { token: "t", sessionEmail: OWNER, value: "fs-key-without-prefix" },
+        broker
+      )
+      expect(outcome.status).toBe("stored")
+    }
+  )
+})

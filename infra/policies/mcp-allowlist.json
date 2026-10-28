@@ -7,6 +7,12 @@
       "url": "https://mcp.psd401.net",
       "description": "Internal district MCP server for Google Workspace delegation and district APIs",
       "enabled": true
+    },
+    {
+      "name": "PSD Public Records (PRR) MCP Server",
+      "url": "https://prr.psd401.net/mcp",
+      "description": "Hosted MCP for the district Public Records system. Called only from the AI Studio web tier (executePrrOperation, operation prr-mcp) with each caller's own personal access token (credential slot prr_pat); the agent runtime never connects to it directly.",
+      "enabled": true
     }
   ],
   "blockedPatterns": [
