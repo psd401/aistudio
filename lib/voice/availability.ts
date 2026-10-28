@@ -5,7 +5,7 @@
  * 1. Global voice enabled setting (admin kill switch)
  * 2. User has voice-mode tool access (role-based permission)
  * 3. Voice provider and model are configured
- * 4. Google API key is present
+ * 4. Gemini is reachable (Vertex AI WIF when deployed, API key in local dev)
  *
  * Used by:
  * - /api/nexus/voice/availability (HTTP availability check for client)
@@ -15,6 +15,7 @@
  */
 
 import { Settings } from "@/lib/settings-manager"
+import { isGoogleConfigured } from "@/lib/ai/google-provider"
 import { hasCapabilityAccess } from "@/lib/db/drizzle/capabilities"
 import { isSupportedVoiceProvider } from "./provider-factory"
 
@@ -40,7 +41,6 @@ export interface VoiceAvailabilityResult {
     model: string
     language: string
     voiceName: string | null
-    apiKey: string
   }
 }
 
@@ -73,13 +73,12 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
     }
   }
 
-  // 4. Check API key is configured
-  const googleApiKey = await Settings.getGoogleAI()
-  if (!googleApiKey) {
+  // 4. Check Gemini is reachable (Vertex AI WIF, or the API key in local dev)
+  if (!(await isGoogleConfigured())) {
     return {
       available: false,
       reason: "Voice mode is not currently available",
-      internalReason: "Voice provider API key not configured",
+      internalReason: "Voice provider credentials not configured",
       type: "config",
     }
   }
@@ -91,7 +90,6 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
       model: voiceSettings.model,
       language: voiceSettings.language,
       voiceName: voiceSettings.voiceName,
-      apiKey: googleApiKey,
     },
   }
 }

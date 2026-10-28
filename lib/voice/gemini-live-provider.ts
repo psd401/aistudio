@@ -14,6 +14,7 @@
  */
 
 import { GoogleGenAI, Modality } from "@google/genai"
+import { getGoogleGenAIOptions, VERTEX_LIVE_LOCATION } from "@/lib/ai/google-provider"
 import type { Session as GeminiSession, LiveServerMessage, LiveConnectConfig } from "@google/genai"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import type {
@@ -24,7 +25,7 @@ import type {
   TranscriptEntry,
 } from "./types"
 
-const DEFAULT_MODEL = "gemini-2.0-flash-live-001"
+const DEFAULT_MODEL = "gemini-3.8-live"
 /** Max transcript entries to keep in memory — rolling window to bound memory usage */
 const MAX_TRANSCRIPT_ENTRIES = 200
 /** Max audio buffer size: 64KB PCM ≈ 2 seconds at 16kHz 16-bit mono */
@@ -75,10 +76,6 @@ export class GeminiLiveProvider implements VoiceProvider {
       throw new Error("Session already connected. Disconnect first.")
     }
 
-    if (!config.apiKey) {
-      throw new Error("Google API key is required for Gemini Live")
-    }
-
     // Check if already aborted before starting
     if (signal?.aborted) {
       throw new Error("Connection aborted")
@@ -92,7 +89,9 @@ export class GeminiLiveProvider implements VoiceProvider {
       hasSystemInstruction: !!config.systemInstruction,
     })
 
-    const ai = new GoogleGenAI({ apiKey: config.apiKey })
+    // Vertex AI (keyless WIF) when deployed, Gemini API key only in local dev.
+    // Live is not served from the global Vertex endpoint.
+    const ai = new GoogleGenAI(await getGoogleGenAIOptions(VERTEX_LIVE_LOCATION))
     const liveConfig = this.buildLiveConfig(config)
 
     try {

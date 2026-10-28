@@ -103,7 +103,7 @@ const log = createLogger({ module: "TranscriptService" })
  * @param conversationId - UUID of the existing conversation
  * @param userId - Numeric user ID (for ownership verification)
  * @param transcript - Ordered array of transcript entries from the voice session
- * @param voiceModel - The voice model identifier (e.g. "gemini-2.0-flash-live-001")
+ * @param voiceModel - The voice model identifier (e.g. "gemini-3.8-live")
  * @param voiceProvider - The voice provider identifier (e.g. "gemini-live") for guardrail audit trails
  * @returns Result with message count, filtered count, and processing time
  * @throws Error if conversation not found/not owned, or transaction fails

@@ -1,8 +1,8 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAzure } from '@ai-sdk/azure';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { Settings } from '@/lib/settings-manager';
+import { createGoogleModelProvider } from '@/lib/ai/google-provider';
 import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
 import { getBedrockCredentialProvider } from '@/lib/ai/bedrock-credentials';
 import { ErrorFactories } from '@/lib/error-utils';
@@ -88,21 +88,13 @@ async function createOpenAIModel(modelId: string): Promise<LanguageModel> {
 }
 
 /**
- * Google AI Provider - Supports Gemini models
+ * Google Provider - Gemini models via Vertex AI (deployed) or the Gemini API
+ * key (local dev only); see lib/ai/google-provider.ts.
  */
 async function createGoogleModel(modelId: string): Promise<LanguageModel> {
   try {
-    const apiKey = await Settings.getGoogleAI();
-    if (!apiKey) {
-      log.error('Google API key not configured');
-      throw ErrorFactories.sysConfigurationError('Google API key not configured');
-    }
-
     log.debug(`Creating Google model: ${modelId}`);
-    // Scope the DB-sourced key to this client instead of mutating process.env at
-    // request time (REV-COR-505 / REV-REF-034). Mirrors gemini-adapter.ts and
-    // image-generation-service.ts.
-    const google = createGoogleGenerativeAI({ apiKey });
+    const google = await createGoogleModelProvider();
     return google(modelId);
   } catch (error) {
     log.error('Failed to create Google model', { modelId, error });

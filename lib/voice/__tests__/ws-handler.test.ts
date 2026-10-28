@@ -60,7 +60,6 @@ const mockVoiceAccess = {
           model: "gemini-2.0-flash-live-001",
           language: "en-US",
           voiceName: null,
-          apiKey: "test-api-key",
         },
       })
     } else {

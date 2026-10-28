@@ -1,5 +1,6 @@
 import { Settings } from "@/lib/settings-manager"
 import { createLogger } from "@/lib/logger"
+import { isGoogleConfigured } from "@/lib/ai/google-provider"
 
 const log = createLogger({ module: "provider-credentials" })
 
@@ -18,15 +19,15 @@ const ALL_CHAT_PROVIDERS = ["openai", "google", "amazon-bedrock", "azure", "lati
  */
 export async function getConfiguredChatProviders(): Promise<Set<string>> {
   try {
-    const [openAiKey, googleKey, azure, latimerKey] = await Promise.all([
+    const [openAiKey, googleConfigured, azure, latimerKey] = await Promise.all([
       Settings.getOpenAI(),
-      Settings.getGoogleAI(),
+      isGoogleConfigured(),
       Settings.getAzureOpenAI(),
       Settings.getLatimer(),
     ])
     const configured = new Set<string>(["amazon-bedrock"])
     if (openAiKey?.trim()) configured.add("openai")
-    if (googleKey?.trim()) configured.add("google")
+    if (googleConfigured) configured.add("google")
     if (azure.key?.trim() && azure.resourceName?.trim()) configured.add("azure")
     if (latimerKey?.trim()) configured.add("latimer")
     return configured
