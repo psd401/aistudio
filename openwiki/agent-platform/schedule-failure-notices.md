@@ -15,7 +15,7 @@ openwiki:
     - lib/agent-schedules/run-reader.ts
     - lib/agent-schedules/service.ts
     - infra/database/schema/188-agent-schedule-owner-notified.sql
-  symbols: [decideScheduleFailureNotice, isWorkspaceAuthFailure, buildScheduleFailureNoticeText, FAILURE_STREAK_SQL, readFailureStreak, markOwnerNotified, deliverScheduledResultWithDependencies, recordScheduledDeferral, notifyOwnerIfScheduleFailing, monitorStoppedJob, processDeferredChatDelivery, processScheduledRunSettlement, consecutiveFailuresBySchedule, FAILING_SCHEDULE_THRESHOLD]
+  symbols: [decideScheduleFailureNotice, isWorkspaceAuthFailure, isPrrCredentialFailure, consentLinkRequestFor, buildScheduleFailureNoticeText, FAILURE_STREAK_SQL, readFailureStreak, markOwnerNotified, deliverScheduledResultWithDependencies, recordScheduledDeferral, notifyOwnerIfScheduleFailing, monitorStoppedJob, processDeferredChatDelivery, processScheduledRunSettlement, consecutiveFailuresBySchedule, FAILING_SCHEDULE_THRESHOLD]
   test_paths:
     - infra/lambdas/agent-cron/schedule-failure-notice.test.ts
     - infra/lambdas/agent-cron/failure-streak-query.test.ts
@@ -28,7 +28,7 @@ openwiki:
   invariants:
     - A run whose Chat post is queued for retry is recorded deferred, never success, until the router settles it.
     - At most one owner notice per failure streak; the owner_notified_at stamp is the suppression state.
-    - A revoked Google grant notifies on the first failure; other failures notify at three consecutive failures.
+    - A revoked Google grant or a PRR token error notifies on the first failure; other failures notify at three consecutive failures.
     - A notice is best-effort and never changes the outcome of a run.
   validation_commands:
     - cd infra/lambdas/agent-cron && bun test schedule-failure-notice.test.ts failure-streak-query.test.ts deferred-delivery-run.test.ts promoted-failure-notice.test.ts
@@ -95,12 +95,14 @@ flowchart TD
     C -- yes --> Z
     C -- no --> D{"Workspace auth failure in the untruncated or newest error?"}
     D -- yes --> E["Notify now, reason auth"]
-    D -- no --> F{"Streak at least 3?"}
+    D -- no --> P{"PRR token error prr_token_missing or prr_token_rejected?"}
+    P -- yes --> Q["Notify now, reason prr-credential"]
+    P -- no --> F{"Streak at least 3?"}
     F -- yes --> G["Notify, reason streak"]
     F -- no --> Z
 ```
 
-*Caption: the auth branch fires on the first failure, because nothing recovers until the owner reconnects; the streak branch waits for the threshold.*
+*Caption: the auth and PRR-token branches fire on the first failure, because nothing recovers until the owner reconnects or saves a new token; the streak branch waits for the threshold.*
 
 Rules and the reason each exists:
 
@@ -111,9 +113,13 @@ Rules and the reason each exists:
 
 The message is built by `buildScheduleFailureNoticeText`. An auth notice carries a Google reconnect link when one could be minted, and otherwise asks the owner to reply. A streak notice says the schedule "has not reached you" for N runs, because a `deferred` run may still land. It names the last reason and asks the owner to have the agent check the schedule. Its text uses single-asterisk bold because it is composed in the Lambda and never passes through the Markdown-to-Chat converter.
 
+### PRR token failures
+
+A PSD Public Records token failure is a third reason, `prr-credential`, with the same first-failure behavior as an auth failure. `isPrrCredentialFailure` matches only the `psd-prr` skill's own codes, `prr_token_missing` and `prr_token_rejected`, and never prose that mentions PRR. The check runs after the Google auth check, so a run that lost both gets the Google notice first. The owner's fix is a credential-entry link for the `prr_pat` slot, not a Google consent link, which is why `consentLinkRequestFor` maps each reason to its own link request. The PRR notice text tells the owner to create a new token at the PRR access page, and it asks them to paste the token into the link page, not into chat. Token format and the skill are in [psd-prr](overview.md#psd-public-records-psd-prr-1991).
+
 ### Consent link
 
-For an auth failure, `mintOwnerConsentLink` POSTs `kind: user_account` to `/api/agent/consent-link` on the web tier. The request is signed with the scheduled invocation context and the per-request proof headers from `createAgentRequestProof`, and the owner comes from the schedule record, not from the request. The call has a five-second timeout. It returns `null` on any failure, including a missing `APP_BASE_URL` or internal key, a non-OK response, and a URL whose origin is not the app's own `https` origin. The owner still gets the DM with the reply-to-ask fallback. The consent-link route is the same one used by [Credential Entry](credential-entry.md), with a different `kind`.
+`consentLinkRequestFor` maps each reason to the consent request. For an auth failure, `mintOwnerConsentLink` POSTs `kind: user_account` to `/api/agent/consent-link` on the web tier. For a PRR token failure it POSTs `kind: credential_entry` with `name: prr_pat`, see [Credential Entry](credential-entry.md). A streak notice requests no link. The request is signed with the scheduled invocation context and the per-request proof headers from `createAgentRequestProof`, and the owner comes from the schedule record, not from the request. The call has a five-second timeout. It returns `null` on any failure, including a missing `APP_BASE_URL` or internal key, a non-OK response, and a URL whose origin is not the app's own `https` origin. The owner still gets the DM with the reply-to-ask fallback. The consent-link route is the same one used by [Credential Entry](credential-entry.md), with a different `kind`.
 
 ### Stamping and failure handling
 
