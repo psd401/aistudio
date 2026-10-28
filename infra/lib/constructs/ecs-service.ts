@@ -1051,11 +1051,13 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
       AGENT_SCHEDULE_DLQ_ARN:
         `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:psd-agent-async-dlq-${environment}`,
-      // Keyless Vertex AI for Deep Research (lib/ai/google-vertex-wif.ts).
+      // Keyless Vertex AI for every Gemini call: chat, Google Search
+      // grounding, image, voice (Live) and Deep Research
+      // (lib/ai/google-provider.ts, lib/ai/google-vertex-wif.ts).
       // Google side: psd401/psd-gcp-infra vertex-ai.tf, whose `vertex-ai`
       // provider trusts this service's task role BY NAME. The name is
       // CDK-generated; if this role is ever replaced, add the new name there
-      // first or Deep Research fails closed. None of these is a secret.
+      // first or every Gemini feature fails closed. None of these is a secret.
       GOOGLE_VERTEX_WIF_AUDIENCE:
         '//iam.googleapis.com/projects/1022506104054/locations/global/' +
         'workloadIdentityPools/aws-agent-broker/providers/vertex-ai',

@@ -5,7 +5,7 @@
  * 1. VOICE_ENABLED=false → disabled reason (type: permission)
  * 2. No tool access → role reason (type: permission)
  * 3. Missing/unsupported provider → config reason (type: config)
- * 4. Missing API key → config reason (type: config)
+ * 4. Gemini credentials not configured → config reason (type: config)
  * 5. All checks pass → available: true
  *
  * Issue #876
@@ -13,12 +13,16 @@
 
 // Mock settings
 const mockGetVoice = jest.fn()
-const mockGetGoogleAI = jest.fn()
 jest.mock("@/lib/settings-manager", () => ({
   Settings: {
     getVoice: (...args: unknown[]) => mockGetVoice(...args),
-    getGoogleAI: (...args: unknown[]) => mockGetGoogleAI(...args),
   },
+}))
+
+// Mock Gemini credential probe (Vertex WIF or local-dev API key)
+const mockIsGoogleConfigured = jest.fn()
+jest.mock("@/lib/ai/google-provider", () => ({
+  isGoogleConfigured: (...args: unknown[]) => mockIsGoogleConfigured(...args),
 }))
 
 // Mock hasCapabilityAccess
@@ -52,7 +56,7 @@ function defineGetVoiceAvailabilitySuite1Part1() {
     })
     mockHasCapabilityAccess.mockResolvedValue(true)
     mockIsSupportedVoiceProvider.mockReturnValue(true)
-    mockGetGoogleAI.mockResolvedValue("test-google-api-key")
+    mockIsGoogleConfigured.mockResolvedValue(true)
   })
 
   it("should return available: true with validated config when all checks pass", async () => {
@@ -64,12 +68,11 @@ function defineGetVoiceAvailabilitySuite1Part1() {
       model: "gemini-2.0-flash-live-001",
       language: "en-US",
       voiceName: null,
-      apiKey: "test-google-api-key",
     })
     expect(mockGetVoice).toHaveBeenCalled()
     expect(mockHasCapabilityAccess).toHaveBeenCalledWith(TEST_SUB, "voice-mode")
     expect(mockIsSupportedVoiceProvider).toHaveBeenCalledWith("gemini-live")
-    expect(mockGetGoogleAI).toHaveBeenCalled()
+    expect(mockIsGoogleConfigured).toHaveBeenCalled()
   })
 
   it("should return disabled reason when VOICE_ENABLED is false", async () => {
@@ -88,7 +91,7 @@ function defineGetVoiceAvailabilitySuite1Part1() {
     expect(result.type).toBe("permission")
     // Should short-circuit — no tool access or config checks
     expect(mockHasCapabilityAccess).not.toHaveBeenCalled()
-    expect(mockGetGoogleAI).not.toHaveBeenCalled()
+    expect(mockIsGoogleConfigured).not.toHaveBeenCalled()
   })
 
   it("should return role reason when user lacks voice-mode access", async () => {
@@ -100,7 +103,7 @@ function defineGetVoiceAvailabilitySuite1Part1() {
     expect(result.reason).toBe("Voice mode is not enabled for your role")
     expect(result.type).toBe("permission")
     // Should short-circuit — no config checks
-    expect(mockGetGoogleAI).not.toHaveBeenCalled()
+    expect(mockIsGoogleConfigured).not.toHaveBeenCalled()
   })
 
   it("should return config reason when provider is missing", async () => {
@@ -118,8 +121,8 @@ function defineGetVoiceAvailabilitySuite1Part1() {
     expect(result.reason).toBe("Voice mode is not currently available")
     expect(result.internalReason).toBe("Voice provider not configured or unsupported")
     expect(result.type).toBe("config")
-    // Should short-circuit — no API key check
-    expect(mockGetGoogleAI).not.toHaveBeenCalled()
+    // Should short-circuit — no credential check
+    expect(mockIsGoogleConfigured).not.toHaveBeenCalled()
   })
 
   it("should return config reason when model is missing", async () => {
@@ -159,18 +162,18 @@ function defineGetVoiceAvailabilitySuite1Part2() {it("should return config reaso
     expect(mockIsSupportedVoiceProvider).toHaveBeenCalledWith("unsupported-provider")
   })
 
-  it("should return config reason when Google API key is missing", async () => {
-    mockGetGoogleAI.mockResolvedValue(null)
+  it("should return config reason when Gemini credentials are not configured", async () => {
+    mockIsGoogleConfigured.mockResolvedValue(false)
 
     const result = await getVoiceAvailability(TEST_SUB)
 
     expect(result.available).toBe(false)
     expect(result.reason).toBe("Voice mode is not currently available")
-    expect(result.internalReason).toBe("Voice provider API key not configured")
+    expect(result.internalReason).toBe("Voice provider credentials not configured")
     expect(result.type).toBe("config")
   })
 
-  it("should return config with provider, model, language, voiceName, and apiKey when available", async () => {
+  it("should return config with provider, model, language, and voiceName (no credentials) when available", async () => {
     const result = await getVoiceAvailability(TEST_SUB)
 
     expect(result.available).toBe(true)
@@ -179,7 +182,6 @@ function defineGetVoiceAvailabilitySuite1Part2() {it("should return config reaso
       model: "gemini-2.0-flash-live-001",
       language: "en-US",
       voiceName: null,
-      apiKey: "test-google-api-key",
     })
   })
 
@@ -210,10 +212,10 @@ function defineGetVoiceAvailabilitySuite1Part2() {it("should return config reaso
     await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Database unavailable")
   })
 
-  it("should propagate errors when Settings.getGoogleAI() throws", async () => {
-    mockGetGoogleAI.mockRejectedValue(new Error("Secrets Manager error"))
+  it("should propagate errors when the Gemini credential probe throws", async () => {
+    mockIsGoogleConfigured.mockRejectedValue(new Error("Vertex AI auth is partly configured"))
 
-    await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Secrets Manager error")
+    await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Vertex AI auth is partly configured")
   })
 
   it("should check conditions in order and short-circuit", async () => {
@@ -231,7 +233,7 @@ function defineGetVoiceAvailabilitySuite1Part2() {it("should return config reaso
     expect(mockGetVoice).toHaveBeenCalledTimes(1)
     expect(mockHasCapabilityAccess).not.toHaveBeenCalled()
     expect(mockIsSupportedVoiceProvider).not.toHaveBeenCalled()
-    expect(mockGetGoogleAI).not.toHaveBeenCalled()
+    expect(mockIsGoogleConfigured).not.toHaveBeenCalled()
   })
 }
 
