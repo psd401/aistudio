@@ -45,7 +45,7 @@ function header(token: SubjectToken, key: string): string | undefined {
 }
 
 describe('createGoogleChatWifAuth', () => {
-  test('impersonates the configured Chat service account with only chat.bot', () => {
+  test('builds the client for the configured Chat service account and chat.bot scope', () => {
     const auth = createGoogleChatWifAuth({
       env: ENV,
       awsCredentials: fakeCredentials,

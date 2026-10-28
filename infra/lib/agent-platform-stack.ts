@@ -144,6 +144,8 @@ const GOOGLE_CHAT_SERVICE_ACCOUNTS: Record<
   string | undefined
 > = {
   dev: 'psd-agent-chat-dev@psd-aistudio-dev.iam.gserviceaccount.com',
+  // No staging Chat app exists and infra/bin/infra.ts instantiates no
+  // staging stack; googleChatAuthEnvironment fails a staging synth closed.
   staging: undefined,
   prod: 'psd-agent-chat@aistudio-462612.iam.gserviceaccount.com',
 };

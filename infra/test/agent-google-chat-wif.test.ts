@@ -82,7 +82,7 @@ beforeAll(() => {
 });
 
 describe('Google Chat keyless auth (#1989)', () => {
-  test('the Chat service-account key secret no longer exists', () => {
+  test('no Chat key secret and no GOOGLE_CREDENTIALS_SECRET_ARN reference remain', () => {
     const secrets = template.findResources('AWS::SecretsManager::Secret', {
       Properties: { Name: `psd-agent-google-sa-${ENV}` },
     });
