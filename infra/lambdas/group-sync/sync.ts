@@ -119,54 +119,6 @@ export function resolveSelectedGroups(
   return [...selected.values()];
 }
 
-/**
- * A raw directory membership node — a member is either a person (has an email)
- * or a nested group (has a groupEmail whose members must be expanded). Mirrors
- * both the Cloud Identity and Admin SDK member shapes after mapping.
- */
-export interface RawMember {
-  email: string | null;
-  /** Present when this member is itself a group (Admin SDK type=GROUP). */
-  nestedGroupEmail?: string | null;
-}
-
-/**
- * Flatten a group's membership transitively for directory APIs that only return
- * DIRECT members (Admin SDK Directory `members.list`). Recurses into nested
- * groups via `fetchDirect`, guarding against cycles. Cloud Identity's
- * searchTransitiveMemberships already returns the flattened set, so that path
- * does not need this.
- *
- * Returns normalized, de-duplicated person emails only.
- */
-export async function flattenTransitiveMembers(
-  rootGroupEmail: string,
-  fetchDirect: (groupEmail: string) => Promise<RawMember[]>
-): Promise<string[]> {
-  const personEmails = new Set<string>();
-  const visitedGroups = new Set<string>();
-
-  const walk = async (groupEmail: string): Promise<void> => {
-    const key = normalizeEmail(groupEmail);
-    if (!key || visitedGroups.has(key)) return;
-    visitedGroups.add(key);
-
-    const members = await fetchDirect(groupEmail);
-    for (const m of members) {
-      const nested = normalizeEmail(m.nestedGroupEmail);
-      if (nested) {
-        await walk(nested);
-        continue;
-      }
-      const email = normalizeEmail(m.email);
-      if (email) personEmails.add(email);
-    }
-  };
-
-  await walk(rootGroupEmail);
-  return [...personEmails];
-}
-
 /** The DB + directory + observability ports the reconciler drives. */
 export interface GroupSyncPorts {
   /** Active selection rules (picks ∪ prefixes). */

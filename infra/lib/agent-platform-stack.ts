@@ -122,6 +122,52 @@ const RETIRED_BUNDLED_SKILL_NAMES = ['psd-classified-evaluation'] as const;
  */
 const ROUTER_QUEUE_MAX_RECEIVE_COUNT = 3;
 
+// Keyless Google Chat app auth (#1989): AWS → Google workload identity
+// federation replaces the service-account JSON key that lived in
+// `psd-agent-google-sa-{env}`. The `chat-app` provider in the
+// `aws-agent-broker` pool (project psd-aistudio-broker, number 1022506104054)
+// trusts ONLY the Chat-calling roles below, and each env's Chat app service
+// account grants workloadIdentityUser to that env's roles — both defined in
+// psd401/psd-gcp-infra chat-app-wif.tf. Renaming any of these roles, or adding
+// a new Chat caller, needs a matching change there first or Chat posts fail
+// closed:
+//   psd-agent-router-execution-role-{env}         (router Lambda)
+//   psd-agent-cron-execution-role-{env}           (cron Lambda)
+//   psd-agent-triage-worker-execution-role-{env}  (triage worker Lambda)
+//   psd-agent-triage-digest-execution-role-{env}  (triage digest Lambda)
+//   psd-agent-job-runner-task-role-{env}          (job-runner Fargate task)
+const GOOGLE_CHAT_WIF_AUDIENCE =
+  '//iam.googleapis.com/projects/1022506104054/locations/global/' +
+  'workloadIdentityPools/aws-agent-broker/providers/chat-app';
+const GOOGLE_CHAT_SERVICE_ACCOUNTS: Record<
+  AgentPlatformStackProps['environment'],
+  string | undefined
+> = {
+  dev: 'psd-agent-chat-dev@psd-aistudio-dev.iam.gserviceaccount.com',
+  // No staging Chat app exists and infra/bin/infra.ts instantiates no
+  // staging stack; googleChatAuthEnvironment fails a staging synth closed.
+  staging: undefined,
+  prod: 'psd-agent-chat@aistudio-462612.iam.gserviceaccount.com',
+};
+
+/** Env vars every Chat-posting compute unit needs for google-chat-wif.ts. */
+function googleChatAuthEnvironment(
+  environment: AgentPlatformStackProps['environment'],
+): Record<string, string> {
+  const serviceAccountEmail = GOOGLE_CHAT_SERVICE_ACCOUNTS[environment];
+  if (!serviceAccountEmail) {
+    throw new Error(
+      `No Google Chat app service account is defined for "${environment}". ` +
+        'Add it to GOOGLE_CHAT_SERVICE_ACCOUNTS and grant its WIF trust in ' +
+        'psd401/psd-gcp-infra chat-app-wif.tf before deploying.',
+    );
+  }
+  return {
+    GOOGLE_CHAT_WIF_AUDIENCE,
+    GOOGLE_CHAT_SERVICE_ACCOUNT_EMAIL: serviceAccountEmail,
+  };
+}
+
 class AgentPlatformBuildResources {
   ecrRepository!: ecr.Repository;
   workspaceBucket!: s3.Bucket;
@@ -148,7 +194,6 @@ class AgentPlatformBuildResources {
   mintLambda!: lambda.Function;
   mintLambdaRole!: iam.Role;
   routerQueue!: sqs.Queue;
-  googleCredentialsSecret!: secretsmanager.ISecret;
   triageDigestFunctionName!: string;
   cronFunctionName!: string;
   skillBuilderFunctionName!: string;
@@ -261,8 +306,6 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly mintLambdaRole: iam.Role;
   /** SQS queue for Google Chat Pub/Sub messages */
   public readonly routerQueue: sqs.Queue;
-  /** Google service account credentials secret */
-  public readonly googleCredentialsSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: AgentPlatformStackProps) {
     super(scope, id, props);
@@ -339,7 +382,6 @@ export class AgentPlatformStack extends cdk.Stack {
     this.mintLambda = resources.mintLambda;
     this.mintLambdaRole = resources.mintLambdaRole;
     this.routerQueue = resources.routerQueue;
-    this.googleCredentialsSecret = resources.googleCredentialsSecret;
   }
 
   private validateProps(props: AgentPlatformStackProps): void {
@@ -754,23 +796,6 @@ export class AgentPlatformStack extends cdk.Stack {
     resources: AgentPlatformBuildResources,
   ): void {
     const { environment } = props;
-    // =====================================================================
-    // 4f. Google Credentials Secret (CDK-managed, operator populates)
-    // =====================================================================
-    // CDK creates the secret with placeholder value. After deploy, populate
-    // it with the Google service account JSON:
-    //   aws secretsmanager put-secret-value \
-    //     --secret-id psd-agent-google-sa-<env> \
-    //     --secret-string file://service-account.json
-    //
-    // The Lambda reads this at runtime for Google Chat API authentication.
-    resources.googleCredentialsSecret = new secretsmanager.Secret(this, 'GoogleCredentialsSecret', {
-      secretName: `psd-agent-google-sa-${environment}`,
-      description: 'Google service account JSON for Chat API authentication. Populate after deploy with: aws secretsmanager put-secret-value --secret-id psd-agent-google-sa-<env> --secret-string file://service-account.json',
-    });
-    cdk.Tags.of(resources.googleCredentialsSecret).add('Environment', environment);
-    cdk.Tags.of(resources.googleCredentialsSecret).add('ManagedBy', 'cdk');
-
     // =====================================================================
     // 4d. Bedrock API key — CDK-provisioned service-specific credential
     // =====================================================================
@@ -1947,10 +1972,6 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [`${resources.workspaceBucket.bucketArn}/*/attachments/*`],
     }));
 
-    // Grant Secrets Manager read access directly (not through ServiceRoleFactory).
-    // CDK cross-stack refs and new Secret() produce tokens that don't start with
-    // "arn:" at synth time, causing ServiceRoleFactory to double-wrap the ARN.
-    resources.googleCredentialsSecret.grantRead(resources.routerLambdaRole);
     // DB secret — construct the secret from the ARN prop
     resources.dbSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this, 'ImportedDbSecret', props.databaseSecretArn
@@ -2446,7 +2467,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         SCHEDULES_TABLE: resources.schedulesTable.tableName,
-        GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
+        ...googleChatAuthEnvironment(environment),
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName ?? 'aistudio',
@@ -2474,8 +2495,6 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.cronLambda).add('Environment', environment);
     cdk.Tags.of(resources.cronLambda).add('ManagedBy', 'cdk');
 
-    // Grant Cron Lambda access to Google credentials secret
-    resources.googleCredentialsSecret.grantRead(resources.cronLambdaRole);
     resources.agentInvocationSigningSecret.grantRead(resources.cronLambdaRole);
     resources.agentInternalApiKeySecret.grantRead(resources.cronLambdaRole);
     resources.routerQueue.grantSendMessages(resources.cronLambdaRole);
@@ -2821,7 +2840,6 @@ export class AgentPlatformStack extends cdk.Stack {
             resources: [
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
               `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent/${environment}/google-oauth-client-*`,
-              resources.googleCredentialsSecret.secretArn,
             ],
           })],
         }),
@@ -3013,7 +3031,7 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         TRIAGE_TABLE: resources.triageTable.tableName,
         USERS_TABLE: resources.usersTable.tableName,
-        GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
+        ...googleChatAuthEnvironment(environment),
         // Lambda reads <prefix>/MEMORY.md from this bucket to extract the
         // user's task-creation instructions and embed them in the
         // AgentCore prompt verbatim.
@@ -3177,16 +3195,6 @@ export class AgentPlatformStack extends cdk.Stack {
       account: this.account,
       vpcEnabled: false,
       dynamodbTables: [{ name: resources.triageTable.tableName }],
-      additionalPolicies: [
-        new iam.PolicyDocument({
-          statements: [new iam.PolicyStatement({
-            sid: 'GoogleChatCredsRead',
-            effect: iam.Effect.ALLOW,
-            actions: ['secretsmanager:GetSecretValue'],
-            resources: [resources.googleCredentialsSecret.secretArn],
-          })],
-        }),
-      ],
     });
 
     const triageDigestLogGroup = new logs.LogGroup(this, 'TriageDigestLogGroup', {
@@ -3255,7 +3263,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         TRIAGE_TABLE: resources.triageTable.tableName,
-        GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
+        ...googleChatAuthEnvironment(environment),
       },
       architecture: lambda.Architecture.ARM_64,
     });
@@ -3434,7 +3442,7 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName || 'aistudio',
-        GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
+        ...googleChatAuthEnvironment(environment),
         TOKEN_LIMIT_PER_INTERACTION: '100000',
         // The Lambda decides whether an attempt is the one that dead-letters a
         // record; it must read that limit from the queue that enforces it
@@ -3705,8 +3713,18 @@ export class AgentPlatformStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Named task role: the Google Chat WIF provider (#1989) trusts this exact
+    // role name, so it cannot be the CDK auto-generated one.
+    const jobTaskRole = ServiceRoleFactory.createECSTaskRole(this, 'JobRunnerTaskRole', {
+      taskName: 'psd-agent-job-runner',
+      environment,
+      region: this.region,
+      account: this.account,
+    });
+
     const jobTaskDef = new ecs.FargateTaskDefinition(this, 'JobRunnerTaskDef', {
       family: `psd-agent-job-runner-${environment}`,
+      taskRole: jobTaskRole,
       // I/O-bound: the task mostly holds an SSE stream open while the
       // AgentCore microVM does the work. 512/1024 is generous headroom.
       cpu: 512,
@@ -3735,7 +3753,7 @@ export class AgentPlatformStack extends cdk.Stack {
         NODE_ENV: 'production',
         SESSION_LOCKS_TABLE: resources.sessionLocksTable.tableName,
         ROUTER_QUEUE_URL: resources.routerQueue.queueUrl,
-        GOOGLE_CREDENTIALS_SECRET_ARN: resources.googleCredentialsSecret.secretArn,
+        ...googleChatAuthEnvironment(environment),
         AGENT_INVOCATION_SIGNING_SECRET_ID: resources.agentInvocationSigningSecret.secretName,
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
@@ -3747,15 +3765,16 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     // Task role — mirrors ONLY what job-main.ts touches: AgentCore invoke,
-    // the two secrets, the session-locks table, and (via awslogs) the log
-    // group on the execution role.
+    // the invocation-signing and DB secrets, the session-locks table, the
+    // router queue, and (via awslogs) the log group on the execution role.
+    // Google Chat needs no AWS grant: WIF signs sts:GetCallerIdentity, which
+    // every principal may call.
     jobTaskDef.addToTaskRolePolicy(new iam.PolicyStatement({
       sid: 'AgentCoreInvoke',
       effect: iam.Effect.ALLOW,
       actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
       resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
     }));
-    resources.googleCredentialsSecret.grantRead(jobTaskDef.taskRole);
     resources.agentInvocationSigningSecret.grantRead(jobTaskDef.taskRole);
     resources.dbSecret.grantRead(jobTaskDef.taskRole);
     resources.sessionLocksTable.grantReadWriteData(jobTaskDef.taskRole);

@@ -56,6 +56,7 @@ import {
   type PromotionReason,
 } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
+import { createGoogleChatWifAuth } from './google-chat-wif';
 import * as crypto from 'node:crypto';
 import {
   ExecuteStatementCommand,
@@ -234,7 +235,6 @@ const agentCoreSigner = new SignatureV4({
 
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE || '';
-const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
@@ -266,8 +266,6 @@ const runTelemetry = createRunTelemetry(
 // Cached secrets and clients
 // ---------------------------------------------------------------------------
 
-let cachedGoogleCredentials: string | null = null;
-let credentialsCachedAt: number | null = null;
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000;
 
 let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
@@ -316,26 +314,6 @@ interface InvokeResult {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function getGoogleCredentials(): Promise<string> {
-  if (
-    cachedGoogleCredentials &&
-    credentialsCachedAt &&
-    Date.now() - credentialsCachedAt < CREDENTIALS_TTL_MS
-  ) {
-    return cachedGoogleCredentials;
-  }
-  if (!GOOGLE_CREDENTIALS_SECRET_ARN) {
-    throw new Error('GOOGLE_CREDENTIALS_SECRET_ARN not configured');
-  }
-  const result = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN }),
-  );
-  cachedGoogleCredentials = result.SecretString || '';
-  credentialsCachedAt = Date.now();
-  cachedChatClient = null;
-  return cachedGoogleCredentials;
-}
 
 async function getInvocationSigningSecret(): Promise<string> {
   if (
@@ -475,15 +453,13 @@ async function mintOwnerConsentLink(
   }
 }
 
+// Keyless WIF auth (#1989); the auth client refreshes its own token.
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
   if (cachedChatClient) return cachedChatClient;
-  const credentialsJson = await getGoogleCredentials();
-  const credentials = JSON.parse(credentialsJson) as Record<string, unknown>;
-  const googleAuth = new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/chat.bot'],
+  cachedChatClient = chatPkg.chat({
+    version: 'v1',
+    auth: createGoogleChatWifAuth(),
   });
-  cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
   return cachedChatClient;
 }
 

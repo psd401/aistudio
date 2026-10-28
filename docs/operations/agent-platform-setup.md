@@ -38,8 +38,12 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
 2. Name: `psd-agent-chat`
 3. Description: "PSD Agent Chat Bot — sends/receives Google Chat messages"
 4. Click **Create and Continue** → skip the optional role grants → **Done**
-5. Click the new service account → **Keys** tab → **Add Key** → **Create new key** → **JSON** → **Create**
-6. Save the downloaded JSON file — this goes into AWS Secrets Manager in Phase 2
+5. Do **not** create a JSON key. The AWS side reaches this account keylessly
+   through workload identity federation (#1989): the `chat-app` provider in the
+   `aws-agent-broker` pool and a `roles/iam.workloadIdentityUser` grant to the
+   Chat-calling AWS roles, both in `psd401/psd-gcp-infra` (`chat-app-wif.tf`).
+   Add the new account's email to `GOOGLE_CHAT_SERVICE_ACCOUNTS` in
+   `infra/lib/agent-platform-stack.ts`.
 
 #### 1.4 Configure Domain-Wide Delegation
 
@@ -167,16 +171,13 @@ Note the outputs:
 - `RouterQueueArn` — needed for GCP bridge
 - `RouterQueueUrl` — needed for GCP bridge
 
-#### 2.2 Store Google Credentials
+#### 2.2 Google Chat Credentials
 
-The CDK creates an empty secret. Populate it with the service account JSON from step 1.3:
-
-```bash
-aws secretsmanager put-secret-value \
-  --secret-id psd-agent-google-sa-dev \
-  --secret-string file://service-account.json \
-  --region us-east-1
-```
+Nothing to store. The router, cron, triage worker, triage digest and job-runner
+authenticate to the Chat API with AWS → Google workload identity federation
+(`google-chat-wif.ts` in each Lambda directory). Before the first deploy,
+confirm `psd401/psd-gcp-infra` trusts this environment's role names (listed
+above `GOOGLE_CHAT_WIF_AUDIENCE` in `infra/lib/agent-platform-stack.ts`).
 
 #### 2.3 Build and Push Docker Image
 
@@ -344,7 +345,8 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
 | `DATABASE_HOST` | CDK | Aurora cluster endpoint |
 | `DATABASE_SECRET_ARN` | CDK | Secrets Manager ARN for DB credentials |
 | `DATABASE_NAME` | CDK | Database name (default: aistudio) |
-| `GOOGLE_CREDENTIALS_SECRET_ARN` | CDK | Secrets Manager ARN for Google SA JSON |
+| `GOOGLE_CHAT_WIF_AUDIENCE` | CDK | Google STS audience of the `chat-app` WIF provider |
+| `GOOGLE_CHAT_SERVICE_ACCOUNT_EMAIL` | CDK | Chat app service account the WIF token impersonates |
 | `GUARDRAIL_FAIL_OPEN` | CDK | 'true' to allow messages when guardrails fail (default: 'false') |
 | `ALLOWED_DOMAINS` | CDK | Comma-separated email domains (default: psd401.net) |
 | `MAX_MESSAGE_LENGTH` | CDK | Max input chars (default: 10000) |
