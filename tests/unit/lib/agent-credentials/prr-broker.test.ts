@@ -203,6 +203,17 @@ describe("PRR token handling", () => {
     }
   )
 
+  it.each([
+    [403, { status: "forbidden" }],
+    [429, { status: "rate-limited" }],
+  ])("maps a PRR %s on the handshake like the same status on a call", async (status, expected) => {
+    statusFor.initialize = status
+    await expect(
+      executePrrOperation({ ...OWNER, method: "tools/list", toolName: undefined, toolArgs: {} })
+    ).resolves.toMatchObject(expected)
+    expect(calls.map((call) => call.message.method)).toEqual(["initialize"])
+  })
+
   it("maps a PRR 403 to forbidden and a 429 to rate-limited", async () => {
     statusFor["tools/call"] = 403
     await expect(

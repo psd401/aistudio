@@ -335,8 +335,6 @@ interface StreamableMcpServer {
   label: string;
   url: string;
   authorization: string;
-  /** Returned when the server answers 401 to the session handshake. */
-  rejected: OperationResult;
 }
 
 async function streamableMcpRequest(
@@ -393,11 +391,12 @@ async function streamableMcpRequest(
 
 /**
  * initialize → notifications/initialized. Returns the server's session id
- * (undefined when it issues none), or the server's `rejected` result on 401.
+ * (undefined when it issues none), or the failed handshake response so the
+ * caller maps 401/403/429 exactly as it would for the operation itself.
  */
 async function initializeMcpSession(
   server: StreamableMcpServer,
-): Promise<string | undefined | OperationResult> {
+): Promise<{ sessionId: string | undefined } | { failed: Response }> {
   const initialized = await streamableMcpRequest(server, {
     jsonrpc: "2.0",
     id: crypto.randomUUID(),
@@ -408,12 +407,7 @@ async function initializeMcpSession(
       clientInfo: { name: "aistudio-owner-broker", version: "1" },
     },
   });
-  if (initialized.response.status === 401) return server.rejected;
-  if (!initialized.response.ok) {
-    throw new Error(
-      `${server.label} initialize HTTP ${initialized.response.status}`,
-    );
-  }
+  if (!initialized.response.ok) return { failed: initialized.response };
   const sessionId =
     initialized.response.headers.get("mcp-session-id") || undefined;
   const notification = await streamableMcpRequest(
@@ -431,7 +425,7 @@ async function initializeMcpSession(
       `${server.label} initialized notification HTTP ${notification.response.status}`,
     );
   }
-  return sessionId;
+  return { sessionId };
 }
 
 /** Open a session and run one tools/list or tools/call against it. */
@@ -442,9 +436,11 @@ async function runStreamableMcpOperation(
     toolName: string | undefined;
     toolArgs: Record<string, unknown>;
   },
-): Promise<{ response: Response; payload: unknown } | OperationResult> {
+): Promise<{ response: Response; payload: unknown }> {
   const initialized = await initializeMcpSession(server);
-  if (typeof initialized === "object") return initialized;
+  if ("failed" in initialized) {
+    return { response: initialized.failed, payload: null };
+  }
   return streamableMcpRequest(
     server,
     {
@@ -456,7 +452,7 @@ async function runStreamableMcpOperation(
           ? { name: operation.toolName, arguments: operation.toolArgs }
           : {},
     },
-    initialized,
+    initialized.sessionId,
   );
 }
 
@@ -471,7 +467,6 @@ function plaudServer(accessToken: string): StreamableMcpServer {
     label: "Plaud",
     url: safeHttpsUrl(process.env.PLAUD_MCP_URL, "https://mcp.plaud.ai/mcp"),
     authorization: `Bearer ${safeAccessToken}`,
-    rejected: { status: "needs-auth", reason: "Plaud rejected owner token" },
   };
 }
 
@@ -609,7 +604,6 @@ export async function executePlaudOperation(input: {
     plaudServer(access.token),
     operationInput,
   );
-  if ("status" in operation) return operation;
   if (operation.response.status === 401) {
     return { status: "needs-auth", reason: "Plaud rejected owner token" };
   }
@@ -745,11 +739,9 @@ export async function executePrrOperation(input: {
       label: "PRR",
       url: safeHttpsUrl(process.env.PRR_MCP_URL, "https://prr.psd401.net/mcp"),
       authorization: `Token ${token}`,
-      rejected: PRR_TOKEN_REJECTED,
     },
     operationInput,
   );
-  if ("status" in operation) return operation;
   const { response, payload } = operation;
   if (response.status === 401) return PRR_TOKEN_REJECTED;
   if (response.status === 403) return prrForbidden(response);
