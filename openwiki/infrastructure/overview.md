@@ -503,7 +503,7 @@ psd-agent/{env}/agent-gateway
 psd-agent-creds/{env}/user/{email}/google-workspace-user
 ```
 
-There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). See [Keyless Google Auth](google-workload-identity.md).
+There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). Deep Research on the web tier also authenticates to Vertex AI keylessly; its `GOOGLE_VERTEX_*` settings are plain container environment variables in `infra/lib/constructs/ecs-service.ts`, not secrets. The Gemini API key in the settings table remains for the other Gemini features. See [Keyless Google Auth](google-workload-identity.md#vertex-ai-for-deep-research).
 
 ### Access Pattern
 
