@@ -89,7 +89,7 @@
       "Action": "iam:PassRole",
       "Resource": [
         "arn:aws:iam::*:role/*JobRunner*",
-        "arn:aws:iam::*:role/psd-agent-job-runner-task-role-*"
+        "arn:aws:iam::*:role/psd-agent-job-runner-task-role-prod"
       ],
       "Condition": {
         "StringEquals": {

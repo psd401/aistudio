@@ -89,6 +89,15 @@ describe("job-runner PassRole is allowed by the permissions boundary", () => {
     )
   })
 
+  it.each([
+    ["dev", "prod"],
+    ["prod", "dev"],
+  ] as const)("%s boundary does not allow PassRole on the %s task role", (env, other) => {
+    // Dev and prod share one AWS account; the boundary must not widen
+    // cross-environment reach (the old *JobRunner* pattern predates this).
+    expect(allowsPassRole(env, `psd-agent-job-runner-task-role-${other}`)).toBe(false)
+  })
+
   it("the case-sensitive match that broke is real: `*JobRunner*` alone misses the new name", () => {
     expect(
       iamGlobMatches(
