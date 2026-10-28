@@ -1051,6 +1051,16 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
       AGENT_SCHEDULE_DLQ_ARN:
         `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:psd-agent-async-dlq-${environment}`,
+      // Keyless Vertex AI for Deep Research (lib/ai/google-vertex-wif.ts).
+      // Google side: psd401/psd-gcp-infra vertex-ai.tf, whose `vertex-ai`
+      // provider trusts this service's task role BY NAME. The name is
+      // CDK-generated; if this role is ever replaced, add the new name there
+      // first or Deep Research fails closed. None of these is a secret.
+      GOOGLE_VERTEX_WIF_AUDIENCE:
+        '//iam.googleapis.com/projects/1022506104054/locations/global/' +
+        'workloadIdentityPools/aws-agent-broker/providers/vertex-ai',
+      GOOGLE_VERTEX_SERVICE_ACCOUNT_EMAIL: `aistudio-vertex@psd-aistudio-${environment}.iam.gserviceaccount.com`,
+      GOOGLE_VERTEX_PROJECT_ID: `psd-aistudio-${environment}`,
       // The web-tier owner-operation broker calls psd-data-mcp on behalf of
       // AgentCore skills, so the endpoint belongs on this trusted container.
       PSD_DATA_MCP_URL:

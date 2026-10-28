@@ -32,6 +32,11 @@ type Interaction = Interactions.Interaction;
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
+import {
+  VERTEX_INTERACTIONS_LOCATION,
+  getVertexWifAuthClient,
+  readVertexWifConfig,
+} from '@/lib/ai/google-vertex-wif';
 
 const log = createLogger({ module: 'gemini-deep-research-service' });
 
@@ -265,7 +270,21 @@ export function mapInteractionError(err: unknown): DeepResearchError {
   return createError('AGENT_FAILURE', `Deep Research failed: ${msg.slice(0, 300)}`);
 }
 
+/**
+ * Deployed (ECS): Vertex AI with keyless WIF auth (lib/ai/google-vertex-wif.ts,
+ * psd401/psd-gcp-infra vertex-ai.tf). The Gemini API key path remains only
+ * where the GOOGLE_VERTEX_* variables are all unset, i.e. local development.
+ */
 async function createGoogleClient(): Promise<GoogleGenAI> {
+  const vertex = readVertexWifConfig();
+  if (vertex) {
+    return new GoogleGenAI({
+      vertexai: true,
+      project: vertex.projectId,
+      location: VERTEX_INTERACTIONS_LOCATION,
+      googleAuthOptions: { authClient: getVertexWifAuthClient(vertex) },
+    });
+  }
   const apiKey = await Settings.getGoogleAI();
   if (!apiKey) {
     throw ErrorFactories.sysConfigurationError('Google API key not configured');
