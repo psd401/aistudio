@@ -281,7 +281,7 @@ Migrations run via Lambda function:
 | Lambda | Purpose |
 |--------|---------|
 | `textract/` | OCR document processing |
-| `group-sync/` | Google Directory synchronization |
+| `group-sync/` | Google Directory synchronization, reading Cloud Identity groups through keyless workload identity federation (#1989); see [Keyless Google Auth](google-workload-identity.md) |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
 | `agent-router/` | Agent request routing with promoted turn recovery, and settlement of deferred scheduled runs (#1890) |
 | `agent-cron/` | Scheduled run invocation, telemetry, silent reply delivery (#1853), and owner notices for failing schedules (#1890) |
@@ -332,7 +332,7 @@ The `agent-cron` Lambda handles scheduled agent runs (watchers, monitors, period
 
 **Silent Reply** (#1853): When the harness surfaces `metadata.silent`, `toInvokeResult()` maps it to `InvokeResult.silent` and `deliverScheduledResult()` records success without posting. This prevents noise from filling DMs with empty "📋 name" headers on every run.
 
-**Failure Notices and Deferred Settlement** (#1890): A scheduled run whose Chat post is queued for retry is recorded `deferred`, not `success`, and the router settles that row once the queued post lands or dead-letters. A failure that makes a schedule visibly broken (three consecutive failed runs, or one Google Workspace authorization failure such as a revoked grant) sends its owner one DM. The cron Lambda reads `APP_BASE_URL` and `AGENT_INTERNAL_API_KEY_SECRET_ID` only to mint the re-authorization link for that DM, and falls back to link-free wording when either is unset. Behavior, invariants, and tests are in **[agent-platform/schedule-failure-notices.md](../agent-platform/schedule-failure-notices.md)**.
+**Failure Notices and Deferred Settlement** (#1890): A scheduled run whose Chat post is queued for retry is recorded `deferred`, not `success`, and the router settles that row once the queued post lands or dead-letters. A failure that makes a schedule visibly broken (three consecutive failed runs, or one Google Workspace authorization failure such as a revoked grant) sends its owner one DM. The cron Lambda reads `APP_BASE_URL` and `AGENT_INTERNAL_API_KEY_SECRET_ID` only to mint the owner's fix-it link for that DM (a re-authorization link, or a credential-entry link for a PSD Public Records token), and falls back to link-free wording when either is unset. Behavior, invariants, and tests are in **[agent-platform/schedule-failure-notices.md](../agent-platform/schedule-failure-notices.md)**.
 
 **Deploy order**: `infra/lib/agent-platform-stack.ts` makes the cron Lambda depend on the router (`cronLambda.node.addDependency(routerLambda)`). The router parses the Chat-delivery envelope with a strict key allowlist, so it must accept the new `scheduledRun` reference before the cron sends it. The dependency runs one way only, because the router does not reference the cron.
 
@@ -356,6 +356,8 @@ The `agent-router` Lambda handles agent request routing with automatic failure t
 Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
 
 **Thread Mapping Reads** (#1891): For an owner DM turn that is not a `/btw` aside, `resolveOwnerConversationSessionId()` reads the thread-sessions table (`THREAD_SESSIONS_TABLE`; the router role has `dynamodb:GetItem` only) before choosing the conversation session. It fails open: a missing table, row, owner mismatch or read error falls back to the ordinary `space + thread` session. See **[agent-platform/overview.md → Scheduled Post Thread Mapping](../agent-platform/overview.md#scheduled-post-thread-mapping-1891)** for the owner check and expiry rules.
+
+Chat replies are sent with the keyless client built by `google-chat-wif.ts`, so the router holds no Google key; see **[Keyless Google Auth](google-workload-identity.md)**.
 
 For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
@@ -500,6 +502,8 @@ psd-agent/{env}/gcp-dwd-config
 psd-agent/{env}/agent-gateway
 psd-agent-creds/{env}/user/{email}/google-workspace-user
 ```
+
+There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). See [Keyless Google Auth](google-workload-identity.md).
 
 ### Access Pattern
 

@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, harness delivery of files named in MEDIA reply lines, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, harness delivery of files named in MEDIA reply lines, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, PSD Public Records (PRR) requests through each person's own token, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -42,7 +42,12 @@ openwiki:
     - infra/agent-image/openclaw_aborted_hint.mjs
     - infra/agent-image/openclaw_runtime_patch.mjs
     - infra/agent-image/openclaw_patch_text.mjs
+    - infra/agent-image/skills/psd-prr/run.js
+    - app/api/agent/credentials/route.ts
+    - infra/lambdas/agent-cron/schedule-failure-notice.ts
   test_paths:
+    - tests/unit/lib/agent-credentials/prr-broker.test.ts
+    - infra/agent-image/skills/psd-prr/run.test.js
     - infra/agent-image/test_aborted_run_hint.py
     - tests/unit/agent-image-openclaw-runtime-patch.test.ts
     - tests/unit/lib/agent-workspace/drive-delivery.test.ts
@@ -123,6 +128,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-credentials` — Owner-bound credential broker client. Collects user-held secrets through a one-time entry link (`request_entry.js`) instead of chat; see [Credential Entry](credential-entry.md) (#1887)
 - `psd-canva` — Canva design integration
 - `psd-plaud` — Plaud note integration
+- `psd-prr` — PSD Public Records (PRR) requests, overdue items, collection tasks, and draft letters through PRR's hosted MCP with the caller's own personal token (see [PSD Public Records](#psd-public-records-psd-prr-1991))
 - `psd-open-adaptive-district` — Open Adaptive District operating model (six-week build cycle)
 
 **Analysis & Reporting**
@@ -436,6 +442,61 @@ The Dockerfile installs `jq`, `poppler-utils` (`pdftotext`, `pdftoppm`), and `fi
 **Focused tests**: `tests/unit/agent-owner-operation-broker.test.ts`, describe `OpenAI image operation`. It checks that the request uses `AGENT_IMAGE_MODEL_ID`, that OpenAI's code and message reach the thrown error, and that an unreadable error body leaves the bare `HTTP 502`.
 
 **Minimal validation (quiet)**: `bunx jest --silent tests/unit/agent-owner-operation-broker.test.ts`.
+
+### PSD Public Records (`psd-prr`, #1991)
+
+**When to consult**: changing which PRR tools the agent may name, the personal-token handling, the `needs-auth` path, or the scheduled PRR failure notice. The skill is the agent-facing side of the district's Public Records system. Its tools run on the web tier, so the token never reaches the agent.
+
+**Flow**:
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-prr run.js
+    participant Route as /api/agent/credentials
+    participant Broker as executePrrOperation
+    participant Creds as AgentCredentialBroker getUserOnly
+    participant PRR as PRR hosted MCP
+    Skill->>Route: signed request with operation prr-mcp
+    Route->>Broker: method, toolName, toolArgs
+    Broker->>Broker: allow only PRR_ALLOWED_TOOLS
+    Broker->>Creds: read the caller's prr_pat slot
+    Creds-->>Broker: stored token or none
+    Broker->>PRR: initialize, then tools/call with Authorization Token
+    PRR-->>Broker: MCP result, 401, 403, or 429
+    Broker-->>Skill: ok, needs-auth, forbidden, or rate-limited
+```
+
+*Caption: the route dispatches `prr-mcp` in `executeOwnerIntegrationOperation`, which runs before the shared-credential switch. The skill only receives the MCP result or a status.*
+
+**Mechanics**: `app/api/agent/credentials/route.ts` dispatches `prr-mcp` to `executePrrOperation` in `lib/agent-credentials/owner-operation-broker.ts`. That function validates the method (`tools/list` or `tools/call`), checks the tool name against `PRR_ALLOWED_TOOLS` (eleven `psd_prr_*` tools), and reads the caller's own `prr_pat` slot with `AgentCredentialBroker.getUserOnly`. The token must start `prr_pat_` and be header-safe, or the call is reported as `prr_token_rejected` without contacting PRR. The request goes to `PRR_MCP_URL`, defaulting to `https://prr.psd401.net/mcp`, using the Streamable HTTP session helpers shared with the Plaud operation (`runStreamableMcpOperation`).
+
+**Authorization model**: PRR's own roles and human-only hand-offs decide what each person may do. The allowlist only bounds which tools the agent can name. Allowed in owner and scheduled mode alike, because a daily overdue check is a schedule. The three tools that write (`psd_prr_clarification_letter_draft`, `psd_prr_collection_task_notes_propose`, `psd_prr_exemption_citations_suggest`) create drafts or proposals inside PRR. A person approves them in PRR's staff UI, so nothing reaches a requester.
+
+**Token handling**: Like Freshservice, the caller's own token is the authorization. A missing token returns `prr_token_missing`, and a 401 from PRR returns `prr_token_rejected`. The skill turns either into a one-time credential-entry link for `prr_pat`. The `psd-prr` skill never receives the token. The slot's shape rule is enforced in `lib/agent-workspace/credential-entry.ts` (`SLOT_PREFIXES`), see [Credential Entry](credential-entry.md).
+
+**Reading results**: `SKILL.md` requires reporting `total` from `psd_prr_overdue_requests_list`, not `count`, which is only the rows on one page. When `scan_complete` is false, `total` is a floor, and the agent must say "at least N". The regression suite includes `infra/agent-image/skills/psd-prr/evals/overdue-total-floor.yaml` for this rule.
+
+**Exit codes** (`run.js`): 0 ok, 1 usage, 10 needs-auth, 11 forbidden, 12 upstream error, 14 rate-limited.
+
+**Scheduled failure notice**: a scheduled run that fails with `prr_token_missing` or `prr_token_rejected` earns an owner DM on the first failure, with a `prr_pat` credential-entry link. The detection and link selection are in [Schedule Failure Streaks and Owner Notices](schedule-failure-notices.md#prr-token-failures).
+
+**Invariants**
+- The allowlist holds exactly the eleven PRR tools in `psd-prr/SKILL.md`. Adding a tool needs both the allowlist and the skill table.
+- The stored value is never echoed in a result or log line. `executePrrOperation` returns only the MCP payload.
+- PRR's hosted MCP is reachable only from the web tier. `infra/policies/mcp-allowlist.json` records the endpoint as enabled for that reason, and `infra/test/agent-skill-cdn-allowlist.test.ts` lists `prr.psd401.net` as a permitted reference host.
+
+**Change navigation**
+- Start in `executePrrOperation`, then `validatedPrrOperation` (tool allowlist) and `prrToken` (token shape).
+- A new PRR tool needs changes in `PRR_ALLOWED_TOOLS`, the `SKILL.md` table, and, for an operation the agent can invoke directly, `run.js`.
+- A new PRR error code must also be handled by `isPrrCredentialFailure` in `infra/lambdas/agent-cron/schedule-failure-notice.ts` if it should reach the owner.
+
+**Focused tests**:
+- `tests/unit/lib/agent-credentials/prr-broker.test.ts`: `PRR broker allowlist`, `PRR token handling` (missing token, whitespace trimming, 403 and 429 mapping), and `PRR Streamable HTTP session`.
+- `tests/unit/agent-credentials-route.test.ts`: the `prr-mcp` dispatch.
+- `infra/agent-image/skills/psd-prr/run.test.js`: CLI exit codes and the `needs-auth` link path.
+- `infra/lambdas/agent-cron/schedule-failure-notice.test.ts`: `isPrrCredentialFailure` and the `prr-credential` notice.
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/lib/agent-credentials/prr-broker.test.ts` and `cd infra/agent-image/skills/psd-prr && bun test run.test.js`. For a change limited to `run.js` or `SKILL.md`, the skill suite is enough. CI runs that suite from the agent-image skill test list in `.github/workflows/ci.yml`.
 
 ### Media Relay Transport
 
