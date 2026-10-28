@@ -367,6 +367,7 @@ jobs:
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-prr/run.test.js
           infra/agent-image/skills/psd-publish-file/publish.test.js
           infra/agent-image/skills/psd-plaud/run.test.js
           infra/agent-image/skills/psd-skills-meta/authority.test.js

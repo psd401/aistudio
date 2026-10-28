@@ -24,11 +24,11 @@ const MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_MCP_SSE_EVENTS = 2_000;
 const MAX_MCP_SSE_LINE_BYTES = 1024 * 1024;
 const MAX_PLAUD_ACCESS_TOKEN_BYTES = 16 * 1024;
-const MAX_PLAUD_SESSION_ID_BYTES = 1024;
+const MAX_MCP_SESSION_ID_BYTES = 1024;
 
 type OperationResult =
   | { status: "ok"; result: unknown }
-  | { status: "needs-auth"; reason: string }
+  | { status: "needs-auth"; reason: string; code?: string }
   | { status: "forbidden"; detail: string }
   | { status: "rate-limited" };
 
@@ -278,11 +278,12 @@ function parseMcpResponse(
   contentType: string,
   text: string,
   id: string,
+  label: string,
 ): unknown {
   if (!contentType.includes("text/event-stream")) {
     const parsed: unknown = JSON.parse(text);
     if (!isRecord(parsed) || parsed.id !== id) {
-      throw new Error("Plaud MCP response did not match the request id");
+      throw new Error(`${label} MCP response did not match the request id`);
     }
     return parsed;
   }
@@ -294,7 +295,7 @@ function parseMcpResponse(
       eventCount > MAX_MCP_SSE_EVENTS ||
       Buffer.byteLength(line, "utf8") > MAX_MCP_SSE_LINE_BYTES
     ) {
-      throw new Error("Plaud MCP SSE response exceeds protocol limits");
+      throw new Error(`${label} MCP SSE response exceeds protocol limits`);
     }
     const value = line.slice(5).trim();
     if (!value || value === "[DONE]") continue;
@@ -305,54 +306,67 @@ function parseMcpResponse(
       // Ignore SSE keepalives.
     }
   }
-  throw new Error("Plaud MCP response did not match the request id");
+  throw new Error(`${label} MCP response did not match the request id`);
 }
 
-function validatedPlaudHeader(
+function validatedMcpHeader(
   value: string,
   name: string,
   maxBytes: number,
+  label: string,
 ): string {
   if (
     value.length === 0 ||
     Buffer.byteLength(value, "utf8") > maxBytes ||
     !/^[\x21-\x7E]+$/.test(value)
   ) {
-    throw new Error(`Plaud ${name} is invalid`);
+    throw new Error(`${label} ${name} is invalid`);
   }
   return value;
 }
 
-async function plaudMcpRequest(
-  accessToken: string,
+/**
+ * One upstream Streamable-HTTP MCP server, as the owner broker speaks to it.
+ * `authorization` is the complete header value; callers validate the
+ * credential part before building it so a stored value can never smuggle a
+ * header line.
+ */
+interface StreamableMcpServer {
+  label: string;
+  url: string;
+  authorization: string;
+}
+
+async function streamableMcpRequest(
+  server: StreamableMcpServer,
   message: Record<string, unknown>,
   sessionId?: string,
   options: { allowEmpty?: boolean } = {},
 ): Promise<{ response: Response; payload: unknown }> {
-  const safeAccessToken = validatedPlaudHeader(
-    accessToken,
-    "access token",
-    MAX_PLAUD_ACCESS_TOKEN_BYTES,
-  );
   const safeSessionId = sessionId
-    ? validatedPlaudHeader(sessionId, "session id", MAX_PLAUD_SESSION_ID_BYTES)
+    ? validatedMcpHeader(
+        sessionId,
+        "session id",
+        MAX_MCP_SESSION_ID_BYTES,
+        server.label,
+      )
     : undefined;
-  const response = await fetch(
-    safeHttpsUrl(process.env.PLAUD_MCP_URL, "https://mcp.plaud.ai/mcp"),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        Authorization: `Bearer ${safeAccessToken}`,
-        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-        ...(safeSessionId ? { "Mcp-Session-Id": safeSessionId } : {}),
-      },
-      body: JSON.stringify(message),
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
+  const response = await fetch(server.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: server.authorization,
+      "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+      ...(safeSessionId ? { "Mcp-Session-Id": safeSessionId } : {}),
     },
-  );
+    body: JSON.stringify(message),
+    redirect: "error",
+    signal: AbortSignal.timeout(30_000),
+  });
+  // An error status carries no JSON-RPC payload worth parsing; the caller
+  // maps the status itself.
+  if (!response.ok) return { response, payload: null };
   const contentType = response.headers.get("content-type") || "";
   const text = await readBoundedText(
     response,
@@ -366,7 +380,93 @@ async function plaudMcpRequest(
     payload:
       options.allowEmpty && !text
         ? null
-        : parseMcpResponse(contentType, text, String(message.id ?? "")),
+        : parseMcpResponse(
+            contentType,
+            text,
+            String(message.id ?? ""),
+            server.label,
+          ),
+  };
+}
+
+/**
+ * initialize → notifications/initialized. Returns the server's session id
+ * (undefined when it issues none), or the failed handshake response so the
+ * caller maps 401/403/429 exactly as it would for the operation itself.
+ */
+async function initializeMcpSession(
+  server: StreamableMcpServer,
+): Promise<{ sessionId: string | undefined } | { failed: Response }> {
+  const initialized = await streamableMcpRequest(server, {
+    jsonrpc: "2.0",
+    id: crypto.randomUUID(),
+    method: "initialize",
+    params: {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "aistudio-owner-broker", version: "1" },
+    },
+  });
+  if (!initialized.response.ok) return { failed: initialized.response };
+  const sessionId =
+    initialized.response.headers.get("mcp-session-id") || undefined;
+  const notification = await streamableMcpRequest(
+    server,
+    {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+      params: {},
+    },
+    sessionId,
+    { allowEmpty: true },
+  );
+  if (!notification.response.ok) {
+    throw new Error(
+      `${server.label} initialized notification HTTP ${notification.response.status}`,
+    );
+  }
+  return { sessionId };
+}
+
+/** Open a session and run one tools/list or tools/call against it. */
+async function runStreamableMcpOperation(
+  server: StreamableMcpServer,
+  operation: {
+    method: "tools/call" | "tools/list";
+    toolName: string | undefined;
+    toolArgs: Record<string, unknown>;
+  },
+): Promise<{ response: Response; payload: unknown }> {
+  const initialized = await initializeMcpSession(server);
+  if ("failed" in initialized) {
+    return { response: initialized.failed, payload: null };
+  }
+  return streamableMcpRequest(
+    server,
+    {
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method: operation.method,
+      params:
+        operation.method === "tools/call"
+          ? { name: operation.toolName, arguments: operation.toolArgs }
+          : {},
+    },
+    initialized.sessionId,
+  );
+}
+
+function plaudServer(accessToken: string): StreamableMcpServer {
+  const safeAccessToken = validatedMcpHeader(
+    accessToken,
+    "access token",
+    MAX_PLAUD_ACCESS_TOKEN_BYTES,
+    "Plaud",
+  );
+  return {
+    label: "Plaud",
+    url: safeHttpsUrl(process.env.PLAUD_MCP_URL, "https://mcp.plaud.ai/mcp"),
+    authorization: `Bearer ${safeAccessToken}`,
   };
 }
 
@@ -489,45 +589,6 @@ async function plaudAccessToken(
   return { token: payload.access_token };
 }
 
-async function initializePlaudSession(
-  accessToken: string,
-): Promise<string | undefined | OperationResult> {
-  const initialized = await plaudMcpRequest(accessToken, {
-    jsonrpc: "2.0",
-    id: crypto.randomUUID(),
-    method: "initialize",
-    params: {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: "aistudio-owner-broker", version: "1" },
-    },
-  });
-  if (initialized.response.status === 401) {
-    return { status: "needs-auth", reason: "Plaud rejected owner token" };
-  }
-  if (!initialized.response.ok) {
-    throw new Error(`Plaud initialize HTTP ${initialized.response.status}`);
-  }
-  const sessionId =
-    initialized.response.headers.get("mcp-session-id") || undefined;
-  const notification = await plaudMcpRequest(
-    accessToken,
-    {
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-      params: {},
-    },
-    sessionId,
-    { allowEmpty: true },
-  );
-  if (!notification.response.ok) {
-    throw new Error(
-      `Plaud initialized notification HTTP ${notification.response.status}`,
-    );
-  }
-  return sessionId;
-}
-
 export async function executePlaudOperation(input: {
   ownerEmail: string;
   sessionId: string;
@@ -539,23 +600,9 @@ export async function executePlaudOperation(input: {
   const broker = new AgentCredentialBroker();
   const access = await plaudAccessToken(input, broker);
   if ("result" in access) return access.result;
-  const initialized = await initializePlaudSession(access.token);
-  if (typeof initialized === "object") return initialized;
-  const operation = await plaudMcpRequest(
-    access.token,
-    {
-      jsonrpc: "2.0",
-      id: crypto.randomUUID(),
-      method: operationInput.method,
-      params:
-        operationInput.method === "tools/call"
-          ? {
-              name: operationInput.toolName,
-              arguments: operationInput.toolArgs,
-            }
-          : {},
-    },
-    initialized,
+  const operation = await runStreamableMcpOperation(
+    plaudServer(access.token),
+    operationInput,
   );
   if (operation.response.status === 401) {
     return { status: "needs-auth", reason: "Plaud rejected owner token" };
@@ -566,6 +613,141 @@ export async function executePlaudOperation(input: {
   }
   const payload = operation.payload;
   if (!isRecord(payload)) throw new Error("Plaud MCP returned invalid data");
+  return {
+    status: "ok",
+    result: payload.error ? payload : (payload.result ?? null),
+  };
+}
+
+/**
+ * PSD Public Records (PRR) hosted MCP — https://prr.psd401.net/mcp.
+ *
+ * PRR authenticates hosted MCP with a static per-user personal access token
+ * (`Authorization: Token prr_pat_<prefix>_<secret>`), not OAuth. Each staff
+ * member creates their own at https://prr.psd401.net/agent-access (90-day
+ * maximum lifetime) and saves it through the one-time credential-entry link
+ * into the owner-scoped slot `prr_pat`. PRR enforces roles and human-only
+ * hand-offs server-side, so the allowlist below only bounds WHICH tools the
+ * agent can name; it is not the authorization.
+ *
+ * All eleven tools are allowed in owner AND scheduled mode (a daily PRR check
+ * is a schedule). The three write tools only create drafts or proposals that
+ * a human approves in PRR's staff UI — none reaches a requester.
+ */
+export const PRR_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
+  "psd_prr_requests_list",
+  "psd_prr_request_get",
+  "psd_prr_overdue_requests_list",
+  "psd_prr_collection_tasks_list",
+  "psd_prr_record_systems_list",
+  "psd_prr_exemptions_list",
+  "psd_prr_audit_log_search",
+  "psd_prr_capabilities_list",
+  "psd_prr_clarification_letter_draft",
+  "psd_prr_collection_task_notes_propose",
+  "psd_prr_exemption_citations_suggest",
+]);
+
+const PRR_CREDENTIAL_NAME = "prr_pat";
+const PRR_TOKEN_PREFIX = "prr_pat_";
+const MAX_PRR_TOKEN_BYTES = 1024;
+const PRR_TOKEN_REJECTED: OperationResult = {
+  status: "needs-auth",
+  reason: "PRR rejected the personal access token (missing, expired, or revoked)",
+  code: "prr_token_rejected",
+};
+
+function validatedPrrOperation(input: {
+  method: unknown;
+  toolName: unknown;
+  toolArgs: unknown;
+}): {
+  method: "tools/call" | "tools/list";
+  toolName: string | undefined;
+  toolArgs: Record<string, unknown>;
+} {
+  if (input.method !== "tools/call" && input.method !== "tools/list") {
+    throw new AgentCredentialInputError("Unsupported PRR MCP method");
+  }
+  if (
+    input.method === "tools/call" &&
+    (typeof input.toolName !== "string" ||
+      !PRR_ALLOWED_TOOLS.has(input.toolName))
+  ) {
+    throw new AgentCredentialInputError("Unsupported PRR tool");
+  }
+  return {
+    method: input.method,
+    toolName: input.method === "tools/call" ? (input.toolName as string) : undefined,
+    toolArgs: boundedRecord(input.toolArgs ?? {}, "PRR tool arguments"),
+  };
+}
+
+/**
+ * The stored token, shape-checked. A value that is not a header-safe
+ * `prr_pat_…` string is reported as rejected (the user must issue a new one)
+ * and is never sent anywhere.
+ */
+function prrToken(value: string): string | null {
+  const token = value.trim();
+  if (
+    !token.startsWith(PRR_TOKEN_PREFIX) ||
+    token.length === PRR_TOKEN_PREFIX.length ||
+    Buffer.byteLength(token, "utf8") > MAX_PRR_TOKEN_BYTES ||
+    !/^[\x21-\x7E]+$/.test(token)
+  ) {
+    return null;
+  }
+  return token;
+}
+
+async function prrForbidden(response: Response): Promise<OperationResult> {
+  const detail = await readBoundedText(response, 4096, []).catch(() => "");
+  return {
+    status: "forbidden",
+    detail: detail.slice(0, 1024) || "PRR denied this request for your role",
+  };
+}
+
+export async function executePrrOperation(input: {
+  ownerEmail: string;
+  sessionId: string;
+  method: unknown;
+  toolName: unknown;
+  toolArgs: unknown;
+}): Promise<OperationResult> {
+  const operationInput = validatedPrrOperation(input);
+  const credential = await new AgentCredentialBroker().getUserOnly(
+    input.ownerEmail,
+    PRR_CREDENTIAL_NAME,
+    { sessionId: input.sessionId },
+  );
+  if (!credential) {
+    // A user who never saved a token is in a normal state; the skill turns
+    // this into a one-time credential-entry link for `prr_pat`.
+    return {
+      status: "needs-auth",
+      reason: "PRR personal access token is not stored",
+      code: "prr_token_missing",
+    };
+  }
+  const token = prrToken(credential.value);
+  if (!token) return PRR_TOKEN_REJECTED;
+
+  const operation = await runStreamableMcpOperation(
+    {
+      label: "PRR",
+      url: safeHttpsUrl(process.env.PRR_MCP_URL, "https://prr.psd401.net/mcp"),
+      authorization: `Token ${token}`,
+    },
+    operationInput,
+  );
+  const { response, payload } = operation;
+  if (response.status === 401) return PRR_TOKEN_REJECTED;
+  if (response.status === 403) return prrForbidden(response);
+  if (response.status === 429) return { status: "rate-limited" };
+  if (!response.ok) throw new Error(`PRR MCP HTTP ${response.status}`);
+  if (!isRecord(payload)) throw new Error("PRR MCP returned invalid data");
   return {
     status: "ok",
     result: payload.error ? payload : (payload.result ?? null),

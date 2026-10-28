@@ -72,6 +72,7 @@ import {
 import {
   buildScheduleFailureNoticeText,
   decideScheduleFailureNotice,
+  type ScheduleFailureNoticeReason,
 } from './schedule-failure-notice';
 import {
   loadAuthorizedSchedule,
@@ -368,8 +369,25 @@ async function getInternalApiKey(): Promise<string | null> {
 const CONSENT_LINK_ROUTE = '/api/agent/consent-link';
 const CONSENT_LINK_TIMEOUT_MS = 5000;
 
+type OwnerConsentLinkRequest =
+  | { kind: 'user_account' }
+  | { kind: 'credential_entry'; name: 'prr_pat' };
+
+/** Which link fixes each auth-type notice reason; `streak` gets none. */
+function consentLinkRequestFor(
+  reason: ScheduleFailureNoticeReason,
+): OwnerConsentLinkRequest | null {
+  if (reason === 'auth') return { kind: 'user_account' };
+  if (reason === 'prr-credential') {
+    return { kind: 'credential_entry', name: 'prr_pat' };
+  }
+  return null;
+}
+
 /**
- * Mint the owner's Google re-authorization link for a failure DM (#1890).
+ * Mint the owner's fix-it link for a failure DM (#1890): a Google
+ * re-authorization link by default, or a one-time credential-entry link for
+ * the owner's PSD Public Records token (`prr_pat`).
  *
  * Deliberately best-effort and `null` on every failure: the owner must still
  * hear that their schedule is broken even if the link cannot be issued (the
@@ -382,6 +400,7 @@ async function mintOwnerConsentLink(
   schedule: { ownerEmail: string; scheduleId: string; workspacePrefix: string },
   sessionId: string,
   log: Logger,
+  consent: OwnerConsentLinkRequest = { kind: 'user_account' },
 ): Promise<string | null> {
   if (!APP_BASE_URL) return null;
   try {
@@ -396,7 +415,7 @@ async function mintOwnerConsentLink(
         workspacePrefix: schedule.workspacePrefix,
       },
     );
-    const requestBody = JSON.stringify({ kind: 'user_account' });
+    const requestBody = JSON.stringify(consent);
     const response = await fetch(
       `${APP_BASE_URL.replace(/\/+$/, '')}${CONSENT_LINK_ROUTE}`,
       {
@@ -2180,10 +2199,15 @@ async function notifyOwnerIfScheduleFailing(
       currentErrorMessage: recorded.fullErrorMessage,
     });
     if (!decision.notify) return;
-    const consentUrl =
-      decision.reason === 'auth'
-        ? await dependencies.mintOwnerConsentLink(target, sessionId, log)
-        : null;
+    const consentRequest = consentLinkRequestFor(decision.reason);
+    const consentUrl = consentRequest
+      ? await dependencies.mintOwnerConsentLink(
+        target,
+        sessionId,
+        log,
+        consentRequest,
+      )
+      : null;
     await dependencies.sendChatMessage(
       target.dmSpaceName,
       buildScheduleFailureNoticeText({

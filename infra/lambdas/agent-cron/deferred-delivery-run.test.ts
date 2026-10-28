@@ -56,6 +56,7 @@ interface Recorded {
   enqueued: Array<unknown[]>;
   dms: string[];
   consentCalls: number;
+  consentRequests: unknown[];
   notifiedStamps: Array<Record<string, unknown>>;
 }
 
@@ -72,6 +73,7 @@ function dependencies(
     enqueued: [],
     dms: [],
     consentCalls: 0,
+    consentRequests: [],
     notifiedStamps: [],
   };
   return {
@@ -108,8 +110,9 @@ function dependencies(
         recorded.dms.push(text);
         return null;
       }) as never,
-      mintOwnerConsentLink: (async () => {
+      mintOwnerConsentLink: (async (...args: unknown[]) => {
         recorded.consentCalls += 1;
+        recorded.consentRequests.push(args[3]);
         return options.consentUrl ?? null;
       }) as never,
     },
@@ -314,6 +317,7 @@ describe('the owner hears about a schedule that keeps failing', () => {
     );
 
     expect(recorded.consentCalls).toBe(1);
+    expect(recorded.consentRequests).toEqual([{ kind: 'user_account' }]);
     expect(recorded.dms).toHaveLength(1);
     expect(recorded.dms[0]).toContain(
       '<https://ai.psd401.net/agent-connect?token=abc|Reconnect Google Workspace>',
@@ -433,5 +437,32 @@ describe('the owner hears about a schedule that keeps failing', () => {
 
     expect(recorded.runs[0]).toMatchObject({ status: 'success' });
     expect(recorded.dms).toHaveLength(0);
+  });
+});
+
+describe('the owner hears about a missing or expired PRR token', () => {
+  test('a missing or expired PRR token sends a DM with a prr_pat entry link', async () => {
+    const { recorded, deps } = dependencies({
+      streak: {
+        consecutiveFailures: 1,
+        newestErrorMessage:
+          '{"status":"needs-auth","kind":"prr","code":"prr_token_rejected"}',
+      },
+      consentUrl: 'https://ai.psd401.net/agent-connect-credential?token=abc',
+    });
+
+    await deliverScheduledResultWithDependencies(
+      context({ ok: false }),
+      deps,
+    );
+
+    expect(recorded.consentRequests).toEqual([
+      { kind: 'credential_entry', name: 'prr_pat' },
+    ]);
+    expect(recorded.dms).toHaveLength(1);
+    expect(recorded.dms[0]).toContain(
+      '<https://ai.psd401.net/agent-connect-credential?token=abc|Save your new PRR token>',
+    );
+    expect(recorded.dms[0]).toContain('https://prr.psd401.net/agent-access');
   });
 });

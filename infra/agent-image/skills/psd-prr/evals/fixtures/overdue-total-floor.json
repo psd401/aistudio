@@ -1,0 +1,25 @@
+[
+  {
+    "route": "/api/agent/credentials",
+    "method": "POST",
+    "request_body": {
+      "operation": "prr-mcp",
+      "method": "tools/call",
+      "toolName": "psd_prr_overdue_requests_list"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "status": "ok",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"count\":5,\"total\":17,\"scan_complete\":false,\"requests\":[{\"id\":\"PRR-EVAL-1\"},{\"id\":\"PRR-EVAL-2\"},{\"id\":\"PRR-EVAL-3\"},{\"id\":\"PRR-EVAL-4\"},{\"id\":\"PRR-EVAL-5\"}]}"
+            }
+          ]
+        }
+      }
+    }
+  }
+]

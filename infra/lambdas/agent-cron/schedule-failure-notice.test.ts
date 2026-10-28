@@ -3,6 +3,7 @@ import {
   NOTICE_THRESHOLD,
   buildScheduleFailureNoticeText,
   decideScheduleFailureNotice,
+  isPrrCredentialFailure,
   isWorkspaceAuthFailure,
 } from './schedule-failure-notice';
 import {
@@ -309,5 +310,101 @@ describe('buildScheduleFailureNoticeText', () => {
 
     expect(text).toContain('…');
     expect(text.length).toBeLessThan(900);
+  });
+});
+
+// psd-prr exits with {"status":"needs-auth","code":"prr_token_missing"|...}
+// when the owner's PSD Public Records token is missing, expired, or revoked.
+const PRR_REJECTED =
+  '{"status":"needs-auth","kind":"prr","code":"prr_token_rejected","credentialName":"prr_pat"}';
+
+describe('isPrrCredentialFailure', () => {
+  test.each([
+    [PRR_REJECTED],
+    ['psd-prr: prr_token_missing'],
+    ['PRR_TOKEN_REJECTED'],
+  ])('matches %s', (text) => {
+    expect(isPrrCredentialFailure(text)).toBe(true);
+  });
+
+  test.each([
+    [null],
+    [''],
+    ['Agent temporarily unavailable'],
+    // Another integration's needs-auth must not hand out a PRR link.
+    ['{"status":"needs-auth","kind":"plaud"}'],
+    // Mentioning PRR in ordinary prose is not a credential failure.
+    ['PRR returned 3 overdue requests'],
+  ])('does not match %s', (text) => {
+    expect(isPrrCredentialFailure(text)).toBe(false);
+  });
+});
+
+describe('decideScheduleFailureNotice — PRR personal token failures', () => {
+  test('the first PRR token failure speaks immediately', () => {
+    expect(
+      decide({ consecutiveFailures: 1, newestErrorMessage: PRR_REJECTED }),
+    ).toEqual({ notify: true, reason: 'prr-credential', consecutiveFailures: 1 });
+  });
+
+  test('the untruncated text classifies it too', () => {
+    expect(
+      decide({ consecutiveFailures: 1, newestErrorMessage: ORDINARY }, PRR_REJECTED),
+    ).toEqual({ notify: true, reason: 'prr-credential', consecutiveFailures: 1 });
+  });
+
+  test('a later run in the same streak stays quiet', () => {
+    expect(
+      decide({
+        consecutiveFailures: 5,
+        alreadyNotified: true,
+        newestErrorMessage: PRR_REJECTED,
+      }),
+    ).toEqual({ notify: false });
+  });
+
+  test('a revoked Google grant takes precedence over a PRR token failure', () => {
+    expect(
+      decide(
+        { consecutiveFailures: 1, newestErrorMessage: PRR_REJECTED },
+        `${REVOKED} ${PRR_REJECTED}`,
+      ),
+    ).toEqual({ notify: true, reason: 'auth', consecutiveFailures: 1 });
+  });
+});
+
+describe('buildScheduleFailureNoticeText — PRR personal token', () => {
+  test('carries the credential-entry link and where to create the token', () => {
+    const text = buildScheduleFailureNoticeText({
+      scheduleName: 'Daily PRR check',
+      reason: 'prr-credential',
+      consecutiveFailures: 1,
+      errorMessage: PRR_REJECTED,
+      consentUrl: 'https://ai.psd401.net/agent-connect-credential?token=abc',
+    });
+
+    expect(text).toContain('Daily PRR check');
+    expect(text).toContain('https://prr.psd401.net/agent-access');
+    expect(text).toContain(
+      '<https://ai.psd401.net/agent-connect-credential?token=abc|Save your new PRR token>',
+    );
+    // The link is single-use and short-lived; say how to get another.
+    expect(text).toContain('15 minutes');
+    expect(text).not.toContain('Google');
+    expect(text).not.toContain('prr_token_rejected');
+  });
+
+  test('without a link it asks the owner to request one', () => {
+    const text = buildScheduleFailureNoticeText({
+      scheduleName: 'Daily PRR check',
+      reason: 'prr-credential',
+      consecutiveFailures: 1,
+      errorMessage: PRR_REJECTED,
+      consentUrl: null,
+    });
+
+    expect(text).toContain('https://prr.psd401.net/agent-access');
+    expect(text).toContain('ask me for a PRR token link');
+    expect(text).not.toContain('<http');
   });
 });
