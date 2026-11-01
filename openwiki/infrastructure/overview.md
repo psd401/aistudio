@@ -503,8 +503,7 @@ psd-agent/{env}/agent-gateway
 psd-agent-creds/{env}/user/{email}/google-workspace-user
 ```
 
-<!-- openwiki: broken internal link [google-workload-identity.md#vertex-ai-for-deep-research] heading anchor "vertex-ai-for-deep-research" does not exist in "google-workload-identity.md". Fix the href or restore the target, then delete this comment. -->
-There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). Deep Research on the web tier also authenticates to Vertex AI keylessly; its `GOOGLE_VERTEX_*` settings are plain container environment variables in `infra/lib/constructs/ecs-service.ts`, not secrets. The Gemini API key in the settings table remains for the other Gemini features. See [Keyless Google Auth](google-workload-identity.md#vertex-ai-for-deep-research).
+There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). Deep Research on the web tier also authenticates to Vertex AI keylessly; its `GOOGLE_VERTEX_*` settings are plain container environment variables in `infra/lib/constructs/ecs-service.ts`, not secrets. The Gemini API key in the settings table remains for the other Gemini features. See [Keyless Google Auth](google-workload-identity.md#deep-research-interactions).
 
 ### Access Pattern
 
@@ -907,6 +906,21 @@ Recent workflow changes establish conventions to follow when editing or adding w
 - **Pass expressions to scripts through `env:`, not inline interpolation.** `sdk-version-guard.yml` previously interpolated `${{ steps.version-check.outputs.* }}` and `${{ github.base_ref }}` directly into `run:` and `script:` bodies, which is a template-injection risk. The steps now declare those values in a step-level `env:` block and read them as shell variables or `process.env`. Use the same pattern for any new step that handles branch names, PR fields, or step outputs.
 - **Secret scanning uses a reviewed baseline.** The root `.gitleaksignore` lists fingerprints of reviewed historical findings (documentation placeholders, test fixtures, and one SQL column name). Its header states that anything not listed still fails `security-scan.yml`. Do not add fingerprints for new code to make a scan pass; fix the finding or review it explicitly.
 
+### Dependency Update Policy
+
+**Source**: `/.github/dependabot.yml`
+
+Dependabot opens weekly update PRs (Monday, 10:00 America/Los_Angeles) against `dev`. It covers three ecosystems: `bun` for the root `package.json` and `bun.lock`, `bun` for `/infra`, and `github-actions`. The root and `/infra` entries ignore semver-major updates, because majors are migration work that people schedule; the `github-actions` entry does not, since Action majors are tag bumps that carry runner and security fixes. The file has no `pip` entry, so the agent image's Python pins are outside it (see [Agent Container Python Dependencies](../agent-platform/overview.md#agent-container-python-dependencies)).
+
+Invariants to keep:
+
+- Use the `bun` ecosystem for bun repositories. An `npm` entry edits `package.json` without updating `bun.lock`, which makes the frozen-lockfile install in `psd-ci` refuse the PR.
+- Ignore rules do not suppress Dependabot security alerts, so majors can be ignored without hiding vulnerabilities.
+- Do not use YAML anchors or aliases in this file. Dependabot's parser rejects them, and the config check fails.
+- `infra/lambdas/agent-router` is deliberately not listed, because it ships no committed lockfile and installs with `--frozen-lockfile` to resolve fresh. A Dependabot entry there would reintroduce the `package.json`/lockfile drift this config prevents.
+
+Validation: no unit test covers this file. After an edit, check that the file still parses as YAML and that each ecosystem entry keeps its `directory`, `target-branch`, and `schedule`.
+
 ### Caller Pattern
 
 Caller workflows are minimal—granting permissions and passing configuration:
@@ -961,6 +975,7 @@ Benefits:
 | `/infra/policies/` | Cedar policies |
 | `/infra/agent-image/` | Agent container |
 | `/.github/workflows/` | CI/CD workflows |
+| `/.github/dependabot.yml` | Dependency update policy (see [Dependency Update Policy](#dependency-update-policy)) |
 | `/.gitleaksignore` | Reviewed secret-scan baseline (see [Workflow Hardening Rules](#workflow-hardening-rules)) |
 
 ---
