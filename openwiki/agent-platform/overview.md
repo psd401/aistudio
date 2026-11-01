@@ -427,6 +427,24 @@ Skills run in the agent container defined by `/infra/agent-image/Dockerfile`. Th
 
 The Dockerfile installs `jq`, `poppler-utils` (`pdftotext`, `pdftoppm`), and `file` in the same apt layer as the base tools. The model reaches for them in `exec` on its own. Its own comment records 47 "not found" failures across about 25 users between 2026-10-04 and 2026-10-26. Add a tool to that layer when the model keeps calling it directly, and keep the install in the existing `RUN` rather than adding a new one.
 
+### Agent Container Python Dependencies
+
+**When to consult**: changing the bedrock-agentcore SDK, the `aiohttp` floor, the PDF engine, or any Python package the agent container imports.
+
+**Source**: `/infra/agent-image/requirements-agentcore.in` (top-level inputs) and `/infra/agent-image/requirements-agentcore.txt` (the compiled, hash-pinned closure). The Dockerfile installs the closure into `/opt/agentcore-venv` with `pip install --require-hashes -r`, so the image build fails on any hash mismatch.
+
+Why hashes: the agent container holds IAM reach to the `psd-agent-creds` and `psd-agent` secret paths, so a substituted build-time dependency would be a credential-exposure path. The image build is the supply-chain test.
+
+Current pins in the compiled file: `aiohttp==3.14.4` (the `.in` floor was raised to `>=3.14.4` in the same change), `bedrock-agentcore==1.18.1`, `boto3==1.43.38`, and `pymupdf4llm==0.3.4`. `pymupdf4llm` stays on the pre-1.0 line on purpose, because 1.x pulls in the onnxruntime and numpy ML stack.
+
+Invariants to keep:
+
+- Never hand-edit hashes. Regenerate with `uv pip compile --universal --generate-hashes --python-version 3.11 --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt`, then re-prepend the comment header. The `-o` flag overwrites the whole file, header included.
+- The header comment is stale. It still names `bedrock-agentcore==1.15.1` and `aiohttp>=3.9.0`, and the Dockerfile comment also says 1.15.1. The pins in the file and the `.in` floors are authoritative. Update the header when you change a pin.
+- Keep `pip`, not `uv`, as the validating installer. A base-image Python or pip change can shift wheel-tag resolution.
+
+Validation: `python3 -m venv /tmp/verify-venv && /tmp/verify-venv/bin/pip install --no-cache-dir --require-hashes -r requirements-agentcore.txt --dry-run`, run from `/infra/agent-image` on Python 3.11 aarch64. Run the full image build (`/infra/agent-image/build-and-push.sh`) only when the closure or the Dockerfile install step changes. Those builds are expensive and need the base image. The header also records that the `bedrock_agentcore` API used by `agentcore_wrapper.py` was verified against 1.15.1, so re-check `agentcore_wrapper.py` when bumping the SDK.
+
 ### Agent Image Generation (`psd-image-gen`)
 
 **When to consult**: changing the image model, the OpenAI image request body, or the error text an image failure produces. Nexus chat image generation is a separate path. It is documented in [app-features/overview.md](../app-features/overview.md#gemini-image-model-ids-1967).
@@ -508,8 +526,7 @@ sequenceDiagram
 
 ### Deep Research (`psd-deep-research`)
 
-<!-- openwiki: broken internal link [../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research] heading anchor "vertex-ai-for-deep-research" does not exist in "../infrastructure/google-workload-identity.md". Fix the href or restore the target, then delete this comment. -->
-**When to consult**: changing the start or status broker operations, the one-run-per-user concurrency rule, the resume behavior after a cut-off turn, or the CLI output. The Vertex client that makes the upstream calls is documented in [Keyless Google Auth](../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research); this section covers the agent-facing contract.
+**When to consult**: changing the start or status broker operations, the one-run-per-user concurrency rule, the resume behavior after a cut-off turn, or the CLI output. The Vertex client that makes the upstream calls is documented in [Keyless Google Auth](../infrastructure/google-workload-identity.md#deep-research-interactions); this section covers the agent-facing contract.
 
 **Flow**: the skill's `research.js` calls `/api/agent/credentials` with `deep-research-start`. The start reserves a lease, creates the interaction, and binds the lease to the `interactionId`. The CLI then polls `deep-research-status`.
 
