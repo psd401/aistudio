@@ -319,6 +319,26 @@ export async function createDeepResearchInteraction(
 }
 
 /**
+ * The text the run was started with (its user_input step), or null when the
+ * interaction has none. Used to resume a run only for the same question.
+ */
+export async function getDeepResearchInteractionPrompt(
+  interactionId: string
+): Promise<string | null> {
+  const client = await createGoogleClient();
+  try {
+    const interaction = await client.interactions.get(interactionId);
+    const text = (interaction.steps ?? [])
+      .flatMap((step) => (step.type === 'user_input' ? (step.content ?? []) : []))
+      .flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
+      .join('');
+    return text.length > 0 ? text : null;
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
+}
+
+/**
  * Fetch one interaction snapshot. Completed runs include the same flattened
  * report and citations used by the existing Nexus path.
  */

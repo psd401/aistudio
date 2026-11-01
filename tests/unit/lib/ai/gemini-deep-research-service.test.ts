@@ -54,6 +54,7 @@ import {
   cancelDeepResearchInteraction,
   createDeepResearchInteraction,
   getDeepResearchInteraction,
+  getDeepResearchInteractionPrompt,
   mapInteractionError,
 } from "@/lib/ai/gemini-deep-research-service"
 
@@ -217,5 +218,29 @@ describe("Gemini Deep Research split lifecycle", () => {
     })
 
     expect(mapInteractionError(classified)).toBe(classified)
+  })
+})
+
+describe("Gemini Deep Research original prompt", () => {
+  it("returns the text of the run's user_input step", async () => {
+    interactionGetMock.mockResolvedValueOnce({
+      id: "interaction-1",
+      status: "in_progress",
+      steps: [
+        { type: "user_input", content: [{ type: "text", text: "Research later start times" }] },
+        { type: "model_output", content: [{ type: "text", text: "Partial" }] },
+      ],
+    })
+
+    await expect(getDeepResearchInteractionPrompt("interaction-1")).resolves.toBe(
+      "Research later start times"
+    )
+    expect(interactionGetMock).toHaveBeenCalledWith("interaction-1")
+  })
+
+  it("returns null when the run has no user input", async () => {
+    interactionGetMock.mockResolvedValueOnce({ id: "interaction-1", status: "in_progress", steps: [] })
+
+    await expect(getDeepResearchInteractionPrompt("interaction-1")).resolves.toBeNull()
   })
 })

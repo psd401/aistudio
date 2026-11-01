@@ -928,7 +928,7 @@ const DEEP_RESEARCH_DENIAL_MESSAGES: Record<
   string
 > = {
   user_concurrency:
-    "You already have a Deep Research run in progress. Resume that interaction (activeInteractionId) instead of starting a new one.",
+    "You already have a Deep Research run in progress. If this refusal includes activeInteractionId, that run is this same question: resume it with --check. Otherwise wait for your other run to finish.",
   deployment_concurrency:
     "Deep Research is at the deployment-wide concurrent-run limit. Try again after another run finishes.",
   user_budget:
@@ -1136,6 +1136,31 @@ async function cleanupFailedDeepResearchStart(input: {
   return "released_after_start_error";
 }
 
+/**
+ * The caller's active run, but only when it was started with this exact
+ * prompt: an agent whose turn was cut off re-runs the same command and
+ * resumes, while a different question never receives another question's
+ * report. Any lookup failure returns null, which leaves the plain refusal.
+ */
+async function resumableActiveRun(
+  activeInteractionId: string | null,
+  prompt: string,
+): Promise<string | null> {
+  if (!activeInteractionId) return null;
+  try {
+    const service = await import("@/lib/ai/gemini-deep-research-service");
+    const activePrompt =
+      await service.getDeepResearchInteractionPrompt(activeInteractionId);
+    return activePrompt?.trim() === prompt ? activeInteractionId : null;
+  } catch (error) {
+    log.warn("Deep Research active-run prompt lookup failed", {
+      activeInteractionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 export async function executeDeepResearchStartOperation(input: {
   ownerEmail: string;
   prompt: unknown;
@@ -1147,7 +1172,7 @@ export async function executeDeepResearchStartOperation(input: {
   if (!reservation.allowed) {
     const activeInteractionId =
       reservation.reason === "user_concurrency"
-        ? reservation.activeInteractionId
+        ? await resumableActiveRun(reservation.activeInteractionId, prompt)
         : null;
     log.warn("Deep Research broker start denied", {
       caller: sanitizeForLogging(input.ownerEmail),

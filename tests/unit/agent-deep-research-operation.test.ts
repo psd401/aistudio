@@ -1,6 +1,7 @@
 /** @jest-environment node */
 
 const reserveDeepResearchMock = jest.fn()
+const getDeepResearchInteractionPromptMock = jest.fn()
 const releaseDeepResearchMock = jest.fn()
 const createDeepResearchInteractionMock = jest.fn()
 const getDeepResearchInteractionMock = jest.fn()
@@ -46,6 +47,8 @@ jest.mock("@/lib/ai/gemini-deep-research-service", () => ({
     createDeepResearchInteractionMock(...args),
   getDeepResearchInteraction: (...args: unknown[]) =>
     getDeepResearchInteractionMock(...args),
+  getDeepResearchInteractionPrompt: (...args: unknown[]) =>
+    getDeepResearchInteractionPromptMock(...args),
   mapInteractionError: (error: unknown) => mapInteractionErrorMock(error),
 }))
 
@@ -237,30 +240,6 @@ describe("Deep Research start owner operation", () => {
     }
   )
 
-  it("names the caller's active run on user_concurrency so the agent resumes it", async () => {
-    queryResults = [activeOwner()]
-    reserveDeepResearchMock.mockResolvedValueOnce({
-      allowed: false,
-      reason: "user_concurrency",
-      activeInteractionId: "interaction-active",
-    })
-
-    let caught: unknown
-    try {
-      await executeDeepResearchStartOperation({
-        ownerEmail: "owner@psd401.net",
-        prompt: "Research a topic",
-      })
-    } catch (error) {
-      caught = error
-    }
-    expect(caught).toBeInstanceOf(DeepResearchOperationError)
-    expect((caught as DeepResearchOperationError).activeInteractionId).toBe(
-      "interaction-active"
-    )
-    expect(createDeepResearchInteractionMock).not.toHaveBeenCalled()
-  })
-
   it("releases the lease if provider creation fails", async () => {
     queryResults = [activeOwner(), deepResearchModel()]
     createDeepResearchInteractionMock.mockRejectedValueOnce(
@@ -443,4 +422,58 @@ describe("Deep Research status owner operation", () => {
       expect(releaseDeepResearchMock).toHaveBeenCalledWith("lease-1")
     }
   )
+})
+
+describe("Deep Research start owner operation: resuming the active run", () => {
+  async function concurrencyDenial(
+    activePrompt: string | null | Error,
+    prompt = "Research a topic"
+  ): Promise<DeepResearchOperationError> {
+    queryResults = [activeOwner()]
+    reserveDeepResearchMock.mockResolvedValueOnce({
+      allowed: false,
+      reason: "user_concurrency",
+      activeInteractionId: "interaction-active",
+    })
+    if (activePrompt instanceof Error) {
+      getDeepResearchInteractionPromptMock.mockRejectedValueOnce(activePrompt)
+    } else {
+      getDeepResearchInteractionPromptMock.mockResolvedValueOnce(activePrompt)
+    }
+    try {
+      await executeDeepResearchStartOperation({
+        ownerEmail: "owner@psd401.net",
+        prompt,
+      })
+    } catch (error) {
+      expect(error).toBeInstanceOf(DeepResearchOperationError)
+      expect(createDeepResearchInteractionMock).not.toHaveBeenCalled()
+      return error as DeepResearchOperationError
+    }
+    throw new Error("Expected a user_concurrency denial")
+  }
+
+  it("names the active run when it was started with the same prompt", async () => {
+    const error = await concurrencyDenial("Research a topic", "  Research a topic  ")
+    expect(getDeepResearchInteractionPromptMock).toHaveBeenCalledWith(
+      "interaction-active"
+    )
+    expect(error.activeInteractionId).toBe("interaction-active")
+  })
+
+  it("does not hand a different question the active run", async () => {
+    const error = await concurrencyDenial("A different research question")
+    expect(error.code).toBe("user_concurrency")
+    expect(error.activeInteractionId).toBeNull()
+  })
+
+  it("falls back to the plain denial when the prompt lookup fails", async () => {
+    const error = await concurrencyDenial(new Error("Google unavailable"))
+    expect(error.activeInteractionId).toBeNull()
+  })
+
+  it("falls back to the plain denial when the active run has no prompt", async () => {
+    const error = await concurrencyDenial(null)
+    expect(error.activeInteractionId).toBeNull()
+  })
 })
