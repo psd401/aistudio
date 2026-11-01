@@ -437,6 +437,8 @@ Why hashes: the agent container holds IAM reach to the `psd-agent-creds` and `ps
 
 Current pins in the compiled file: `aiohttp==3.14.4` (the `.in` floor was raised to `>=3.14.4` in the same change), `bedrock-agentcore==1.18.1`, `boto3==1.43.38`, and `pymupdf4llm==0.3.4`. `pymupdf4llm` stays on the pre-1.0 line on purpose, because 1.x pulls in the onnxruntime and numpy ML stack.
 
+The closure also holds transitive pins that move without any `.in` edit, because `uv pip compile` re-resolves the whole graph. Recent examples are the `anyio` patch bump (4.14.1 to 4.14.2) and a Windows-only `colorama==0.4.6 ; sys_platform == 'win32'` entry. Platform-marked entries are evaluated per target, so the Linux aarch64 image does not install them. Review the diff of `requirements-agentcore.txt` for transitive changes, not only for the top-level pins listed above.
+
 Invariants to keep:
 
 - Never hand-edit hashes. Regenerate with `uv pip compile --universal --generate-hashes --python-version 3.11 --no-annotate --no-header requirements-agentcore.in -o requirements-agentcore.txt`, then re-prepend the comment header. The `-o` flag overwrites the whole file, header included.
