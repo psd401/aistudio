@@ -20,6 +20,7 @@ const OIDC_SCOPE_SET = new Set(OIDC_SCOPES)
 interface FirstPartyScopePartition {
   oidcScopes: string[]
   contentScopes: string[]
+  assistantScopes: string[]
 }
 
 function splitScopes(value: unknown): string[] {
@@ -49,6 +50,7 @@ export function partitionRegisteredFirstPartyScopes(
   return {
     oidcScopes: requested.filter((scope) => OIDC_SCOPE_SET.has(scope)),
     contentScopes: requested.filter((scope) => scope.startsWith("content:")),
+    assistantScopes: requested.filter((scope) => scope === "assistants:execute"),
   }
 }
 
@@ -105,11 +107,12 @@ export function createFirstPartyLoadExistingGrant(
     if (scopes.oidcScopes.length > 0) {
       grant.addOIDCScope(scopes.oidcScopes.join(" "))
     }
-    if (scopes.contentScopes.length > 0) {
-      grant.addResourceScope(
-        resourceServer,
-        scopes.contentScopes.join(" ")
-      )
+    const resourceScopes = [
+      ...scopes.contentScopes,
+      ...scopes.assistantScopes,
+    ]
+    if (resourceScopes.length > 0) {
+      grant.addResourceScope(resourceServer, resourceScopes.join(" "))
     }
 
     await grant.save()

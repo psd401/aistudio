@@ -285,6 +285,32 @@ describe("first-party OAuth grants", () => {
     ).toEqual({
       oidcScopes: ["openid"],
       contentScopes: ["content:read"],
+      assistantScopes: [],
     })
+  })
+
+  it("partitions a registered assistants:execute and drops it when unregistered", () => {
+    expect(
+      partitionRegisteredFirstPartyScopes("openid assistants:execute", "openid assistants:execute")
+    ).toEqual({ oidcScopes: ["openid"], contentScopes: [], assistantScopes: ["assistants:execute"] })
+    expect(
+      partitionRegisteredFirstPartyScopes("openid assistants:execute", "openid")
+    ).toEqual({ oidcScopes: ["openid"], contentScopes: [], assistantScopes: [] })
+  })
+
+  it("adds a registered assistants:execute to the resource grant alongside content scopes", async () => {
+    const load = createFirstPartyLoadExistingGrant("https://aistudio.example/api/oauth")
+    const grant = (await load(
+      loadContext({
+        isFirstParty: true,
+        accountId: "42",
+        requestedScope: "openid content:read assistants:execute",
+        registeredScope: "openid content:read assistants:execute",
+      })
+    )) as unknown as MockGrant
+    expect(grant.addResourceScope).toHaveBeenCalledWith(
+      "https://aistudio.example/api/oauth",
+      "content:read assistants:execute"
+    )
   })
 })

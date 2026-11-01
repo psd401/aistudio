@@ -180,6 +180,7 @@
     "187-agent-credential-entry-consent-kind.sql",
     "188-agent-schedule-owner-notified.sql",
     "189-openclaw-repository-write-scopes.sql",
-    "190-voice-model-vertex-live.sql"
+    "190-voice-model-vertex-live.sql",
+    "191-atrium-capture-execute-scope.sql"
   ]
 }
