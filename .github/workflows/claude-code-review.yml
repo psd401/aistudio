@@ -10,7 +10,9 @@ jobs:
       issues: read
       id-token: write # reusable's claude-code-action OIDC exchange; caller must grant (org default is read-only)
     # Dependabot cannot grant id-token: write to the reusable (startup_failure).
-    if: github.actor != 'dependabot[bot]'
+    # Keyed on the PR author, not github.actor: a maintainer reopening or
+    # pushing to a Dependabot PR is the actor, but the PR is still Dependabot's.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     secrets:
       BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
@@ -21,5 +23,5 @@ jobs:
   claude-review-dependabot:
     name: claude-review
     permissions: {}
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
