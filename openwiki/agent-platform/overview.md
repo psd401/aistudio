@@ -508,6 +508,7 @@ sequenceDiagram
 
 ### Deep Research (`psd-deep-research`)
 
+<!-- openwiki: broken internal link [../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research] heading anchor "vertex-ai-for-deep-research" does not exist in "../infrastructure/google-workload-identity.md". Fix the href or restore the target, then delete this comment. -->
 **When to consult**: changing the start or status broker operations, the one-run-per-user concurrency rule, the resume behavior after a cut-off turn, or the CLI output. The Vertex client that makes the upstream calls is documented in [Keyless Google Auth](../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research); this section covers the agent-facing contract.
 
 **Flow**: the skill's `research.js` calls `/api/agent/credentials` with `deep-research-start`. The start reserves a lease, creates the interaction, and binds the lease to the `interactionId`. The CLI then polls `deep-research-status`.
