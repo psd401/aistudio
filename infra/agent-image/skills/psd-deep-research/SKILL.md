@@ -8,8 +8,8 @@ allowed-tools: Bash(node:*)
 # psd-deep-research
 
 Run a paid Gemini Deep Research job through the fixed owner-bound broker. The
-shared Google API key remains in the trusted web tier and never enters the
-agent process.
+trusted web tier calls Google (Vertex AI, keyless); no Google credential
+enters the agent process.
 
 **Identity.** Every command requires `--user <caller-email>`. Copy the email
 verbatim from the current user turn's `[caller: Name <email>]` header. Never
@@ -57,6 +57,13 @@ Success prints:
 
 ## Resume
 
+The command prints `Deep Research started: interactionId …` (with the resume
+command) as soon as the run starts, before it waits. If the turn is cut off
+while the command waits, running the same `--prompt` command again resumes
+that run: the start is refused with `user_concurrency`, the refusal names the
+active `interactionId`, and the command follows that run instead of starting a
+second paid one.
+
 If the command reaches its wait cap, preserve the printed `interactionId` and
 resume in a later turn or scheduled run:
 
@@ -79,8 +86,11 @@ it.
 
 ## Errors
 
-- **`user_concurrency`** — this caller already has an active run. Resume the
-  existing interaction or wait for it to finish.
+- **`user_concurrency`** — this caller already has an active run and the
+  refusal did not name it (it is still starting). Wait a minute and run
+  `--check` with the `interactionId` printed when it started. Never retry
+  `--prompt` in a loop: each retry after the 30-minute reservation expires
+  starts another paid run.
 - **`deployment_concurrency`** — all deployment run slots are occupied. Ask
   the user to retry after another run finishes.
 - **`user_budget`** — the caller's rolling hourly reservation ceiling is

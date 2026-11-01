@@ -237,6 +237,30 @@ describe("Deep Research start owner operation", () => {
     }
   )
 
+  it("names the caller's active run on user_concurrency so the agent resumes it", async () => {
+    queryResults = [activeOwner()]
+    reserveDeepResearchMock.mockResolvedValueOnce({
+      allowed: false,
+      reason: "user_concurrency",
+      activeInteractionId: "interaction-active",
+    })
+
+    let caught: unknown
+    try {
+      await executeDeepResearchStartOperation({
+        ownerEmail: "owner@psd401.net",
+        prompt: "Research a topic",
+      })
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(DeepResearchOperationError)
+    expect((caught as DeepResearchOperationError).activeInteractionId).toBe(
+      "interaction-active"
+    )
+    expect(createDeepResearchInteractionMock).not.toHaveBeenCalled()
+  })
+
   it("releases the lease if provider creation fails", async () => {
     queryResults = [activeOwner(), deepResearchModel()]
     createDeepResearchInteractionMock.mockRejectedValueOnce(

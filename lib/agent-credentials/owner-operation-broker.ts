@@ -928,7 +928,7 @@ const DEEP_RESEARCH_DENIAL_MESSAGES: Record<
   string
 > = {
   user_concurrency:
-    "You already have a Deep Research run in progress. Wait for it to finish or resume that interaction.",
+    "You already have a Deep Research run in progress. Resume that interaction (activeInteractionId) instead of starting a new one.",
   deployment_concurrency:
     "Deep Research is at the deployment-wide concurrent-run limit. Try again after another run finishes.",
   user_budget:
@@ -945,6 +945,12 @@ export class DeepResearchOperationError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /**
+     * On user_concurrency: the caller's own active run, so the agent resumes
+     * it instead of retrying a start (which, once the 30-minute lease
+     * expired, used to launch a second paid run).
+     */
+    readonly activeInteractionId: string | null = null,
   ) {
     super(message);
     this.name = "DeepResearchOperationError";
@@ -1139,9 +1145,14 @@ export async function executeDeepResearchStartOperation(input: {
   const userId = await resolveActiveOwnerUserId(input.ownerEmail);
   const reservation = await reserveDeepResearch(userId);
   if (!reservation.allowed) {
+    const activeInteractionId =
+      reservation.reason === "user_concurrency"
+        ? reservation.activeInteractionId
+        : null;
     log.warn("Deep Research broker start denied", {
       caller: sanitizeForLogging(input.ownerEmail),
       interactionId: null,
+      activeInteractionId,
       resolvedModel: null,
       reservationOutcome: reservation.reason,
       elapsedMs: Date.now() - startedAt,
@@ -1150,6 +1161,7 @@ export async function executeDeepResearchStartOperation(input: {
       429,
       reservation.reason,
       DEEP_RESEARCH_DENIAL_MESSAGES[reservation.reason],
+      activeInteractionId,
     );
   }
 
