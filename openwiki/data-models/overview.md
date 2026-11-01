@@ -263,7 +263,7 @@ Repository readiness is derived from item counts, connector state, and generatio
 **OAuth2/OIDC Provider**
 | Table | Purpose |
 |-------|---------|
-| `oauth_clients` | Registered OAuth applications. The first-party OpenClaw client's `allowed_scopes` was widened with `repositories:write` and `repositories:create` by migration 189 (#1907), see [API Platform](../api-integration/overview.md#openclaw-client-scopes-migration-189) |
+| `oauth_clients` | Registered OAuth applications. The first-party OpenClaw client's `allowed_scopes` was widened with `repositories:write` and `repositories:create` by migration 189 (#1907), see [API Platform](../api-integration/overview.md#openclaw-client-scopes-migration-189). The two Atrium Capture first-party clients gained `assistants:execute` in `allowed_scopes` by migration 191, see [API Platform](../api-integration/overview.md#atrium-capture-execute-scope-migration-191) |
 | `oauth_authorization_codes` | Authorization code flow |
 | `oauth_access_tokens` | Access tokens (15min TTL) |
 | `oauth_refresh_tokens` | Refresh tokens (24hr TTL) |
