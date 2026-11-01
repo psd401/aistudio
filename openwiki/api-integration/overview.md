@@ -174,6 +174,27 @@ The first-party OpenClaw client that agents connect through requests its scopes 
 - Changing the constant without a migration, or the migration without the constant, produces either a rejected consent request or a scope the client is not asked for. Keep both together. Tests: `/tests/unit/openclaw-repository-write-scopes-migration.test.ts`.
 - Historical rationale: `docs/learnings/workflow/2026-10-15-oauth-scope-add-requires-code-and-migration-in-order.md` (ordering of the code and migration change) and `docs/learnings/database/2026-10-15-jsonb-array-equality-order-sensitive-migration-guard.md` (why the migration's guard uses set containment instead of array equality).
 
+### Atrium Capture Execute Scope (migration 191)
+
+The two first-party Atrium Capture OAuth clients (client IDs `ae781263-20c0-4b0c-8a34-8be01ab72fb1` and `fbdaa815-1b0f-435b-805f-1732805720c1`, registered by migration 134) can request `assistants:execute`. The Capture Guide Writer uses it to run a district assistant on the user's behalf. Only that one assistant scope is exposed to OAuth. `assistants:read`, `assistants:write`, and `assistants:list` stay API-key only, so an OAuth client cannot manage assistants.
+
+The scope has to move through four layers in step:
+
+- **Provider advertisement.** `ASSISTANT_EXECUTION_SCOPES` in `/lib/oauth/oauth-scopes.ts` is spread into `RESOURCE_SERVER_SCOPES` and `ALL_OAUTH_SCOPES`. If the provider does not advertise the scope, it rejects any token request carrying it before the grant is consulted.
+- **Grant partitioning.** `partitionRegisteredFirstPartyScopes` in `/lib/oauth/first-party-grants.ts` returns an `assistantScopes` bucket. `createFirstPartyLoadExistingGrant` adds the registered assistant scope to the resource-server grant together with content scopes. A requested scope that is not registered on the client is dropped.
+- **Client allowance.** Migration 191 (`/infra/database/schema/191-atrium-capture-execute-scope.sql`, last entry in `/infra/database/migrations.json`) appends `assistants:execute` to `allowed_scopes` only for those two client IDs. It applies only while each row still matches the first-party public PKCE profile (`is_first_party`, `token_endpoint_auth_method = 'none'`, no `client_secret_hash`, `require_pkce`, active, array-typed `allowed_scopes`). It is idempotent through the `NOT allowed_scopes ? 'assistants:execute'` guard.
+- **Enforcement.** The migration only permits the client to request the scope. The execute route `/app/api/v1/assistants/[id]/execute/route.ts` checks each returned scope with `requireScope`, and the assistant-level check still applies.
+
+Invariants to keep:
+
+- Keep the constant and the migration together, following the same ordering rule as migration 189. The constant without the migration means the client never gets the scope. The migration without the constant means the provider rejects the request.
+- Access tokens keep the scope snapshot they were issued with, so an already-connected Capture user must reconnect to receive `assistants:execute`.
+- Do not add `assistants:read`, `assistants:write`, or `assistants:list` to these constants. The tests assert that they stay absent.
+
+Focused tests: `/tests/unit/lib/oauth/oauth-scopes.test.ts` (`advertises assistants:execute but keeps the other assistant scopes API-key only`, `ALL_OAUTH_SCOPES`), `/tests/unit/lib/oauth/first-party-grants.test.ts` (`partitions a registered assistants:execute and drops it when unregistered`, `adds a registered assistants:execute to the resource grant alongside content scopes`), and `/tests/unit/atrium-capture-execute-scope-migration.test.ts` (the two exact client IDs, the PKCE guard, idempotency, and registration as the last migration file).
+
+Validation: `bunx jest --silent tests/unit/lib/oauth/oauth-scopes.test.ts tests/unit/lib/oauth/first-party-grants.test.ts tests/unit/atrium-capture-execute-scope-migration.test.ts`
+
 ---
 
 ## MCP Tools
