@@ -910,7 +910,7 @@ Recent workflow changes establish conventions to follow when editing or adding w
 
 **Source**: `/.github/dependabot.yml`
 
-Dependabot opens weekly update PRs (Monday, 10:00 America/Los_Angeles) against `dev`. It covers three ecosystems: `bun` for the root `package.json` and `bun.lock`, `bun` for `/infra`, and `github-actions`. The root and `/infra` entries ignore semver-major updates, because majors are migration work that people schedule; the `github-actions` entry does not, since Action majors are tag bumps that carry runner and security fixes. The file has no `pip` entry, so the agent image's Python pins are outside it (see [Agent Container Python Dependencies](../agent-platform/overview.md#agent-container-python-dependencies)).
+Dependabot opens weekly update PRs against `dev`. It covers three ecosystems: `bun` for the root `package.json` and `bun.lock` and `bun` for `/infra` (both scheduled Monday 10:00 America/Los_Angeles), and `github-actions` (weekly on Monday, with no time or timezone set). The root and `/infra` entries ignore semver-major updates, because majors are migration work that people schedule; the `github-actions` entry does not, since Action majors are tag bumps that carry runner and security fixes. The file has no `pip` entry, so the agent image's Python pins are outside it (see [Agent Container Python Dependencies](../agent-platform/overview.md#agent-container-python-dependencies)).
 
 Invariants to keep:
 
