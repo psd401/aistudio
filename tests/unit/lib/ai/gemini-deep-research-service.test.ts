@@ -54,6 +54,7 @@ import {
   cancelDeepResearchInteraction,
   createDeepResearchInteraction,
   getDeepResearchInteraction,
+  getDeepResearchInteractionPrompt,
   mapInteractionError,
 } from "@/lib/ai/gemini-deep-research-service"
 
@@ -217,5 +218,47 @@ describe("Gemini Deep Research split lifecycle", () => {
     })
 
     expect(mapInteractionError(classified)).toBe(classified)
+  })
+})
+
+describe("Gemini Deep Research original prompt", () => {
+  it("returns the text of the run's user_input step (real Vertex response shape)", async () => {
+    // Recorded from a live GET .../v1beta1/projects/psd-aistudio-dev/locations/
+    // global/interactions/{id} on 2026-10-28 (a test prompt, no user data):
+    // the submitted input comes back as steps[0], type "user_input", with text
+    // content. Matches @google/genai's UserInputStep
+    // ({ type: "user_input"; content?: Content[] }).
+    interactionGetMock.mockResolvedValueOnce({
+      id: "interaction-recorded",
+      status: "failed",
+      usage: {},
+      steps: [
+        {
+          type: "user_input",
+          content: [
+            {
+              text: "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources.",
+              type: "text",
+            },
+          ],
+        },
+        { error: { code: 13, message: "Internal error encountered." }, type: "model_output" },
+      ],
+      errors: [{ message: "Internal error encountered.", code: "api_error" }],
+      object: "interaction",
+      agent: "deep-research-preview-04-2026",
+    })
+
+    await expect(
+      getDeepResearchInteractionPrompt("interaction-recorded")
+    ).resolves.toBe(
+      "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources."
+    )
+  })
+
+  it("returns null when the run has no user input", async () => {
+    interactionGetMock.mockResolvedValueOnce({ id: "interaction-1", status: "in_progress", steps: [] })
+
+    await expect(getDeepResearchInteractionPrompt("interaction-1")).resolves.toBeNull()
   })
 })

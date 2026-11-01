@@ -72,7 +72,8 @@ jest.mock("@/lib/agent-credentials/owner-operation-broker", () => {
     constructor(
       readonly status: number,
       readonly code: string,
-      message: string
+      message: string,
+      readonly activeInteractionId: string | null = null
     ) {
       super(message)
     }
@@ -345,6 +346,33 @@ describe("POST /api/agent/credentials Deep Research", () => {
       expect(canAccessSkillMock).not.toHaveBeenCalled()
     }
   )
+})
+
+describe("POST /api/agent/credentials Deep Research resume hint", () => {
+  it("returns the active run id with a user_concurrency denial", async () => {
+    executeDeepResearchStartOperationMock.mockRejectedValueOnce(
+      new DeepResearchOperationError(
+        429,
+        "user_concurrency",
+        "Resume it",
+        "interaction-active"
+      )
+    )
+
+    const response = await POST(
+      request({
+        operation: "deep-research-start",
+        prompt: "Research a district topic",
+      })
+    )
+
+    expect(response.status).toBe(429)
+    expect(await response.json()).toEqual({
+      error: "Resume it",
+      code: "user_concurrency",
+      activeInteractionId: "interaction-active",
+    })
+  })
 })
 
 describe("POST /api/agent/credentials Freshservice errors", () => {

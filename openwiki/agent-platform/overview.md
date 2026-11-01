@@ -45,6 +45,9 @@ openwiki:
     - infra/agent-image/skills/psd-prr/run.js
     - app/api/agent/credentials/route.ts
     - infra/lambdas/agent-cron/schedule-failure-notice.ts
+    - infra/agent-image/skills/psd-deep-research/research.js
+    - lib/ai/deep-research-budget.ts
+    - lib/ai/gemini-deep-research-service.ts
   test_paths:
     - tests/unit/lib/agent-credentials/prr-broker.test.ts
     - infra/agent-image/skills/psd-prr/run.test.js
@@ -74,6 +77,11 @@ openwiki:
     - tests/unit/agent-consent-link-route.test.ts
     - tests/smoke/agent-credential-entry-token.smoke.ts
     - infra/agent-image/skills/psd-credentials/request_entry.test.js
+    - tests/unit/agent-deep-research-operation.test.ts
+    - tests/unit/lib/ai/deep-research-budget.test.ts
+    - tests/unit/lib/ai/gemini-deep-research-service.test.ts
+    - tests/unit/agent-credentials-route.test.ts
+    - infra/agent-image/skills/psd-deep-research/research.test.js
 ---
 
 # Agent Platform
@@ -132,7 +140,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-open-adaptive-district` — Open Adaptive District operating model (six-week build cycle)
 
 **Analysis & Reporting**
-- `psd-deep-research` — Gemini Deep Research for cited multi-source reports
+- `psd-deep-research` — Gemini Deep Research for cited multi-source reports, one active run per user, and resume of the active run after a cut-off turn (see [Deep Research](#deep-research-psd-deep-research))
 - `psd-workflows` — Dynamic PSD gateway workflows (evaluations, requests, timesheets) with caller binding
 - `quartile-growth-report` — Growth-by-quartile spreadsheet generator for elementary school principals (one tab per grade, data-only output)
 - `psd-failure-report` — Failure analysis and reporting
@@ -497,6 +505,72 @@ sequenceDiagram
 - `infra/lambdas/agent-cron/schedule-failure-notice.test.ts`: `isPrrCredentialFailure` and the `prr-credential` notice.
 
 **Minimal validation (quiet)**: `bunx jest --silent tests/unit/lib/agent-credentials/prr-broker.test.ts` and `cd infra/agent-image/skills/psd-prr && bun test run.test.js`. For a change limited to `run.js` or `SKILL.md`, the skill suite is enough. CI runs that suite from the agent-image skill test list in `.github/workflows/ci.yml`.
+
+### Deep Research (`psd-deep-research`)
+
+**When to consult**: changing the start or status broker operations, the one-run-per-user concurrency rule, the resume behavior after a cut-off turn, or the CLI output. The Vertex client that makes the upstream calls is documented in [Keyless Google Auth](../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research); this section covers the agent-facing contract.
+
+**Flow**: the skill's `research.js` calls `/api/agent/credentials` with `deep-research-start`. The start reserves a lease, creates the interaction, and binds the lease to the `interactionId`. The CLI then polls `deep-research-status`.
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-deep-research research.js
+    participant Route as /api/agent/credentials
+    participant Broker as executeDeepResearchStartOperation
+    participant Budget as reserveDeepResearch
+    participant Svc as gemini-deep-research-service
+    Skill->>Route: deep-research-start with prompt
+    Route->>Broker: start for the signed owner
+    Broker->>Budget: reserve user and deployment limits
+    alt reservation allowed
+        Broker->>Svc: createDeepResearchInteraction
+        Broker->>Budget: bindDeepResearchInteraction sets interactionId
+        Broker-->>Skill: interactionId and status
+        Skill->>Route: deep-research-status every 20 seconds
+    else user_concurrency with a bound active run
+        Broker->>Svc: getDeepResearchInteractionPrompt for the active run
+        alt active run has the same prompt
+            Broker-->>Skill: 429 user_concurrency with activeInteractionId
+            Skill->>Route: deep-research-status for the active run
+        else different prompt or lookup failure
+            Broker-->>Skill: 429 user_concurrency without an id
+        end
+    end
+```
+
+*Caption: a start denial names a run only when that run was started with the same question. Otherwise the CLI fails and never reports another question's run.*
+
+**Mechanics**:
+- `infra/agent-image/skills/psd-deep-research/research.js` requires `--user` and exactly one of `--prompt` or `--check`. `--max-wait-min` defaults to 20. The start notice (`Deep Research started: interactionId …`) is written to stderr before any polling, with the resume command. A wait cap throws `timeout` and keeps the `interactionId`.
+- `executeDeepResearchStartOperation` in `lib/agent-credentials/owner-operation-broker.ts` calls `reserveDeepResearch` in `lib/ai/deep-research-budget.ts`. The lease lasts 30 minutes (`LEASE_MS`). Defaults are 1 concurrent run per user, 5 per deployment, a 500-cent reserved cost per run, and hourly budgets of 1,000 cents per user and 5,000 per deployment. The environment variables `DEEP_RESEARCH_*` override them. A `user_concurrency` denial carries `activeInteractionId`, the newest active lease of that user. It is `null` until the lease is bound.
+- On a `user_concurrency` denial the broker calls `resumableActiveRun`. That helper reads the active run's original `user_input` text through `getDeepResearchInteractionPrompt` in `lib/ai/gemini-deep-research-service.ts`, and it returns the id only when the trimmed text equals the new prompt. A lookup error is logged and falls back to the plain denial.
+- `app/api/agent/credentials/route.ts` forwards `activeInteractionId` in the 429 body only when it is present. The CLI's `activeRunFromDenial` reads that field, and then `runResearch` polls the existing run instead of retrying the start.
+- Server deadline: `MAX_DEEP_RESEARCH_RUN_DURATION_MS` is 25 minutes. The first status check past it cancels the interaction upstream, releases the lease, and returns 504. The lease lasts 5 minutes longer than the deadline. It is released only when a status check runs past the deadline. If no status check runs, the lease stays active until it expires 30 minutes after the start.
+
+**Why resume exists**: an agent turn that outlives the interactive deadline is promoted to a background job (see [Background-Job Deferral Acknowledgement](#background-job-deferral-acknowledgement-1892)). The command that was waiting dies with the turn, and the job re-runs the same command. Without the resume path, that retry is refused by the still-held lease, and after the lease expires it starts a second paid run.
+
+**Invariants**
+- A start denial names another run only when that run has the same trimmed question. A different question never receives another question's report.
+- The status operation checks ownership with `ownedDeepResearchReservation`. Another caller's interaction returns 404.
+- Before the interaction is bound to the lease, the denial has no `activeInteractionId`, so the caller gets the plain refusal.
+- A start refused by `reserveDeepResearch` never creates an interaction. Resume reads only the existing run's prompt, and only after a denial.
+
+**Change navigation**
+- Start in `executeDeepResearchStartOperation`, then `resumableActiveRun`, then `reserveDeepResearch`. On the CLI side, start at `activeRunFromDenial` and `runResearch`.
+- The 429 body shape is shared by three layers: `DeepResearchOperationError` (broker), the route's error branch, and `activeRunFromDenial`. Change them together.
+- The same-question rule is enforced in the broker, not the skill. The skill's `SKILL.md` Errors section says never to retry `--prompt` in a loop, because each retry after the lease expires starts another paid run.
+- Non-goal: changing the 30-minute lease or the 25-minute deadline is a cost and lifecycle decision. Both must be reviewed together, because the lease must outlive the server deadline.
+
+**Focused tests**
+- `tests/unit/agent-deep-research-operation.test.ts`: `Deep Research start owner operation: resuming the active run` (same prompt names the run; different question, lookup failure, and missing prompt get `null`) and `Deep Research status owner operation` (foreign-owner 404, completed report, and the server deadline cancellation).
+- `tests/unit/lib/ai/deep-research-budget.test.ts`: `Deep Research durable reservations` (`denies a concurrent second user lease without inserting and names the active run`, `reports no active run id while the active lease is not yet bound`).
+- `tests/unit/lib/ai/gemini-deep-research-service.test.ts`: `Gemini Deep Research original prompt` (reads `user_input` text, returns `null` when none).
+- `tests/unit/agent-credentials-route.test.ts`: `POST /api/agent/credentials Deep Research resume hint`.
+- `infra/agent-image/skills/psd-deep-research/research.test.js` (Node test runner): `psd-deep-research CLI after a cut-off turn` (id printed before waiting, resume on a named run, failure for an unnamed denial).
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/agent-deep-research-operation.test.ts tests/unit/lib/ai/deep-research-budget.test.ts tests/unit/lib/ai/gemini-deep-research-service.test.ts tests/unit/agent-credentials-route.test.ts` and `cd infra/agent-image/skills/psd-deep-research && node --test research.test.js`. The root `package.json` has no `test:skill:*` script for this skill. CI runs `research.test.js` in the Bun agent-image skill list in `.github/workflows/ci.yml`.
+
+**Scope boundary**: the Vertex client, the Google-side trust, and the `GOOGLE_VERTEX_*` settings are outside this section. A skill-only edit does not need the root `bun run typecheck` or `bun run lint`, which the root instructions require only before a commit.
 
 ### Media Relay Transport
 
@@ -1813,4 +1887,6 @@ Skills are published and managed through:
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
 **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+ernal API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment

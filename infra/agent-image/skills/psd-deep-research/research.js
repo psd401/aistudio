@@ -166,6 +166,30 @@ async function requestRecoverableStatus(interactionId, user, broker) {
   }
 }
 
+/**
+ * The caller's own active run named by a user_concurrency denial, or null.
+ * An agent turn that outlives the interactive deadline is promoted to a
+ * background job; the command waiting on the run dies with the turn, so the
+ * resumed job re-runs the same command. Resuming here keeps that from
+ * retrying starts until the lease expires and a second paid run begins.
+ */
+function activeRunFromDenial(error) {
+  const body =
+    error && typeof error === "object" && error.responseBody
+      ? error.responseBody
+      : null;
+  if (
+    body &&
+    typeof body === "object" &&
+    body.code === "user_concurrency" &&
+    typeof body.activeInteractionId === "string" &&
+    body.activeInteractionId.length > 0
+  ) {
+    return body.activeInteractionId;
+  }
+  return null;
+}
+
 function completedOutput(status) {
   return {
     report: status.report,
@@ -209,9 +233,27 @@ async function runResearch(
       : pendingOutput(status, options.user);
   }
 
+  const notice =
+    dependencies.notice ||
+    ((message) => {
+      process.stderr.write(`${message}\n`);
+    });
   const startedAt = now();
-  const started = await requestStart(options.prompt, broker);
-  const interactionId = started.interactionId;
+  let interactionId;
+  try {
+    interactionId = (await requestStart(options.prompt, broker)).interactionId;
+    notice(
+      `Deep Research started: interactionId ${interactionId}. ` +
+        `If this command is interrupted, resume with: ${resumeCommand(options.user, interactionId)}`,
+    );
+  } catch (error) {
+    const activeRun = activeRunFromDenial(error);
+    if (!activeRun) throw error;
+    interactionId = activeRun;
+    notice(
+      `A Deep Research run is already active for this user: resuming interactionId ${interactionId} instead of starting a new one.`,
+    );
+  }
 
   while (true) {
     const status = await requestRecoverableStatus(
