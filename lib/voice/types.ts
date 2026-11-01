@@ -32,7 +32,7 @@
  * Configuration for establishing a voice session with a provider.
  */
 export interface VoiceProviderConfig {
-  /** The model identifier (e.g. 'gemini-3.1-flash-live-preview') */
+  /** The model identifier (e.g. 'gemini-3.8-live') */
   model: string
   /** BCP-47 language code (e.g. 'en-US') */
   language?: string
@@ -40,8 +40,6 @@ export interface VoiceProviderConfig {
   voiceName?: string
   /** System instruction for the voice conversation (populated from conversation context, not admin settings) */
   systemInstruction?: string
-  /** Optional API key override (normally read from Settings) */
-  apiKey?: string
 }
 
 /**

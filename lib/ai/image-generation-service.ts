@@ -11,7 +11,7 @@
 
 import { experimental_generateImage as generateImage, generateText, type LanguageModel } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createGoogleModelProvider } from '@/lib/ai/google-provider';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
@@ -775,12 +775,8 @@ async function generateWithGemini(
   });
 
   try {
-    const apiKey = await Settings.getGoogleAI();
-    if (!apiKey) {
-      throw ErrorFactories.sysConfigurationError('Google API key not configured');
-    }
-
-    const google = createGoogleGenerativeAI({ apiKey });
+    // Vertex AI when deployed, Gemini API key only in local dev
+    const google = await createGoogleModelProvider();
 
     // Use the requested Gemini image model; fall back to the current default
     // only when the ID is not an image model at all.

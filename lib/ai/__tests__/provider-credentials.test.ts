@@ -42,10 +42,33 @@ describe("getConfiguredChatProviders", () => {
     expect(configured).toEqual(new Set(["openai", "google", "amazon-bedrock", "azure", "latimer"]))
   })
 
+  it("includes google without an API key when Vertex AI WIF is configured", async () => {
+    const vertexEnv = {
+      GOOGLE_VERTEX_WIF_AUDIENCE: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/vertex-ai",
+      GOOGLE_VERTEX_SERVICE_ACCOUNT_EMAIL: "aistudio-vertex@psd-aistudio-dev.iam.gserviceaccount.com",
+      GOOGLE_VERTEX_PROJECT_ID: "psd-aistudio-dev",
+      AWS_REGION: "us-east-1",
+    }
+    const saved = Object.fromEntries(Object.keys(vertexEnv).map((k) => [k, process.env[k]]))
+    Object.assign(process.env, vertexEnv)
+    try {
+      const configured = await getConfiguredChatProviders()
+      expect(configured.has("google")).toBe(true)
+      expect(mockGetGoogleAI).not.toHaveBeenCalled()
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+  })
+
   it("treats whitespace-only keys as not configured", async () => {
     mockGetOpenAI.mockResolvedValue("   ")
+    mockGetGoogleAI.mockResolvedValue("   ")
     const configured = await getConfiguredChatProviders()
     expect(configured.has("openai")).toBe(false)
+    expect(configured.has("google")).toBe(false)
   })
 
   it("requires both the Azure key and resource name", async () => {

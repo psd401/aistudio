@@ -614,7 +614,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       model: config.model,
       language: config.language,
       voiceName: config.voiceName ?? undefined,
-      apiKey: config.apiKey,
       systemInstruction,
     }
     log.info("Connecting to voice provider", {

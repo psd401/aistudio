@@ -30,6 +30,12 @@ jest.mock("@google/genai", () => ({
   Modality: { AUDIO: "AUDIO" },
 }))
 
+const mockGetGoogleGenAIOptions = jest.fn()
+jest.mock("@/lib/ai/google-provider", () => ({
+  VERTEX_LIVE_LOCATION: "us",
+  getGoogleGenAIOptions: (...args: unknown[]) => mockGetGoogleGenAIOptions(...args),
+}))
+
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
     info: jest.fn(),
@@ -43,8 +49,7 @@ jest.mock("@/lib/logger", () => ({
 
 let provider: GeminiLiveProvider
 const baseConfig: VoiceProviderConfig = {
-    model: "gemini-2.0-flash-live-001",
-    apiKey: "test-api-key",
+    model: "gemini-3.8-live",
     language: "en-US",
   }
 
@@ -54,6 +59,7 @@ function defineGeminiLiveProviderSuite1Part1() {
   beforeEach(() => {
     provider = new GeminiLiveProvider()
     jest.clearAllMocks()
+    mockGetGoogleGenAIOptions.mockResolvedValue({ apiKey: "test-api-key" })
     // Re-setup the connect mock after clearAllMocks
     mockLiveConnect.mockImplementation(async (params: Record<string, unknown>) => {
       const callbacks = params.callbacks as Record<string, () => void> | undefined
@@ -86,11 +92,12 @@ function defineGeminiLiveProviderSuite1Part1() {
 
 
 
-    it("should throw if no API key provided", async () => {
-      const noKeyConfig = { ...baseConfig, apiKey: undefined }
-      await expect(provider.connect(noKeyConfig, jest.fn())).rejects.toThrow(
-        "Google API key is required"
+    it("should fail when Gemini credentials are not configured", async () => {
+      mockGetGoogleGenAIOptions.mockRejectedValueOnce(new Error("Google API key not configured"))
+      await expect(provider.connect(baseConfig, jest.fn())).rejects.toThrow(
+        "Google API key not configured"
       )
+      expect(mockLiveConnect).not.toHaveBeenCalled()
     })
 
     it("should throw if already connected", async () => {
@@ -104,7 +111,22 @@ function defineGeminiLiveProviderSuite1Part1() {
       const { GoogleGenAI } = require("@google/genai")
       await provider.connect(baseConfig, jest.fn())
 
+      expect(mockGetGoogleGenAIOptions).toHaveBeenCalledWith("us")
       expect(GoogleGenAI).toHaveBeenCalledWith({ apiKey: "test-api-key" })
+    })
+
+    it("should connect through Vertex AI in the us multi-region when WIF is configured", async () => {
+      const { GoogleGenAI } = require("@google/genai")
+      const vertexOptions = {
+        vertexai: true,
+        project: "psd-aistudio-dev",
+        location: "us",
+        googleAuthOptions: { authClient: {} },
+      }
+      mockGetGoogleGenAIOptions.mockResolvedValueOnce(vertexOptions)
+      await provider.connect(baseConfig, jest.fn())
+
+      expect(GoogleGenAI).toHaveBeenCalledWith(vertexOptions)
     })
 
     it("should pass model to SDK connect", async () => {
@@ -112,7 +134,7 @@ function defineGeminiLiveProviderSuite1Part1() {
 
       expect(mockLiveConnect).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "gemini-2.0-flash-live-001",
+          model: "gemini-3.8-live",
         })
       )
     })
