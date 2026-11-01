@@ -228,7 +228,13 @@ export async function POST(request: NextRequest) {
     }
     if (error instanceof DeepResearchOperationError) {
       return NextResponse.json(
-        { error: error.message, code: error.code },
+        {
+          error: error.message,
+          code: error.code,
+          ...(error.activeInteractionId
+            ? { activeInteractionId: error.activeInteractionId }
+            : {}),
+        },
         { status: error.status }
       )
     }

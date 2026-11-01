@@ -8,14 +8,17 @@ type Tx = {
     set: (values: unknown) => { where: (condition: unknown) => Promise<void> }
   }>
   select: jest.Mock<(selection: unknown) => {
-    from: (table: unknown) => { where: (condition: unknown) => Promise<Array<{ value: number }>> }
+    from: (table: unknown) => { where: (condition: unknown) => RowsQuery }
   }>
   insert: jest.Mock<(table: unknown) => {
     values: (values: unknown) => Promise<void>
   }>
 }
 
-let transactionRows: Array<Array<{ value: number }>> = []
+type Row = { value?: number; interactionId?: string | null }
+type RowsQuery = Promise<Row[]> & { orderBy: (order: unknown) => Promise<Row[]> }
+
+let transactionRows: Row[][] = []
 let activeTx: Tx
 
 function makeTx(): Tx {
@@ -26,7 +29,10 @@ function makeTx(): Tx {
     })),
     select: jest.fn(() => ({
       from: () => ({
-        where: async () => transactionRows.shift() ?? [],
+        where: () => {
+          const rows = Promise.resolve(transactionRows.shift() ?? [])
+          return Object.assign(rows, { orderBy: () => rows })
+        },
       }),
     })),
     insert: jest.fn(() => ({
@@ -62,6 +68,8 @@ jest.mock("@/lib/db/schema", () => ({
     releasedAt: "released_at",
     reservedAt: "reserved_at",
     reservedCostCents: "reserved_cost_cents",
+    interactionId: "interaction_id",
+    sequence: "sequence",
   },
 }))
 
@@ -87,7 +95,7 @@ describe("Deep Research durable reservations", () => {
   })
 
   it("locks, checks every limit, and inserts one lease before provider work", async () => {
-    transactionRows = [[{ value: 0 }], [{ value: 0 }], [{ value: 0 }], [{ value: 0 }]]
+    transactionRows = [[], [{ value: 0 }], [{ value: 0 }], [{ value: 0 }]]
 
     const result = await reserveDeepResearch(42)
 
@@ -97,18 +105,34 @@ describe("Deep Research durable reservations", () => {
     expect(activeTx.insert).toHaveBeenCalledTimes(1)
   })
 
-  it("denies a concurrent second user lease without inserting", async () => {
-    transactionRows = [[{ value: 1 }], [{ value: 1 }], [{ value: 500 }], [{ value: 500 }]]
+  it("denies a concurrent second user lease without inserting and names the active run", async () => {
+    transactionRows = [
+      [{ interactionId: "interaction-active" }],
+      [{ value: 1 }],
+      [{ value: 500 }],
+      [{ value: 500 }],
+    ]
 
     await expect(reserveDeepResearch(42)).resolves.toEqual({
       allowed: false,
       reason: "user_concurrency",
+      activeInteractionId: "interaction-active",
     })
     expect(activeTx.insert).not.toHaveBeenCalled()
   })
 
+  it("reports no active run id while the active lease is not yet bound", async () => {
+    transactionRows = [[{ interactionId: null }], [{ value: 1 }], [{ value: 0 }], [{ value: 0 }]]
+
+    await expect(reserveDeepResearch(42)).resolves.toEqual({
+      allowed: false,
+      reason: "user_concurrency",
+      activeInteractionId: null,
+    })
+  })
+
   it("fails closed when the conservative cost reservation exceeds budget", async () => {
-    transactionRows = [[{ value: 0 }], [{ value: 0 }], [{ value: 750 }], [{ value: 750 }]]
+    transactionRows = [[], [{ value: 0 }], [{ value: 750 }], [{ value: 750 }]]
 
     await expect(reserveDeepResearch(42)).resolves.toEqual({
       allowed: false,

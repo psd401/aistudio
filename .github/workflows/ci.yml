@@ -364,6 +364,9 @@ jobs:
           infra/agent-image/skills/psd-credentials/check_capability.test.js
           infra/agent-image/skills/psd-data/common.test.js
           infra/agent-image/skills/psd-data/run.test.js
+          # Paid Deep Research runs: start, resume after a cut-off turn,
+          # and never start a second run while one is active.
+          infra/agent-image/skills/psd-deep-research/research.test.js
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js

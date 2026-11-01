@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, count, eq, gt, gte, isNull, lt, sql, sum } from "drizzle-orm";
+import { and, count, desc, eq, gt, gte, isNull, lt, sql, sum } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { deepResearchReservations } from "@/lib/db/schema";
 
@@ -15,7 +15,17 @@ export type DeepResearchReservation =
   | { allowed: true; leaseId: string }
   | {
       allowed: false;
-      reason: "user_concurrency" | "deployment_concurrency" | "user_budget" | "deployment_budget";
+      reason: "user_concurrency";
+      /**
+       * The caller's newest active run, so a client whose turn was cut off
+       * mid-wait (agent turn promotion) can resume it instead of retrying a
+       * start. Null while the active lease has not been bound to a run yet.
+       */
+      activeInteractionId: string | null;
+    }
+  | {
+      allowed: false;
+      reason: "deployment_concurrency" | "user_budget" | "deployment_budget";
     };
 
 /** Atomically reserve both concurrency and a conservative maximum run cost. */
@@ -68,7 +78,9 @@ export async function reserveDeepResearch(
       ] =
         await Promise.all([
           tx
-            .select({ value: count() })
+            .select({
+              interactionId: deepResearchReservations.interactionId,
+            })
             .from(deepResearchReservations)
             .where(
               and(
@@ -77,7 +89,8 @@ export async function reserveDeepResearch(
                 gt(deepResearchReservations.expiresAt, now),
                 isNull(deepResearchReservations.releasedAt)
               )
-            ),
+            )
+            .orderBy(desc(deepResearchReservations.sequence)),
           tx
             .select({ value: count() })
             .from(deepResearchReservations)
@@ -102,13 +115,18 @@ export async function reserveDeepResearch(
             .from(deepResearchReservations)
             .where(gte(deepResearchReservations.reservedAt, budgetStart)),
         ]);
-      const [activeUser] = activeUserRows;
       const [activeDeployment] = activeDeploymentRows;
       const [userBudget] = userBudgetRows;
       const [deploymentBudget] = deploymentBudgetRows;
 
-      if ((activeUser?.value ?? 0) >= userConcurrency) {
-        return { allowed: false, reason: "user_concurrency" } as const;
+      if (activeUserRows.length >= userConcurrency) {
+        return {
+          allowed: false,
+          reason: "user_concurrency",
+          activeInteractionId:
+            activeUserRows.find((row) => row.interactionId)?.interactionId ??
+            null,
+        } as const;
       }
       if ((activeDeployment?.value ?? 0) >= deploymentConcurrency) {
         return { allowed: false, reason: "deployment_concurrency" } as const;
