@@ -222,20 +222,38 @@ describe("Gemini Deep Research split lifecycle", () => {
 })
 
 describe("Gemini Deep Research original prompt", () => {
-  it("returns the text of the run's user_input step", async () => {
+  it("returns the text of the run's user_input step (real Vertex response shape)", async () => {
+    // Recorded from a live GET .../v1beta1/projects/psd-aistudio-dev/locations/
+    // global/interactions/{id} on 2026-10-28 (a test prompt, no user data):
+    // the submitted input comes back as steps[0], type "user_input", with text
+    // content. Matches @google/genai's UserInputStep
+    // ({ type: "user_input"; content?: Content[] }).
     interactionGetMock.mockResolvedValueOnce({
-      id: "interaction-1",
-      status: "in_progress",
+      id: "interaction-recorded",
+      status: "failed",
+      usage: {},
       steps: [
-        { type: "user_input", content: [{ type: "text", text: "Research later start times" }] },
-        { type: "model_output", content: [{ type: "text", text: "Partial" }] },
+        {
+          type: "user_input",
+          content: [
+            {
+              text: "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources.",
+              type: "text",
+            },
+          ],
+        },
+        { error: { code: 13, message: "Internal error encountered." }, type: "model_output" },
       ],
+      errors: [{ message: "Internal error encountered.", code: "api_error" }],
+      object: "interaction",
+      agent: "deep-research-preview-04-2026",
     })
 
-    await expect(getDeepResearchInteractionPrompt("interaction-1")).resolves.toBe(
-      "Research later start times"
+    await expect(
+      getDeepResearchInteractionPrompt("interaction-recorded")
+    ).resolves.toBe(
+      "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources."
     )
-    expect(interactionGetMock).toHaveBeenCalledWith("interaction-1")
   })
 
   it("returns null when the run has no user input", async () => {
