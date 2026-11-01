@@ -98,6 +98,8 @@ const NON_ASSET_REFERENCE_HOSTS = [
   'aistudio.psd401.ai',
   'dev.aistudio.psd401.ai',
   'psd401.freshservice.com',
+  // PSD Public Records: the token page and MCP endpoint psd-prr cites
+  'prr.psd401.net',
   // Per-environment S3 buckets holding generated media, linked as output URLs
   '.s3.us-east-1.amazonaws.com',
   // Vendor docs / consoles / APIs a skill calls or cites

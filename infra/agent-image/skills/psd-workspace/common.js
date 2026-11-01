@@ -79,15 +79,51 @@ function validateUserEmail(email) {
 }
 
 
+// A single segment of a dotted Google API method path. One flat,
+// star-height-1 pattern tested per segment — a quantified group inside a
+// quantifier is the shape `security/detect-unsafe-regex` rejects however
+// tightly it is bounded.
+const METHOD_PATH_SEGMENT = /^[A-Za-z][A-Za-z0-9]*$/;
+
+/**
+ * Is this token a dotted method path such as `spreadsheets.values.batchUpdate`?
+ *
+ * Deliberately narrow: identifier segments only, so a filesystem path, an
+ * email address or a JSON blob can never match and be torn apart.
+ */
+function isDottedMethodPath(token) {
+  // Cheap reject first — most tokens have no dot at all.
+  if (!token.includes('.')) return false;
+  return token.split('.').every((segment) => METHOD_PATH_SEGMENT.test(segment));
+}
+
 /**
  * Parse --command into argv-style tokens. Supports single-quoted segments so
  * users can pass flags like `--query 'is:unread'`. Not a full shell parser.
+ *
+ * Canonicalizes a dotted method path in the LEADING POSITIONAL run into the
+ * space-separated tokens gws implements: this file documented methods in
+ * Google's dotted Discovery spelling, and `gws sheets spreadsheets.values.batchUpdate`
+ * reached the broker as one token, which no allowlist entry matched — so the
+ * documented spelling of an allowed write was refused (#1893). Flag VALUES are
+ * never touched: a `--params` object or a Drive query legitimately contains
+ * dots, and splitting one would corrupt the payload. Case is preserved because
+ * the method segment is camelCase and gws matches it as written.
  */
 function splitCommand(cmd) {
   if (!cmd || typeof cmd !== 'string') return [];
   const tokens = [];
   let buf = '';
   let quote = null;
+  let inOperation = true;
+  const push = (token) => {
+    if (token.startsWith('-')) inOperation = false;
+    if (inOperation && isDottedMethodPath(token)) {
+      tokens.push(...token.split('.'));
+      return;
+    }
+    tokens.push(token);
+  };
   for (const ch of cmd) {
     if (quote) {
       if (ch === quote) { quote = null; continue; }
@@ -96,12 +132,12 @@ function splitCommand(cmd) {
     }
     if (ch === '"' || ch === "'") { quote = ch; continue; }
     if (/\s/.test(ch)) {
-      if (buf) { tokens.push(buf); buf = ''; }
+      if (buf) { push(buf); buf = ''; }
       continue;
     }
     buf += ch;
   }
-  if (buf) tokens.push(buf);
+  if (buf) push(buf);
   return tokens;
 }
 

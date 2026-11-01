@@ -387,6 +387,8 @@ function buildStreamConfig(options: BuildConfigOptions): StreamConfig {
   return {
     model,
     messages: convertedMessages,
+    // Carried through so the adapter knows which surface it is answering (#1899).
+    source: request.source,
     system: request.systemPrompt,
     maxTokens: request.maxTokens,
     maxSteps: request.maxSteps,

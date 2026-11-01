@@ -68,7 +68,7 @@ const REPOSITORY_SCOPES = Object.keys(API_SCOPES).filter((s) =>
 )
 
 // Assistant Execution API scope for Atrium Capture's AI guide writer (migration
-// 190) — only `assistants:execute`, deliberately. `assistants:read`,
+// 191) — only `assistants:execute`, deliberately. `assistants:read`,
 // `assistants:write`, and `assistants:list` stay API-key only; widening the
 // OAuth surface to those would let a first-party client manage assistants, not
 // just run one the user already has access to.

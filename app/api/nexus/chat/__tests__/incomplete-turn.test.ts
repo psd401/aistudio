@@ -30,7 +30,7 @@ jest.mock('@/lib/logger', () => ({
   sanitizeForLogging: jest.fn((d: unknown) => d),
 }))
 
-import { incompleteTurnReason } from '../chat-helpers'
+import { incompleteTurnReason, turnNeedsEmptyNotice } from '../chat-helpers'
 import type { StepData } from '../chat-helpers'
 
 /** A tool-call step with no assistant prose — what the aborted prod turn produced. */
@@ -55,7 +55,32 @@ describe('incompleteTurnReason', () => {
   it('rejects a completed run that produced nothing at all', () => {
     expect(incompleteTurnReason({ text: '', steps: [] })).toBe('no_content')
     expect(incompleteTurnReason({ text: '   \n\t  ' })).toBe('no_content')
-    expect(incompleteTurnReason({ text: '', steps: [toolCallStep] })).toBe('no_content')
+  })
+
+  it('keeps a single tool-call step rather than calling it empty (#1899)', () => {
+    // Reversed from the original rule, deliberately. A one-shot
+    // `generate_document` / `show_chart` call whose trailing sentence the model
+    // skipped used to be dropped as `no_content` — so the file the user asked
+    // for vanished on reload. The tool history is the deliverable; persist it.
+    expect(incompleteTurnReason({ text: '', steps: [toolCallStep] })).toBeNull()
+    expect(
+      incompleteTurnReason({
+        text: '',
+        toolCalls: [
+          { toolCallId: 't1', toolName: 'generate_document', args: {} },
+        ],
+      })
+    ).toBeNull()
+  })
+
+  it('does not take step COUNT as evidence of content (#1899)', () => {
+    // saveConversationSteps filters out every text-free, tool-free step, so a
+    // run of empty step boundaries wrote zero rows while reporting success —
+    // the blank-bubble bug again, reached through the multi-step path.
+    const emptyStep = { text: '', toolCalls: [] } as unknown as StepData
+    expect(
+      incompleteTurnReason({ text: '', steps: [emptyStep, emptyStep, emptyStep] })
+    ).toBe('no_content')
   })
 
   it('accepts an ordinary completed answer', () => {
@@ -80,5 +105,55 @@ describe('incompleteTurnReason', () => {
         steps: [toolCallStep, textStep, toolCallStep],
       })
     ).toBe('stream_aborted')
+  })
+})
+
+/**
+ * #1899 case 2, reload half — flagged by two reviewers on PR #1945.
+ *
+ * A text-free tool turn is NOT `no_content` (its tool rows are the history
+ * worth keeping), so it never reached the notice branch: the live notice was
+ * transient and the reload showed tool cards with no explanation. The tool rows
+ * are now followed by a notice row, unless the tool itself was the deliverable.
+ */
+describe('turnNeedsEmptyNotice', () => {
+  const docStep = {
+    text: '',
+    toolCalls: [{ toolCallId: 'd1', toolName: 'generate_document', args: {} }],
+  } as unknown as StepData
+
+  it('asks for a notice after a text-free web_fetch chain', () => {
+    expect(
+      turnNeedsEmptyNotice({ text: '', steps: [toolCallStep, toolCallStep] })
+    ).toBe(true)
+    expect(
+      turnNeedsEmptyNotice({
+        text: '',
+        toolCalls: [{ toolCallId: 't1', toolName: 'web_fetch', args: {} }],
+      })
+    ).toBe(true)
+  })
+
+  it('stays quiet when a direct-render tool produced the deliverable', () => {
+    // The download card is the answer; a notice under it would contradict it.
+    expect(turnNeedsEmptyNotice({ text: '', steps: [docStep] })).toBe(false)
+    expect(
+      turnNeedsEmptyNotice({
+        text: '',
+        toolCalls: [{ toolCallId: 'd1', toolName: 'show_chart', args: {} }],
+      })
+    ).toBe(false)
+  })
+
+  it('stays quiet when any step wrote prose, even if the last did not', () => {
+    expect(
+      turnNeedsEmptyNotice({ text: '', steps: [textStep, toolCallStep] })
+    ).toBe(false)
+  })
+
+  it('stays quiet for an ordinary answered turn', () => {
+    expect(turnNeedsEmptyNotice({ text: 'Here is the schedule.' })).toBe(false)
+    // Whitespace is not an answer — matches incompleteTurnReason.
+    expect(turnNeedsEmptyNotice({ text: '  \n ' })).toBe(true)
   })
 })

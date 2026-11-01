@@ -106,12 +106,9 @@ export async function getGroupsAdminDataAction(): Promise<ActionState<GroupsAdmi
         mappings,
         roles: roleRows.map((r) => ({ id: r.id, name: r.name })),
         syncEnabled: settings.enabled,
-        // Runnable = SA key + a directory path: Cloud Identity needs customerId,
-        // the Admin SDK fallback needs dwdSubject. The ARN alone would clear the
-        // banner while every run still failed in the client constructor.
-        syncConfigured: Boolean(
-          settings.saSecretArn && (settings.customerId || settings.dwdSubject)
-        ),
+        // Runnable = a customer id: Google auth is keyless WIF set by CDK
+        // (#1989), and the Lambda skips every run without the customer id.
+        syncConfigured: Boolean(settings.customerId),
       },
       "Group admin data loaded"
     )

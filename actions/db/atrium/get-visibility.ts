@@ -43,6 +43,14 @@ export interface VisibilityState {
   grantLabels: Record<string, string>;
   /** Whether the current requester may change the visibility (owner/admin). */
   canEdit: boolean;
+  /**
+   * The object is filed in a PRIVATE collection, so the write path rejects every
+   * level except `private` ("Content in a private collection must remain
+   * private"). The Share dialog uses this to lock the picker instead of offering
+   * levels that can never save. Only resolved for an editor (always `false`
+   * otherwise) — a read-only viewer has no picker to lock.
+   */
+  inPrivateCollection: boolean;
 }
 
 export async function getVisibilityAction(
@@ -99,6 +107,9 @@ export async function getVisibilityAction(
     // flag as the grants themselves — a non-editor gets neither, so this can
     // never widen who learns a grantee's identity.
     const grantLabels = editable ? await resolveGrantLabels(grants) : {};
+    const inPrivateCollection = editable
+      ? await visibilityService.isInPrivateCollection(obj.collectionId)
+      : false;
 
     timer({ status: "success" });
     log.info("Visibility loaded", {
@@ -112,6 +123,7 @@ export async function getVisibilityAction(
         grants,
         grantLabels,
         canEdit: editable,
+        inPrivateCollection,
       },
       "Visibility loaded"
     );

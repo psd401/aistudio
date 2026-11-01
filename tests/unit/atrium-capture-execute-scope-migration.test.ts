@@ -3,7 +3,7 @@ import path from "node:path"
 
 const migrationPath = path.join(
   process.cwd(),
-  "infra/database/schema/190-atrium-capture-execute-scope.sql",
+  "infra/database/schema/191-atrium-capture-execute-scope.sql",
 )
 const migration = fs.readFileSync(migrationPath, "utf8")
 
@@ -28,7 +28,7 @@ describe("Atrium Capture execute scope migration", () => {
   it("is idempotent and registered", () => {
     expect(migration).toContain("NOT allowed_scopes ? 'assistants:execute'")
     expect(registry.migrationFiles.at(-1)).toBe(
-      "190-atrium-capture-execute-scope.sql",
+      "191-atrium-capture-execute-scope.sql",
     )
   })
 })

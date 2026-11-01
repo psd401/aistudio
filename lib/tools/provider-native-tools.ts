@@ -1,5 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai'
-import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createGoogleModelProvider, isGoogleConfigured } from '@/lib/ai/google-provider'
 import { Settings } from '@/lib/settings-manager'
 import { createLogger } from '@/lib/logger'
 import type { ToolSet } from 'ai'
@@ -117,15 +117,12 @@ async function createGoogleNativeTools(enabledTools: string[]): Promise<ToolSet>
   const tools: Record<string, unknown> = {}
 
   try {
-    const apiKey = await Settings.getGoogleAI()
-    if (!apiKey) {
-      log.warn('Google API key not configured, skipping native tools')
+    if (!(await isGoogleConfigured())) {
+      log.warn('Google not configured, skipping native tools')
       return {}
     }
 
-    // Scope the key to a per-call client instead of mutating process.env
-    // (REV-REF-034). Mirrors gemini-adapter.ts / provider-factory.ts.
-    const google = createGoogleGenerativeAI({ apiKey })
+    const google = await createGoogleModelProvider()
 
     // Web search tool - accept both friendly name and provider name
     const hasWebSearch = enabledTools.some(t =>

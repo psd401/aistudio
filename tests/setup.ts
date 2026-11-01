@@ -50,6 +50,18 @@ const mockHeaders = class Headers {
     return this.values.entries();
   }
 
+  /**
+   * Standard Headers API, used by SigV4 signers (aws4fetch builds its
+   * canonical header list from `headers.keys()`).
+   */
+  keys(): MapIterator<string> {
+    return this.values.keys();
+  }
+
+  [Symbol.iterator](): MapIterator<[string, string]> {
+    return this.values.entries();
+  }
+
   forEach(
     callback: (value: string, name: string, headers: Headers) => void,
   ): void {

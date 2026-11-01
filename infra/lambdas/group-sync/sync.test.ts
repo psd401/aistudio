@@ -6,7 +6,6 @@
  *
  * Covers the acceptance-criteria invariants that must never regress:
  *   - hand-picked AND prefix-matched selection (both modes)
- *   - transitive flattening of nested groups
  *   - a simulated per-group API failure leaves that group's membership intact
  *   - emails stored lowercase; mixed-case input matches / de-dupes
  */
@@ -15,10 +14,8 @@ import { test, expect, describe } from "bun:test";
 import {
   dedupeNormalizedEmails,
   resolveSelectedGroups,
-  flattenTransitiveMembers,
   runGroupSync,
   type GroupSyncPorts,
-  type RawMember,
   type SelectionRule,
   type DirectoryGroup,
 } from "./sync";
@@ -92,39 +89,6 @@ describe("resolveSelectedGroups", () => {
       { ruleType: "prefix", value: "   ", isActive: true },
     ];
     expect(resolveSelectedGroups(rules, directory)).toEqual([]);
-  });
-});
-
-describe("flattenTransitiveMembers", () => {
-  test("expands nested groups into person emails and de-dupes", async () => {
-    // parent -> [alice, nested]; nested -> [bob, ALICE (dupe)]
-    const graph: Record<string, RawMember[]> = {
-      "parent@psd401.net": [
-        { email: "alice@psd401.net" },
-        { email: null, nestedGroupEmail: "nested@psd401.net" },
-      ],
-      "nested@psd401.net": [
-        { email: "bob@psd401.net" },
-        { email: "Alice@psd401.net" },
-      ],
-    };
-    const members = await flattenTransitiveMembers(
-      "parent@psd401.net",
-      async (g) => graph[g.toLowerCase()] ?? []
-    );
-    expect(members.sort()).toEqual(["alice@psd401.net", "bob@psd401.net"]);
-  });
-
-  test("guards against membership cycles", async () => {
-    const graph: Record<string, RawMember[]> = {
-      "a@psd401.net": [{ email: null, nestedGroupEmail: "b@psd401.net" }, { email: "u1@psd401.net" }],
-      "b@psd401.net": [{ email: null, nestedGroupEmail: "a@psd401.net" }, { email: "u2@psd401.net" }],
-    };
-    const members = await flattenTransitiveMembers(
-      "a@psd401.net",
-      async (g) => graph[g.toLowerCase()] ?? []
-    );
-    expect(members.sort()).toEqual(["u1@psd401.net", "u2@psd401.net"]);
   });
 });
 

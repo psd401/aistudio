@@ -5,9 +5,15 @@ const interactionGetMock = jest.fn()
 const interactionCancelMock = jest.fn()
 const getGoogleAiMock = jest.fn()
 const loggerWarnMock = jest.fn()
+const googleGenAiCtor = jest.fn()
+const readVertexWifConfigMock = jest.fn()
+const getVertexWifAuthClientMock = jest.fn()
 
 jest.mock("@google/genai", () => ({
   GoogleGenAI: class {
+    constructor(options: unknown) {
+      googleGenAiCtor(options)
+    }
     interactions = {
       create: (...args: unknown[]) => interactionCreateMock(...args),
       get: (...args: unknown[]) => interactionGetMock(...args),
@@ -20,6 +26,12 @@ jest.mock("@/lib/settings-manager", () => ({
   Settings: {
     getGoogleAI: (...args: unknown[]) => getGoogleAiMock(...args),
   },
+}))
+
+jest.mock("@/lib/ai/google-vertex-wif", () => ({
+  VERTEX_INTERACTIONS_LOCATION: "global",
+  readVertexWifConfig: (...args: unknown[]) => readVertexWifConfigMock(...args),
+  getVertexWifAuthClient: (...args: unknown[]) => getVertexWifAuthClientMock(...args),
 }))
 
 jest.mock("@/lib/logger", () => ({
@@ -42,12 +54,57 @@ import {
   cancelDeepResearchInteraction,
   createDeepResearchInteraction,
   getDeepResearchInteraction,
+  getDeepResearchInteractionPrompt,
   mapInteractionError,
 } from "@/lib/ai/gemini-deep-research-service"
 
 beforeEach(() => {
   jest.clearAllMocks()
   getGoogleAiMock.mockResolvedValue("google-api-key")
+  readVertexWifConfigMock.mockReturnValue(null)
+})
+
+describe("Gemini Deep Research client auth", () => {
+  it("uses Vertex AI with the WIF auth client and never reads the API key when configured", async () => {
+    const config = {
+      audience: "aud",
+      serviceAccountEmail: "aistudio-vertex@psd-aistudio-dev.iam.gserviceaccount.com",
+      projectId: "psd-aistudio-dev",
+      region: "us-east-1",
+    }
+    const authClient = { kind: "wif" }
+    readVertexWifConfigMock.mockReturnValue(config)
+    getVertexWifAuthClientMock.mockReturnValue(authClient)
+    interactionCreateMock.mockResolvedValueOnce({ id: "i-1", status: "in_progress" })
+
+    await createDeepResearchInteraction("prompt", "deep-research-preview-04-2026")
+
+    expect(googleGenAiCtor).toHaveBeenCalledWith({
+      vertexai: true,
+      project: "psd-aistudio-dev",
+      location: "global",
+      googleAuthOptions: { authClient },
+    })
+    expect(getVertexWifAuthClientMock).toHaveBeenCalledWith(config)
+    expect(getGoogleAiMock).not.toHaveBeenCalled()
+  })
+
+  it("falls back to the Gemini API key only when Vertex is not configured", async () => {
+    interactionCreateMock.mockResolvedValueOnce({ id: "i-1", status: "in_progress" })
+
+    await createDeepResearchInteraction("prompt", "deep-research-preview-04-2026")
+
+    expect(googleGenAiCtor).toHaveBeenCalledWith({ apiKey: "google-api-key" })
+  })
+
+  it("fails closed when the Vertex config is partial", async () => {
+    readVertexWifConfigMock.mockImplementation(() => {
+      throw new Error("Vertex AI auth is partly configured; missing GOOGLE_VERTEX_PROJECT_ID")
+    })
+
+    await expect(createDeepResearchInteraction("prompt", "m")).rejects.toThrow("partly configured")
+    expect(getGoogleAiMock).not.toHaveBeenCalled()
+  })
 })
 
 describe("Gemini Deep Research split lifecycle", () => {
@@ -161,5 +218,47 @@ describe("Gemini Deep Research split lifecycle", () => {
     })
 
     expect(mapInteractionError(classified)).toBe(classified)
+  })
+})
+
+describe("Gemini Deep Research original prompt", () => {
+  it("returns the text of the run's user_input step (real Vertex response shape)", async () => {
+    // Recorded from a live GET .../v1beta1/projects/psd-aistudio-dev/locations/
+    // global/interactions/{id} on 2026-10-28 (a test prompt, no user data):
+    // the submitted input comes back as steps[0], type "user_input", with text
+    // content. Matches @google/genai's UserInputStep
+    // ({ type: "user_input"; content?: Content[] }).
+    interactionGetMock.mockResolvedValueOnce({
+      id: "interaction-recorded",
+      status: "failed",
+      usage: {},
+      steps: [
+        {
+          type: "user_input",
+          content: [
+            {
+              text: "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources.",
+              type: "text",
+            },
+          ],
+        },
+        { error: { code: 13, message: "Internal error encountered." }, type: "model_output" },
+      ],
+      errors: [{ message: "Internal error encountered.", code: "api_error" }],
+      object: "interaction",
+      agent: "deep-research-preview-04-2026",
+    })
+
+    await expect(
+      getDeepResearchInteractionPrompt("interaction-recorded")
+    ).resolves.toBe(
+      "In two short paragraphs, summarize what Washington State OSPI says about school start time research. Cite sources."
+    )
+  })
+
+  it("returns null when the run has no user input", async () => {
+    interactionGetMock.mockResolvedValueOnce({ id: "interaction-1", status: "in_progress", steps: [] })
+
+    await expect(getDeepResearchInteractionPrompt("interaction-1")).resolves.toBeNull()
   })
 })

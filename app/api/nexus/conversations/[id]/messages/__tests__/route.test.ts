@@ -116,13 +116,25 @@ describe('GET conversations/[id]/messages presign gate (REV-SEC-143)', () => {
     expect(JSON.stringify(body)).toContain('SIGNED')
   })
 
-  it('presigns a key under this conversation generated-images prefix', async () => {
+  /**
+   * #1900 changed WHERE a generated image is signed, not whether it is gated.
+   * `getDocumentSignedUrl` resolves its bucket from the database `S3_BUCKET`
+   * setting, which need not match the `DOCUMENTS_BUCKET_NAME` the image was
+   * written to — so these keys now go to `/api/images/[...key]`, which signs
+   * with the same resolver `storeImageInS3` used and re-checks ownership on
+   * every load. The prefix gate still applies; see
+   * tests/unit/nexus-generated-image-serving.test.ts.
+   */
+  it('serves a generated image through the authenticated image route', async () => {
     const key = `v2/generated-images/${CONVO}/123-model.png`
     mockGetMessagesByConversation.mockResolvedValue(imageMessage(key))
 
-    await GET(req(), ctx())
+    const res = await GET(req(), ctx())
+    const body = await res.json()
 
-    expect(mockGetDocumentSignedUrl).toHaveBeenCalledWith({ key, expiresIn: 3600 })
+    expect(mockGetDocumentSignedUrl).not.toHaveBeenCalled()
+    expect(JSON.stringify(body)).toContain(`/api/images/${key}`)
+    expect(JSON.stringify(body)).not.toContain('SIGNED')
   })
 
   it('returns 404 when the caller does not own the conversation', async () => {

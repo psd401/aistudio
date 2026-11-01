@@ -62,7 +62,10 @@ need rotating at the vendor, not redacting here.
   ask for a second link. A failed write therefore spends the link and says so.
 - **The value never leaves the POST body.** Not in the URL, not in a log line,
   not in the action's return value. A value the broker would reject is caught
-  *before* the claim, so a typo does not cost the user their link.
+  *before* the claim, so a typo does not cost the user their link. Some slots
+  also have a shape rule checked at the same point (`SLOT_PREFIXES` in
+  `lib/agent-workspace/credential-entry.ts`): `prr_pat`, the PSD Public
+  Records personal access token used by `psd-prr`, must start `prr_pat_`.
 - **A failed audit row does not become a failed save.** `AgentCredentialBroker.put`
   writes the secret to Secrets Manager and the audit row to Postgres; they
   cannot be one transaction. An audit-insert failure is now logged rather than

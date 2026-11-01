@@ -23,6 +23,8 @@ import { authenticateContext } from "./helpers/session-auth";
 // admin so the default minted session can edit its visibility.
 const OBJ_ID =
   process.env.ATRIUM_VIS_E2E_ID ?? "a7100000-0000-4000-8000-000000005050";
+// Same seed: a document filed in the admin's PRIVATE collection.
+const PRIVATE_COLLECTION_OBJ_ID = "a7100000-0000-4000-8000-000000005051";
 
 test.describe("Atrium visibility editor — VisibilityChip (authenticated owner)", () => {
   test.skip(
@@ -64,6 +66,37 @@ test.describe("Atrium visibility editor — VisibilityChip (authenticated owner)
       await expect(
         page.getByRole("button", { name: /visibility: Internal/ })
       ).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("content in a private collection offers only Private, and says why", async ({
+    browser,
+  }) => {
+    // The service rejects every non-private level for content filed in a
+    // private collection. Before this, the dialog offered Internal anyway and
+    // the save failed with a bare "Failed to update visibility".
+    const context = await browser.newContext();
+    await authenticateContext(context);
+    try {
+      const page = await context.newPage();
+      await page.goto(`/atrium/${PRIVATE_COLLECTION_OBJ_ID}/edit`);
+
+      const chip = page.getByRole("button", { name: /^Share — visibility:/ });
+      await expect(chip).toBeEnabled();
+      await chip.click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toBeVisible();
+      await expect(
+        dialog.getByTestId("visibility-private-collection-note")
+      ).toBeVisible();
+
+      await dialog.getByRole("combobox").click();
+      for (const name of ["Group", "Internal", "Public"]) {
+        await expect(page.getByRole("option", { name })).toBeDisabled();
+      }
+      await expect(page.getByRole("option", { name: "Private" })).toBeEnabled();
     } finally {
       await context.close();
     }

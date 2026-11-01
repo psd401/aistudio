@@ -281,7 +281,7 @@ Migrations run via Lambda function:
 | Lambda | Purpose |
 |--------|---------|
 | `textract/` | OCR document processing |
-| `group-sync/` | Google Directory synchronization |
+| `group-sync/` | Google Directory synchronization, reading Cloud Identity groups through keyless workload identity federation (#1989); see [Keyless Google Auth](google-workload-identity.md) |
 | `atrium-content-key-bootstrap/` | Atrium key provisioning |
 | `agent-router/` | Agent request routing with promoted turn recovery, and settlement of deferred scheduled runs (#1890) |
 | `agent-cron/` | Scheduled run invocation, telemetry, silent reply delivery (#1853), and owner notices for failing schedules (#1890) |
@@ -332,7 +332,7 @@ The `agent-cron` Lambda handles scheduled agent runs (watchers, monitors, period
 
 **Silent Reply** (#1853): When the harness surfaces `metadata.silent`, `toInvokeResult()` maps it to `InvokeResult.silent` and `deliverScheduledResult()` records success without posting. This prevents noise from filling DMs with empty "📋 name" headers on every run.
 
-**Failure Notices and Deferred Settlement** (#1890): A scheduled run whose Chat post is queued for retry is recorded `deferred`, not `success`, and the router settles that row once the queued post lands or dead-letters. A failure that makes a schedule visibly broken (three consecutive failed runs, or one Google Workspace authorization failure such as a revoked grant) sends its owner one DM. The cron Lambda reads `APP_BASE_URL` and `AGENT_INTERNAL_API_KEY_SECRET_ID` only to mint the re-authorization link for that DM, and falls back to link-free wording when either is unset. Behavior, invariants, and tests are in **[agent-platform/schedule-failure-notices.md](../agent-platform/schedule-failure-notices.md)**.
+**Failure Notices and Deferred Settlement** (#1890): A scheduled run whose Chat post is queued for retry is recorded `deferred`, not `success`, and the router settles that row once the queued post lands or dead-letters. A failure that makes a schedule visibly broken (three consecutive failed runs, or one Google Workspace authorization failure such as a revoked grant) sends its owner one DM. The cron Lambda reads `APP_BASE_URL` and `AGENT_INTERNAL_API_KEY_SECRET_ID` only to mint the owner's fix-it link for that DM (a re-authorization link, or a credential-entry link for a PSD Public Records token), and falls back to link-free wording when either is unset. Behavior, invariants, and tests are in **[agent-platform/schedule-failure-notices.md](../agent-platform/schedule-failure-notices.md)**.
 
 **Deploy order**: `infra/lib/agent-platform-stack.ts` makes the cron Lambda depend on the router (`cronLambda.node.addDependency(routerLambda)`). The router parses the Chat-delivery envelope with a strict key allowlist, so it must accept the new `scheduledRun` reference before the cron sends it. The dependency runs one way only, because the router does not reference the cron.
 
@@ -356,6 +356,8 @@ The `agent-router` Lambda handles agent request routing with automatic failure t
 Without this telemetry, deferred retries could vanish with no `agent_failures` row, no metric, and nothing on the usage dashboard. In production (2026-08-20 to 2026-08-31), 50 real user messages died across 8 people while the failure table recorded only 2 router-sourced rows that week—the DLQ alarm had been publishing to a topic with no subscribers.
 
 **Thread Mapping Reads** (#1891): For an owner DM turn that is not a `/btw` aside, `resolveOwnerConversationSessionId()` reads the thread-sessions table (`THREAD_SESSIONS_TABLE`; the router role has `dynamodb:GetItem` only) before choosing the conversation session. It fails open: a missing table, row, owner mismatch or read error falls back to the ordinary `space + thread` session. See **[agent-platform/overview.md → Scheduled Post Thread Mapping](../agent-platform/overview.md#scheduled-post-thread-mapping-1891)** for the owner check and expiry rules.
+
+Chat replies are sent with the keyless client built by `google-chat-wif.ts`, so the router holds no Google key; see **[Keyless Google Auth](google-workload-identity.md)**.
 
 For multi-turn agent architecture, see **[agent-platform/overview.md](../agent-platform/overview.md)**.
 
@@ -500,6 +502,9 @@ psd-agent/{env}/gcp-dwd-config
 psd-agent/{env}/agent-gateway
 psd-agent-creds/{env}/user/{email}/google-workspace-user
 ```
+
+<!-- openwiki: broken internal link [google-workload-identity.md#vertex-ai-for-deep-research] heading anchor "vertex-ai-for-deep-research" does not exist in "google-workload-identity.md". Fix the href or restore the target, then delete this comment. -->
+There is no Google service-account JSON key in Secrets Manager. The Chat app, Chat-posting Lambdas, and the group-sync Lambda authenticate to Google through workload identity federation, The agent-platform CDK stack no longer creates `psd-agent-google-sa-{env}`, and the group-sync settings no longer carry a key ARN (`GOOGLE_DIRECTORY_SA_SECRET_ARN`). Deep Research on the web tier also authenticates to Vertex AI keylessly; its `GOOGLE_VERTEX_*` settings are plain container environment variables in `infra/lib/constructs/ecs-service.ts`, not secrets. The Gemini API key in the settings table remains for the other Gemini features. See [Keyless Google Auth](google-workload-identity.md#vertex-ai-for-deep-research).
 
 ### Access Pattern
 
@@ -740,6 +745,11 @@ Amazon Bedrock Guardrails operate in **detect-and-log mode**:
 - Tag-based access control
 - Role-filtered capabilities
 - Isolated agent execution
+- The ECS task role grants `bedrock:InvokeModel` on the foundation-model, inference-profile, provisioned-model, and `arn:aws:bedrock:*:*:project/default` resources in `infra/lib/constructs/ecs-service.ts`. The `project/default` grant is required for OpenAI GPT models on bedrock-runtime's Responses API, which [Bedrock GPT models](../architecture/streaming.md#amazon-bedrock-adapter-and-openai-gpt-models) use. Prod currently authenticates with stored keys, so the task-role path is not yet exercised there. When an environment stores no Bedrock keys, every AI SDK Bedrock client (Converse, Claude and Nova streaming, embeddings, and GPT Responses) signs as this task role instead, so these grants are what those clients depend on. The selection logic is in [Credential Resolution for Bedrock Clients](../architecture/streaming.md#credential-resolution-for-bedrock-clients).
+- **Permissions boundary.** Roles built by `ServiceRoleFactory.createECSTaskRole` in `infra/lib/constructs/security/service-role-factory.ts` attach the managed policy `AIStudio-PermissionBoundary-{env}` through `BaseIAMRole`. `PermissionBoundaryConstruct` builds that policy from `infra/lib/constructs/security/permission-boundaries/{env}-boundary.json` (staging uses the dev document). Dev and prod share one AWS account, so each document grants only its own environment's job-runner role. The `AllowPassRoleToEcsTasks` statement limits `iam:PassRole` to `ecs-tasks.amazonaws.com`.
+- **Job-runner PassRole.** The router and cron Lambdas promote long turns by calling `ecs:RunTask` on the job-runner task definition (`createJobRunner` in `infra/lib/agent-platform-stack.ts`). RunTask needs `iam:PassRole` on both roles the task assumes: the task role `psd-agent-job-runner-task-role-{env}`, whose name is fixed since #1990, and the CDK-generated execution role. The boundary's original `arn:aws:iam::*:role/*JobRunner*` pattern is case-sensitive and does not match the lowercase task-role name. Promotions therefore failed with "no permissions boundary allows the iam:PassRole action" until the boundary also lists the task role per environment (#1995). The promotion flow itself is described under [Agent Router](#agent-router).
+  - Change guidance: when the job-runner role name changes, update both boundary documents, the stack's `JobRunnerPassRole` statements, and `tests/unit/job-runner-passrole-boundary.test.ts` together. The test asserts that dev and prod each allow only their own task role and that the `iam:PassedToService` condition stays `ecs-tasks.amazonaws.com`.
+  - Validation: `bunx jest --silent job-runner-passrole-boundary` from the repository root. This test reads the JSON and does not call AWS. A deployed check is needed only when a role or boundary is actually renamed.
 
 ### Network Security
 
@@ -760,6 +770,7 @@ AWS WAF protects the ALB with managed rule groups, but body-inspection signature
 **Problem** (2026-09-22):
 - `CrossSiteScripting_BODY` blocked Nexus chat when conversation history contained Gemini Google Search grounding HTML (`<style>…` markup in tool results)
 - `SQLi_BODY` blocked agent runtime credential fetches during scheduled briefs
+- From 2026-10-21, `SQLiExtendedPatterns_BODY` (SQL database group Version_2.5, which the ACL runs unpinned) blocked `psd-data query` calls to `/api/agent/credentials` with 161 bare 403s in five days, while `tables` and `schema` still worked
 - Requests returned HTTP 403 without reaching the app, making attribution impossible
 
 **Solution**: Label-based pattern for AI body paths:
@@ -778,7 +789,7 @@ AWS WAF protects the ALB with managed rule groups, but body-inspection signature
 **Body Signatures Covered**:
 - Core: `CrossSiteScripting_BODY`, `GenericLFI_BODY`, `EC2MetaDataSSRF_BODY`
 - Known Bad Inputs: `JavaDeserializationRCE_BODY`, `Log4JRCE_BODY`, `ReactJSRCE_BODY`
-- SQLi: `SQLi_BODY`
+- SQLi: `SQLi_BODY`, `SQLiExtendedPatterns_BODY` (added 2026-10-26; both labels are `awswaf:managed:aws:sql-database:…`)
 
 **Long-standing COUNT rules**: `SizeRestrictions_BODY` and `GenericRFI_BODY` remain COUNT-only everywhere (8 KB cap breaks uploads, RFI fires on normal prompts). These are NOT re-blocked.
 
@@ -803,8 +814,11 @@ Full WAF request logging to CloudWatch Logs for forensic attribution:
 1. **All credential headers MUST be redacted** — any header that authenticates a request must not appear in logs
 2. **Body signatures block on non-AI paths** — XSS, SQLi, LFI, SSRF protections remain enforced for form posts
 3. **Label strings are exact** — wrong label name silently disables that signature everywhere, so test pins verbatim strings from `aws wafv2 describe-managed-rule-group`
+4. **Every `_BODY` rule is listed** — AWS can add a body rule to a managed group. `BODY_SIGNATURE_RULES` and the test's `MANAGED_BODY_RULES` must both grow, or the new rule blocks AI bodies again. Re-check the groups with `describe-managed-rule-group` when a new 403 appears on `/api/agent/*` or `/api/nexus/chat`.
 
 **Focused Tests**: `/infra/test/frontend-waf-body-signatures.test.ts` — 7 tests validating rule configuration, AI path exemptions, credential header redaction, and label names
+
+**Minimal validation (quiet)**: `cd infra && bunx jest --silent test/frontend-waf-body-signatures.test.ts`. This is a configuration check; it does not call AWS. The expected rule and label lists come from a `describe-managed-rule-group` snapshot, so a live check against AWS is needed only when the managed rule version changes.
 
 ---
 
@@ -879,9 +893,9 @@ AI Studio uses GitHub Actions for continuous integration and deployment. Non-tri
 
 | Workflow | Reusable Source | Purpose |
 |----------|-----------------|---------|
-| `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@main` | AI-assisted PR review |
-| `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@main` | Automated documentation regeneration |
-| `psd-ci.yml` | `PSD401/.github/.github/workflows/reusable-psd-ci.yml@main` | Org-standard CI gate (check `psd-ci / psd-ci`) |
+| `claude-code-review.yml` | `PSD401/.github/.github/workflows/reusable-claude-review.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | AI-assisted PR review |
+| `openwiki-update.yml` | `PSD401/.github/.github/workflows/reusable-openwiki.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | Automated documentation regeneration |
+| `psd-ci.yml` | `PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41` (v1.0.0) | Org-standard CI gate (check `psd-ci / psd-ci`) |
 
 The `psd-ci.yml` caller passes no secrets and sets `build-command` to empty, so the gate runs install, lint, typecheck, and `test:ci` without `next build` or `AUTH_*` environment. Its install command mirrors the root install plus the `infra/lambdas/agent-router` and `infra/lambdas/agent-cron` installs, because those Lambdas resolve AWS SDK dependencies from their own `package.json`; a root-only install fails typecheck. The Postgres-backed suites and the production auth build remain in `ci.yml`. The Claude review caller passes only the one secret the reusable workflow reads, `BEDROCK_API_KEY`, by name instead of `secrets: inherit`, so the review job does not receive every other org and repo secret. The `claude-review` job is skipped for `dependabot[bot]` (Dependabot cannot grant `id-token: write` to the reusable), so a sibling job `claude-review-dependabot` with the same check name runs only for Dependabot, with empty `permissions` and no secrets, and calls the no-op skip reusable. A skipped job alone reports only `claude-review` and would never satisfy the required `claude-review / claude-review` check on production rulesets. The OpenWiki caller follows the same rule with two named secrets: `BEDROCK_API_KEY` for the model and `PSD_AUTOMATION_APP_PRIVATE_KEY` for the psd-automation GitHub App that opens and merges the docs PR. Keep new callers on explicit secret names; pass only the secrets the reusable workflow actually reads.
 
@@ -889,7 +903,7 @@ The `psd-ci.yml` caller passes no secrets and sets `build-command` to empty, so 
 
 Recent workflow changes establish conventions to follow when editing or adding workflows:
 
-- **Pin third-party actions to commit SHAs.** `ci.yml`, `claude.yml`, `agent-eval-l2.yml`, and `agent-eval-nightly.yml` pin actions such as `aws-actions/configure-aws-credentials`, `aws-actions/amazon-ecr-login`, `docker/setup-qemu-action`, and `anthropics/claude-code-action` to a full SHA with the release as a trailing comment. Not every action is pinned yet (for example `actions/github-script@v9` is still a tag). The org security-scan call (`security-scan.yml`) and the org `psd-ci` call (`psd-ci.yml`) are deliberately left on `@main` and marked with a zizmor ignore, so central fixes propagate.
+- **Pin every `uses:` reference to a commit SHA.** Every live `uses:` line in `.github/workflows/` (first-party actions, third-party actions, and the org reusable workflows) is a full 40-character SHA with the release as a trailing comment, for example `actions/checkout@3d3c42e5…  # v7.0.1`. The org reusable callers (`psd-ci.yml`, `claude-code-review.yml`, `security-scan.yml`, `openwiki-update.yml`) are pinned to the `PSD401/.github` v1.0.0 SHA rather than `@main`, so an org-side fix reaches this repository only when that pin is bumped in every caller. The earlier `@main` exception with zizmor ignores has been removed. A commented-out example (`codecov/codecov-action@v3` in `ci.yml`) is the only tag left. The eval-harness contract test `EvalAutomationContractTests` in `infra/agent-image/test_eval_summary.py` checks that the eval workflows' checkout is SHA-pinned and checks out `dev`, so keep those lines in the expected shape when editing them.
 - **Pass expressions to scripts through `env:`, not inline interpolation.** `sdk-version-guard.yml` previously interpolated `${{ steps.version-check.outputs.* }}` and `${{ github.base_ref }}` directly into `run:` and `script:` bodies, which is a template-injection risk. The steps now declare those values in a step-level `env:` block and read them as shell variables or `process.env`. Use the same pattern for any new step that handles branch names, PR fields, or step outputs.
 - **Secret scanning uses a reviewed baseline.** The root `.gitleaksignore` lists fingerprints of reviewed historical findings (documentation placeholders, test fixtures, and one SQL column name). Its header states that anything not listed still fails `security-scan.yml`. Do not add fingerprints for new code to make a scan pass; fix the finding or review it explicitly.
 
@@ -903,7 +917,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
+    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       base_branch: dev
     secrets:
@@ -931,72 +945,7 @@ Benefits:
 | `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
 | `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
 | `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
-| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml@main` (install, lint, typecheck, `test:ci`; no build, no secrets) |
-
----
-
-## Key Source Files
-
-| File/Directory | Purpose |
-|----------------|---------|
-| `/infra/bin/infra.ts` | CDK app entrypoint |
-| `/infra/lib/stacks/` | Stack definitions |
-| `/infra/lib/constructs/` | Reusable patterns |
-| `/infra/database/` | Migrations |
-| `/infra/lambdas/` | Lambda function code |
-| `/infra/policies/` | Cedar policies |
-| `/infra/agent-image/` | Agent container |
-| `/.github/workflows/` | CI/CD workflows |
-| `/.gitleaksignore` | Reviewed secret-scan baseline (see [Workflow Hardening Rules](#workflow-hardening-rules)) |
-
----
-
-## Related Concepts
-
-- **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
-- **[data-models/overview.md](../data-models/overview.md)** — Database schema
-- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
-ts for new code to make a scan pass; fix the finding or review it explicitly.
-
-### Caller Pattern
-
-Caller workflows are minimal—granting permissions and passing configuration:
-
-```yaml
-jobs:
-  openwiki:
-    permissions:
-      contents: write
-      pull-requests: write
-    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
-    with:
-      base_branch: dev
-    secrets:
-      BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
-      PSD_AUTOMATION_APP_PRIVATE_KEY: ${{ secrets.PSD_AUTOMATION_APP_PRIVATE_KEY }}
-```
-
-Benefits:
-- Single source of truth for workflow logic
-- Centralized security and dependency updates
-- Reduced boilerplate in repository callers
-
-### Index of Workflows
-
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| `ci.yml` | Push and PR to main/dev | Lint, typecheck, tests |
-| `claude-code-review.yml` | PR opened/ready | AI-assisted code review |
-| `claude.yml` | Issue and PR comments, issue opened/assigned, PR review submitted | Interactive Claude assistant triggered from GitHub events |
-| `claude-dispatch.yml` | `repository_dispatch` (`claude-dispatch`) | Claude run started by an external dispatch event |
-| `sdk-version-guard.yml` | PRs touching `package.json`, `bun.lock`, or `lib/streaming/**`; weekly schedule; manual | SDK version guard for streaming changes |
-| `openwiki-update.yml` | Push to dev (excluding openwiki/**), weekly schedule, manual | Regenerate OpenWiki docs; passes only `BEDROCK_API_KEY` and `PSD_AUTOMATION_APP_PRIVATE_KEY` by name |
-| `agent-eval-nightly.yml` | Manual dispatch only (nightly schedule removed 2026-10-07) | Agent skill evaluation baseline (55 regression and capability tasks) |
-| `agent-eval-l2.yml` | Manual dispatch only (weekly schedule removed 2026-10-07) | Live-dev fixture-drift eval run |
-| `agent-eval-upstream-inventory.yml` | PRs and pushes to main/dev touching the agent image, eval coverage, or upstream inventory files; weekly schedule; manual | Upstream skill inventory and eval coverage check |
-| `security-scan.yml` | PRs, push to dev, weekly schedule (Mondays 09:00 UTC), manual | Calls the org reusable security scan |
-| `codeql.yml` | Push and PR to main/dev, weekly schedule | Security analysis |
-| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml@main` (install, lint, typecheck, `test:ci`; no build, no secrets) |
+| `psd-ci.yml` | Every pull request and pushes to `dev` | Org-standard `psd-ci / psd-ci` gate calling the reusable `reusable-psd-ci.yml` pinned at `1aa5f535` (v1.0.0) (install, lint, typecheck, `test:ci`; no build, no secrets) |
 
 ---
 

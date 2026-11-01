@@ -428,6 +428,7 @@ function ShareDialogBody({
   level,
   savedLevel,
   canEdit,
+  inPrivateCollection,
   saving,
   grants,
   grantLabels,
@@ -452,6 +453,7 @@ function ShareDialogBody({
   level: Level;
   savedLevel: Level;
   canEdit: boolean;
+  inPrivateCollection: boolean;
   saving: boolean;
   grants: Grant[];
   grantLabels: Record<string, string>;
@@ -512,11 +514,8 @@ function ShareDialogBody({
         )}
 
         <p className="mer-share-section-label">Who can see it</p>
-        <LevelPicker
-          level={level}
-          disabled={!canEdit || saving}
-          onChange={onChangeLevel}
-        />
+        <LevelPicker level={level} disabled={!canEdit || saving}
+          privateOnly={inPrivateCollection} onChange={onChangeLevel} />
         {/* Keyed off the DRAFT level, not the saved one: the caveat is about the
             choice the author is making right now, and it has to appear before
             they save rather than after. */}
@@ -717,7 +716,13 @@ function useSharePublish(idOrSlug: string, onChanged: () => void) {
  * lint.
  */
 function applyLoadedVisibility(
-  data: { visibilityLevel: string; grants: unknown[]; grantLabels: Record<string, string>; canEdit: boolean },
+  data: {
+    visibilityLevel: string;
+    grants: unknown[];
+    grantLabels: Record<string, string>;
+    canEdit: boolean;
+    inPrivateCollection: boolean;
+  },
   draftDirty: boolean,
   set: {
     setLevel: (v: Level) => void;
@@ -726,6 +731,7 @@ function applyLoadedVisibility(
     setSavedGrants: (v: Grant[]) => void;
     setGrantLabels: (fn: (prev: Record<string, string>) => Record<string, string>) => void;
     setCanEdit: (v: boolean) => void;
+    setInPrivateCollection: (v: boolean) => void;
     setError: (v: string | null) => void;
     setLevelKnown: (v: boolean) => void;
   }
@@ -742,6 +748,7 @@ function applyLoadedVisibility(
   // locally-known label the server has not been told about yet.
   set.setGrantLabels((prev) => ({ ...prev, ...data.grantLabels }));
   set.setCanEdit(data.canEdit);
+  set.setInPrivateCollection(data.inPrivateCollection);
   set.setError(null);
   set.setLevelKnown(true);
 }
@@ -756,6 +763,8 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
   // level we never learned).
   const [levelKnown, setLevelKnown] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
+  // Filed in a private collection → only `private` can ever save (see LevelPicker).
+  const [inPrivateCollection, setInPrivateCollection] = useState(false);
   const [level, setLevel] = useState<Level>("private");
   const [grants, setGrants] = useState<Grant[]>([]);
   // Display names for `user` grants — see `grantDisplay`.
@@ -804,7 +813,7 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
             setSavedLevel,
             setSavedGrants,
             setGrantLabels,
-            setCanEdit,
+            setCanEdit, setInPrivateCollection,
             setError,
             setLevelKnown,
           });
@@ -940,7 +949,7 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
       <ShareDialogBody
         level={level}
         savedLevel={savedLevel}
-        canEdit={canEdit}
+        canEdit={canEdit} inPrivateCollection={inPrivateCollection}
         saving={saving}
         grants={grants}
         grantLabels={grantLabels}
@@ -969,11 +978,19 @@ export function VisibilityChip({ idOrSlug, share, onChange }: VisibilityChipProp
 interface LevelPickerProps {
   level: Level;
   disabled: boolean;
+  /**
+   * The object is filed in a private collection, where the service rejects every
+   * level but `private`. The wider levels are shown disabled (not hidden) with a
+   * note saying why, so the author learns what to do instead of hitting a failed
+   * save. `private` itself stays selectable so legacy content that is somehow
+   * wider than its collection allows can still be narrowed back.
+   */
+  privateOnly: boolean;
   onChange: (level: Level) => void;
 }
 
 /** The visibility-level select + its one-line help text. */
-function LevelPicker({ level, disabled, onChange }: LevelPickerProps) {
+function LevelPicker({ level, disabled, privateOnly, onChange }: LevelPickerProps) {
   return (
     <div className="space-y-1.5">
       <Label htmlFor="visibility-level">Level</Label>
@@ -987,7 +1004,11 @@ function LevelPicker({ level, disabled, onChange }: LevelPickerProps) {
         </SelectTrigger>
         <SelectContent className={meridianPortalClassName}>
           {LEVELS.map((l) => (
-            <SelectItem key={l.value} value={l.value}>
+            <SelectItem
+              key={l.value}
+              value={l.value}
+              disabled={privateOnly && l.value !== "private"}
+            >
               {l.label}
             </SelectItem>
           ))}
@@ -996,6 +1017,12 @@ function LevelPicker({ level, disabled, onChange }: LevelPickerProps) {
       <p className="text-xs text-muted-foreground">
         {LEVELS.find((l) => l.value === level)?.help}
       </p>
+      {privateOnly && (
+        <p className="text-xs text-muted-foreground" data-testid="visibility-private-collection-note">
+          This is in a private collection, so it stays private. To share it,
+          move it out of the private collection first.
+        </p>
+      )}
     </div>
   );
 }

@@ -52,7 +52,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -165,6 +165,16 @@ jobs:
         # Dedicated collab-token signing key (mirrors the smoke's own default).
         COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
+    # Nexus generated-document markdown (Bun, #1898). lib/ai/markdown-blocks.ts
+    # and lib/ai/document-docx-builder.ts import pure-ESM `marked`, which
+    # next/jest cannot transform, so the jest suites mock both modules and own
+    # only the orchestration. Without this step the markdown -> Word/slides
+    # mapping — the whole point of the issue — would run in no gate at all.
+    - name: Run Nexus document markdown smoke (Bun)
+      run: bun run test:smoke:nexus-document-markdown
+      env:
+        CI: true
+
     # psd-credentials skill gate (Bun, #1887). These tests sat beside the skill
     # with no `test` script and no CI step, so the credential-broker client —
     # including the new one-time entry-link command, the only sanctioned way to
@@ -354,9 +364,13 @@ jobs:
           infra/agent-image/skills/psd-credentials/check_capability.test.js
           infra/agent-image/skills/psd-data/common.test.js
           infra/agent-image/skills/psd-data/run.test.js
+          # Paid Deep Research runs: start, resume after a cut-off turn,
+          # and never start a second run while one is active.
+          infra/agent-image/skills/psd-deep-research/research.test.js
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js
+          infra/agent-image/skills/psd-prr/run.test.js
           infra/agent-image/skills/psd-publish-file/publish.test.js
           infra/agent-image/skills/psd-plaud/run.test.js
           infra/agent-image/skills/psd-skills-meta/authority.test.js
@@ -378,6 +392,15 @@ jobs:
     # fire_key later fails for real.
     - name: Run agent-cron Lambda tests (Bun)
       run: bun run test:lambda:cron
+      env:
+        CI: true
+
+    # group-sync (#1989). Same gap as agent-cron above: root jest ignores
+    # /infra/ and infra's `lambdas` project only matches __tests__/, so the
+    # reconciler's fail-safety tests and the keyless directory-auth tests ran
+    # nowhere. Needs its own install (@googleapis/cloudidentity).
+    - name: Run group-sync Lambda tests (Bun)
+      run: bun run test:lambda:group-sync
       env:
         CI: true
 
@@ -436,7 +459,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -535,7 +558,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Bun
       uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
@@ -561,10 +584,10 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Setup Node.js
-      uses: actions/setup-node@v7
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         # 22.x, not 20.x: argon2 >= 0.45 builds via `bunx node-gyp@latest`, and
         # node-gyp 13's undici needs webidl.util.markAsUncloneable (Node >= 22.9)

@@ -211,6 +211,40 @@ describe("setVisibilityAction — write", () => {
     expect(result.isSuccess).toBe(false);
   });
 
+  it("surfaces the private-collection rule's message, not the generic fallback", async () => {
+    // Prod 2026-10-23: a doc in a private collection set to Internal showed only
+    // "Failed to update visibility". The service's reason is the actionable part.
+    const { PrivateCollectionLevelError } = jest.requireActual("@/lib/content/errors");
+    setLevelMock.mockRejectedValueOnce(new PrivateCollectionLevelError());
+    const result = await setVisibilityAction("o1", { level: "internal" });
+    expect(result.isSuccess).toBe(false);
+    expect(result.message).toBe(
+      "Content in a private collection must remain private"
+    );
+  });
+
+  it("does NOT surface grant-target validation text (directory probe)", async () => {
+    // assertGrantTargetsExist names unknown ids; echoing it would let an editor
+    // test whether any users.id exists.
+    const { ValidationError } = jest.requireActual("@/lib/content/errors");
+    setLevelMock.mockRejectedValueOnce(
+      new ValidationError("Unknown user id(s): 999999.", { kind: "user" })
+    );
+    const result = await setVisibilityAction("o1", {
+      level: "group",
+      grants: [{ kind: "user", value: "999999" }],
+    });
+    expect(result.isSuccess).toBe(false);
+    expect(result.message).toBe("Failed to update visibility");
+  });
+
+  it("keeps the generic message for a non-validation failure", async () => {
+    setLevelMock.mockRejectedValueOnce(new Error("connection reset"));
+    const result = await setVisibilityAction("o1", { level: "internal" });
+    expect(result.isSuccess).toBe(false);
+    expect(result.message).toBe("Failed to update visibility");
+  });
+
   it("surfaces the §26.4 gate as a distinct approval_required state, not a generic error", async () => {
     // A non-admin widening to `public` is denied by the gate as an
     // ApprovalRequiredError. The action must map it to `approvalRequired: true`

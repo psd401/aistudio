@@ -7,6 +7,7 @@ import {
   type ContentSafetyResult,
 } from "@/lib/safety";
 import { ContentSafetyBlockedError } from "@/lib/streaming/types";
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from "@/lib/nexus/attachment-search-tool-name";
 
 interface CreateNexusAttachmentToolsInput {
   repositoryIds: number[];
@@ -71,7 +72,7 @@ export function createNexusAttachmentTools(
 ): ToolSet {
   return createNexusRepositorySearchTools({
     ...input,
-    toolName: "searchNexusAttachments",
+    toolName: NEXUS_ATTACHMENT_SEARCH_TOOL_NAME,
     description:
       "Search the documents attached to this Nexus conversation. Use this before answering questions about attachments and cite the returned source labels.",
   });

@@ -23,22 +23,29 @@ const SKILL_MD = join(
 )
 
 /**
- * Every `gws <service>.<resource>.<action>` invocation the doc shows.
+ * Every `gws <service> <resource> <action>` invocation the doc shows, read
+ * EXACTLY as written.
  *
- * Deliberately one flat, bounded pattern: an earlier version nested quantifiers
- * to parse space- and dot-separated forms together and tripped
- * `security/detect-unsafe-regex`. The dotted form is what the examples use, and
- * this only guards that the scrape still finds something.
+ * The earlier version of this scrape converted dots to spaces, which is
+ * precisely what hid #1893: SKILL.md taught the dotted spelling, the broker
+ * refused it, and this test rewrote the doc's form into the one the broker
+ * accepted before asserting anything. Nothing is rewritten now — a dotted
+ * example simply is not found, and the named-operations check below fails
+ * until SKILL.md uses the canonical spaced form.
+ *
+ * Deliberately one flat, bounded pattern: a `{1,20}` nested inside a `{1,3}`
+ * is star-height 2 and `security/detect-unsafe-regex` rejects it however tight
+ * the bounds.
  */
 function documentedOperations(): string[] {
   const md = readFileSync(SKILL_MD, "utf8")
   const found = new Set<string>()
-  // One flat character run, split in JS. A `{1,20}` nested inside a `{1,3}`
-  // is star-height 2 and `security/detect-unsafe-regex` rejects it however
-  // tight the bounds — the same shape the chat-chart email pattern hit.
-  for (const match of md.matchAll(/gws ([a-z][a-z.]{1,60})/g)) {
-    const parts = match[1]!.split(".").filter(Boolean)
-    if (parts.length >= 2 && parts.length <= 4) {
+  // One flat character run (letters and single spaces), split in JS. Anchored
+  // to the start of a line so prose that happens to mention `gws` ("Never
+  // invent gws subcommand syntax") is not scraped as an operation.
+  for (const match of md.matchAll(/^gws ([A-Za-z][A-Za-z ]{1,60})/gm)) {
+    const parts = match[1]!.split(" ").filter(Boolean)
+    if (parts.length >= 2 && parts.length <= 5) {
       found.add(parts.join(" ").toLowerCase())
     }
   }
@@ -133,9 +140,23 @@ describe("SKILL.md examples stay reachable through the broker", () => {
       "drive comments create",
       "forms forms create",
       "gmail users labels create",
+      // Five tokens, and the only reason it reads as an operation at all is
+      // that the four-token cutoff is gone (#1893).
+      "gmail users settings filters create",
     ]) {
       expect(ops).toContain(required)
     }
+  })
+
+  it("documents the methods in the canonical spaced form", () => {
+    // The dotted spelling is accepted by the broker but must not be what the
+    // doc teaches: teaching it is how #1893 reached 21 users, and converting
+    // dots to spaces inside this very test is how it stayed hidden.
+    const md = readFileSync(SKILL_MD, "utf8")
+    const dotted = [...md.matchAll(/^gws ([A-Za-z][A-Za-z0-9.]*)/gm)]
+      .map((match) => match[1]!)
+      .filter((candidate) => candidate.includes("."))
+    expect(dotted).toEqual([])
   })
 
   it("still refuses everything the docs describe as forbidden", () => {

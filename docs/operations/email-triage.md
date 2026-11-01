@@ -156,7 +156,7 @@ For each opted-in user every 5 minutes:
 | `TRIAGE_TABLE` | `psd-agent-triage-<env>` | DDB table name |
 | `TRIAGE_USER_BATCH` | `10` | Users processed in parallel per batch within a tick |
 | `TRIAGE_LLM_MODEL_ID` | `us.amazon.nova-micro-v1:0` | Bedrock model for the ambiguous-classification fallback. Set to `us.anthropic.claude-3-5-haiku-...` to swap to Haiku without a redeploy (the role grants both). |
-| `GOOGLE_CREDENTIALS_SECRET_ARN` | (set by CDK) | Chat-bot service-account JSON for escalation posts |
+| `GOOGLE_CHAT_WIF_AUDIENCE`, `GOOGLE_CHAT_SERVICE_ACCOUNT_EMAIL` | (set by CDK) | Keyless Chat-bot auth (WIF) for escalation posts |
 | `AWS_REGION` | (Lambda runtime) | DDB / Bedrock / Secrets region |
 
 `psd-agent-triage-digest` Lambda:
@@ -164,7 +164,7 @@ For each opted-in user every 5 minutes:
 | Env var | What it does |
 |---------|--------------|
 | `TRIAGE_TABLE` | DDB table |
-| `GOOGLE_CREDENTIALS_SECRET_ARN` | Chat creds for the digest card |
+| `GOOGLE_CHAT_WIF_AUDIENCE`, `GOOGLE_CHAT_SERVICE_ACCOUNT_EMAIL` | Keyless Chat auth (WIF) for the digest card |
 
 Agent skill (in the container, env injected by `agent-platform-stack.ts`):
 

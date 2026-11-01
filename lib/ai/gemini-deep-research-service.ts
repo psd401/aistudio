@@ -30,8 +30,8 @@ import { GoogleGenAI, Interactions } from '@google/genai';
 // Aliasing here keeps the rest of the file readable.
 type Interaction = Interactions.Interaction;
 import { createLogger, generateRequestId } from '@/lib/logger';
-import { Settings } from '@/lib/settings-manager';
-import { ErrorFactories } from '@/lib/error-utils';
+import { VERTEX_INTERACTIONS_LOCATION } from '@/lib/ai/google-vertex-wif';
+import { getGoogleGenAIOptions } from '@/lib/ai/google-provider';
 
 const log = createLogger({ module: 'gemini-deep-research-service' });
 
@@ -265,12 +265,13 @@ export function mapInteractionError(err: unknown): DeepResearchError {
   return createError('AGENT_FAILURE', `Deep Research failed: ${msg.slice(0, 300)}`);
 }
 
+/**
+ * Deployed (ECS): Vertex AI with keyless WIF auth (lib/ai/google-vertex-wif.ts,
+ * psd401/psd-gcp-infra vertex-ai.tf). The Gemini API key path remains only
+ * where the GOOGLE_VERTEX_* variables are all unset, i.e. local development.
+ */
 async function createGoogleClient(): Promise<GoogleGenAI> {
-  const apiKey = await Settings.getGoogleAI();
-  if (!apiKey) {
-    throw ErrorFactories.sysConfigurationError('Google API key not configured');
-  }
-  return new GoogleGenAI({ apiKey });
+  return new GoogleGenAI(await getGoogleGenAIOptions(VERTEX_INTERACTIONS_LOCATION));
 }
 
 /**
@@ -294,6 +295,26 @@ export async function createDeepResearchInteraction(
       interactionId: interaction.id,
       status: interaction.status,
     };
+  } catch (error) {
+    throw mapInteractionError(error);
+  }
+}
+
+/**
+ * The text the run was started with (its user_input step), or null when the
+ * interaction has none. Used to resume a run only for the same question.
+ */
+export async function getDeepResearchInteractionPrompt(
+  interactionId: string
+): Promise<string | null> {
+  const client = await createGoogleClient();
+  try {
+    const interaction = await client.interactions.get(interactionId);
+    const text = (interaction.steps ?? [])
+      .flatMap((step) => (step.type === 'user_input' ? (step.content ?? []) : []))
+      .flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
+      .join('');
+    return text.length > 0 ? text : null;
   } catch (error) {
     throw mapInteractionError(error);
   }

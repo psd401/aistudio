@@ -43,6 +43,25 @@ const MAX_VALUE_LENGTH = 4096
 const PLACEHOLDER_RE = /^<[^>]+>$/
 
 /**
+ * Slot-specific shape rules, checked before the claim like every other value
+ * rule. PSD Public Records personal access tokens always start `prr_pat_`
+ * (`prr_pat_<prefix>_<secret>`); anything else is a paste of the wrong thing,
+ * and storing it would only surface later as a PRR 401 inside a schedule.
+ */
+// A Map, not an object literal: slot names are agent-chosen, and a name such
+// as `constructor` must not resolve to an inherited property.
+const SLOT_PREFIXES: ReadonlyMap<string, { prefix: string; hint: string }> =
+  new Map([
+    [
+      "prr_pat",
+      {
+        prefix: "prr_pat_",
+        hint: "PSD Public Records tokens start with prr_pat_. Create one at https://prr.psd401.net/agent-access and paste the whole token.",
+      },
+    ],
+  ])
+
+/**
  * Why a credential-entry link cannot be used right now. Every branch is
  * rendered by the page; none of them echo the submitted value.
  */
@@ -168,7 +187,7 @@ export async function inspectCredentialEntry(
  * Reject a value the broker would reject anyway, BEFORE the nonce is claimed,
  * so a typo does not cost the user their link.
  */
-function valueProblem(value: unknown): string | null {
+function valueProblem(value: unknown, credentialName: string): string | null {
   if (typeof value !== "string" || value.trim().length === 0) {
     return "Enter the credential value."
   }
@@ -182,6 +201,14 @@ function valueProblem(value: unknown): string | null {
   }
   if (PLACEHOLDER_RE.test(value.trim())) {
     return "That looks like a placeholder, not a real credential value."
+  }
+  const slot = SLOT_PREFIXES.get(credentialName)
+  if (
+    slot &&
+    (!value.trim().startsWith(slot.prefix) ||
+      value.trim().length === slot.prefix.length)
+  ) {
+    return slot.hint
   }
   return null
 }
@@ -205,7 +232,7 @@ export async function submitCredentialEntry(
   if ("status" in verified) return verified
   const { ownerEmail, credentialName, nonce } = verified.link
 
-  const problem = valueProblem(input.value)
+  const problem = valueProblem(input.value, credentialName)
   if (problem) {
     return { status: "invalid-value", credentialName, reason: problem }
   }

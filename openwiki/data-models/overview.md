@@ -139,7 +139,7 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 **Model Management**
 | Table | Purpose |
 |-------|---------|
-| `ai_models` | Registered AI models with provider metadata |
+| `ai_models` | Registered AI models with provider metadata. `provider_metadata.defaultReasoningEffort` sets the default effort for Bedrock GPT rows (see [Reasoning Effort Resolution](../architecture/streaming.md#reasoning-effort-resolution)) |
 | `ai_streaming_jobs` | Active streaming job tracking |
 | `model_comparisons` | Side-by-side comparison results |
 | `model_replacement_audit` | Model substitution audit trail |

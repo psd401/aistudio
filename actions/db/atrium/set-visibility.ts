@@ -26,7 +26,11 @@ import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
 import { assertCanEdit } from "@/lib/content/helpers";
-import { ApprovalRequiredError, NotFoundError } from "@/lib/content/errors";
+import {
+  ApprovalRequiredError,
+  NotFoundError,
+  PrivateCollectionLevelError,
+} from "@/lib/content/errors";
 import { assertGrantKind, assertLevel } from "@/lib/content/validators";
 import type { VisibilityLevel } from "@/lib/content/types";
 import type { ActionState } from "@/types";
@@ -188,7 +192,18 @@ export async function setVisibilityAction(
           "Making this public requires administrator approval — your request has been submitted for review.",
       };
     }
-    return handleError(error, "Failed to update visibility", {
+    // The private-collection rule is shown verbatim instead of the generic
+    // fallback, which left users with no idea why the save failed. Deliberately
+    // NOT every ValidationError: grant-target checks name unknown user ids /
+    // unsynced groups, and surfacing those would let an editor enumerate the
+    // directory. This rule depends only on an object the caller already passed
+    // canView + assertCanEdit for. ContentError carries no `userMessage`, so
+    // handleError uses this as the message.
+    const userMessage =
+      error instanceof PrivateCollectionLevelError
+        ? error.message
+        : "Failed to update visibility";
+    return handleError(error, userMessage, {
       context: "setVisibilityAction",
       requestId,
       operation: "setVisibilityAction",

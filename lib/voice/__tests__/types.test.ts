@@ -42,7 +42,6 @@ describe("VoiceProviderConfig", () => {
     expect(config.language).toBeUndefined()
     expect(config.voiceName).toBeUndefined()
     expect(config.systemInstruction).toBeUndefined()
-    expect(config.apiKey).toBeUndefined()
   })
 
   it("should accept full config", () => {
@@ -51,7 +50,6 @@ describe("VoiceProviderConfig", () => {
       language: "en-US",
       voiceName: "Aoede",
       systemInstruction: "Be helpful",
-      apiKey: "test-key",
     }
     expect(config.language).toBe("en-US")
     expect(config.voiceName).toBe("Aoede")

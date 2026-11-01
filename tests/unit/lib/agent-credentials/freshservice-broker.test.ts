@@ -304,10 +304,15 @@ describe("Freshservice broker behaviour", () => {
         "utf8",
       ),
     )
-    const freshserviceCase = routeSource.slice(
-      routeSource.indexOf('case "freshservice"'),
-      routeSource.indexOf('case "put"'),
+    // The case runs to the next case label or `default:` in its own switch.
+    const caseStart = routeSource.indexOf('case "freshservice"')
+    const caseEnd = Math.min(
+      ...[
+        routeSource.indexOf("case ", caseStart + 1),
+        routeSource.indexOf("default:", caseStart + 1),
+      ].filter((index) => index > caseStart),
     )
+    const freshserviceCase = routeSource.slice(caseStart, caseEnd)
 
     // Guard the slice, so the assertions below cannot pass on an empty string.
     expect(freshserviceCase).toContain("executeFreshserviceOperation")

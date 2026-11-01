@@ -316,8 +316,8 @@ function ConfigBanners({ data }: { data: GroupsAdminData }) {
       <Alert data-testid="groups-not-configured">
         <AlertCircle className="h-4 w-4" />
         <AlertDescription>
-          The Google service-account secret is not configured yet. Set{" "}
-          <code>GOOGLE_DIRECTORY_SA_SECRET_ARN</code> (and{" "}
+          The Google directory is not configured yet. Set{" "}
+          <code>GOOGLE_DIRECTORY_CUSTOMER_ID</code> (and{" "}
           <code>GROUP_SYNC_ENABLED=true</code>) in Admin → Settings to enable the
           hourly sync.
         </AlertDescription>

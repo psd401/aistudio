@@ -1,8 +1,10 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAzure } from '@ai-sdk/azure';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
 import { Settings } from '@/lib/settings-manager';
+import { createGoogleModelProvider } from '@/lib/ai/google-provider';
+import { createBedrockOpenAIModel, isBedrockOpenAIModel } from '@/lib/ai/bedrock-openai';
+import { getBedrockCredentialProvider } from '@/lib/ai/bedrock-credentials';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createLogger } from '@/lib/logger';
 import { LanguageModel } from 'ai';
@@ -86,21 +88,13 @@ async function createOpenAIModel(modelId: string): Promise<LanguageModel> {
 }
 
 /**
- * Google AI Provider - Supports Gemini models
+ * Google Provider - Gemini models via Vertex AI (deployed) or the Gemini API
+ * key (local dev only); see lib/ai/google-provider.ts.
  */
 async function createGoogleModel(modelId: string): Promise<LanguageModel> {
   try {
-    const apiKey = await Settings.getGoogleAI();
-    if (!apiKey) {
-      log.error('Google API key not configured');
-      throw ErrorFactories.sysConfigurationError('Google API key not configured');
-    }
-
     log.debug(`Creating Google model: ${modelId}`);
-    // Scope the DB-sourced key to this client instead of mutating process.env at
-    // request time (REV-COR-505 / REV-REF-034). Mirrors gemini-adapter.ts and
-    // image-generation-service.ts.
-    const google = createGoogleGenerativeAI({ apiKey });
+    const google = await createGoogleModelProvider();
     return google(modelId);
   } catch (error) {
     log.error('Failed to create Google model', { modelId, error });
@@ -109,37 +103,28 @@ async function createGoogleModel(modelId: string): Promise<LanguageModel> {
 }
 
 /**
- * Amazon Bedrock Provider - Supports Claude, Llama, and other Bedrock models
+ * Amazon Bedrock Provider - Supports Claude, Llama, and other Bedrock models.
+ * OpenAI GPT models (`us.openai.gpt-*`) use the Responses API on
+ * bedrock-runtime instead of Converse — see `@/lib/ai/bedrock-openai`.
  */
 async function createBedrockModel(modelId: string): Promise<LanguageModel> {
+  if (isBedrockOpenAIModel(modelId)) {
+    return createBedrockOpenAIModel(modelId);
+  }
+
   try {
     const config = await Settings.getBedrock();
-    const isLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const { source, credentialProvider } = getBedrockCredentialProvider(config);
 
     log.debug(`Creating Bedrock model: ${modelId}`, {
-      hasAccessKey: !!config.accessKeyId,
-      hasSecretKey: !!config.secretAccessKey,
       region: config.region || 'us-east-1',
-      isLambda
+      credentialSource: source
     });
 
-    const bedrockOptions: Parameters<typeof createAmazonBedrock>[0] = {
-      region: config.region || 'us-east-1'
-    };
-
-    // Only use explicit credentials for local development
-    // In Lambda, use IAM role credentials
-    if (!isLambda && config.accessKeyId && config.secretAccessKey) {
-      log.debug('Using explicit credentials for local development');
-      bedrockOptions.accessKeyId = config.accessKeyId;
-      bedrockOptions.secretAccessKey = config.secretAccessKey;
-    } else {
-      log.debug('Using default AWS credential chain');
-      // Let SDK use the default credential provider chain
-      // This works with IAM roles in Lambda
-    }
-
-    const bedrock = createAmazonBedrock(bedrockOptions);
+    const bedrock = createAmazonBedrock({
+      region: config.region || 'us-east-1',
+      credentialProvider
+    });
     return bedrock(modelId);
   } catch (error) {
     log.error('Failed to create Bedrock model', { modelId, error });
@@ -207,7 +192,7 @@ export async function createProviderModelWithCapabilities(
   provider: string,
   modelId: string,
   options?: {
-    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
     backgroundMode?: boolean;
     thinkingBudget?: number;

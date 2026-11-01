@@ -74,9 +74,31 @@ export function isWorkspaceAuthFailure(text: string | null | undefined): boolean
   );
 }
 
+/**
+ * The owner's PSD Public Records (PRR) personal access token is missing,
+ * expired (PRR tokens last at most 90 days), or revoked. Matched ONLY on the
+ * psd-prr skill's own codes, never on prose that mentions PRR, because the
+ * fix is a credential-entry link for the `prr_pat` slot.
+ */
+const PRR_CREDENTIAL_PATTERN = /prr_token_(?:missing|rejected)/i;
+
+export function isPrrCredentialFailure(text: string | null | undefined): boolean {
+  return typeof text === 'string' && PRR_CREDENTIAL_PATTERN.test(text);
+}
+
+/**
+ * `auth` is a Google Workspace re-consent; `prr-credential` is a new PRR
+ * personal access token; `streak` is everything else.
+ */
+export type ScheduleFailureNoticeReason = 'auth' | 'prr-credential' | 'streak';
+
 export type ScheduleFailureNoticeDecision =
   | { notify: false }
-  | { notify: true; reason: 'auth' | 'streak'; consecutiveFailures: number };
+  | {
+      notify: true;
+      reason: ScheduleFailureNoticeReason;
+      consecutiveFailures: number;
+    };
 
 export interface ScheduleFailureNoticeQuery {
   /** The schedule's current failure streak, aggregated over the whole streak. */
@@ -123,6 +145,17 @@ export function decideScheduleFailureNotice(
     return { notify: true, reason: 'auth', consecutiveFailures };
   }
 
+  // A PRR token failure also cannot fix itself, so it speaks on the first
+  // failure too. Checked after Google: a run that lost both is fixed in the
+  // order the owner is most likely to need first, and the next run reports
+  // the other.
+  if (
+    isPrrCredentialFailure(query.currentErrorMessage)
+    || isPrrCredentialFailure(newestErrorMessage)
+  ) {
+    return { notify: true, reason: 'prr-credential', consecutiveFailures };
+  }
+
   // At or above the threshold, not exactly at it: a streak that was already
   // long before this rule existed, or whose earlier message failed to send,
   // still has an owner who has heard nothing.
@@ -146,7 +179,7 @@ function describeStreak(consecutiveFailures: number): string {
 
 export interface ScheduleFailureNoticeInput {
   scheduleName: string;
-  reason: 'auth' | 'streak';
+  reason: ScheduleFailureNoticeReason;
   consecutiveFailures: number;
   /** The run's recorded error, already sanitized and length-bounded. */
   errorMessage: string | null;
@@ -176,6 +209,15 @@ export function buildScheduleFailureNoticeText(
   // the model's Markdown for exactly this reason). This text is composed here
   // and never passes through that converter, so it has to be Chat's dialect
   // already — otherwise the one thing meant to catch a teacher's eye is noise.
+  if (input.reason === 'prr-credential') {
+    return [
+      `⚠️ *${input.scheduleName}* could not reach PSD Public Records: your PRR personal access token is missing, expired, or revoked.`,
+      'Create a new token at https://prr.psd401.net/agent-access (tokens last at most 90 days).',
+      input.consentUrl
+        ? `*Fix it:* <${input.consentUrl}|Save your new PRR token> — paste the token there, not in this chat. The link works once and expires in 15 minutes; if it has expired, reply here and ask me for a PRR token link.`
+        : '*Fix it:* reply here and ask me for a PRR token link, then paste the new token into that page — not into this chat.',
+    ].join('\n\n');
+  }
   const headline =
     input.reason === 'auth'
       ? `⚠️ *${input.scheduleName}* could not run: my access to your Google account has expired or been turned off.`

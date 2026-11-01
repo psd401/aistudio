@@ -1,15 +1,14 @@
 import { NextRequest } from 'next/server';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getConversationById } from '@/lib/db/drizzle';
-
-// Initialize S3 client
-const s3Client = new S3Client({
-  region: process.env.NEXT_PUBLIC_AWS_REGION || process.env.AWS_REGION || 'us-east-1'
-});
+import {
+  getGeneratedImageBucket,
+  getGeneratedImageS3Client,
+} from '@/lib/ai/generated-image-bucket';
 
 /**
  * Secure Image Proxy API
@@ -80,18 +79,29 @@ export async function GET(
       return new Response('Not Found', { status: 404 });
     }
     
-    // 6. Generate presigned URL for the image (valid for 1 hour)
-    const bucketName = process.env.DOCUMENTS_BUCKET_NAME;
-    if (!bucketName) {
-      log.error('S3 bucket name not configured - missing DOCUMENTS_BUCKET_NAME');
-      return new Response('Internal Server Error', { status: 500 });
+    // Defence in depth: the ownership check above only proves the user owns
+    // `conversationId` (segment 2 of the key). S3 keys are literal, so
+    // `v2/generated-images/<ownedId>/../<otherId>/x.png` names no other
+    // conversation's object today — but nothing the server writes contains a
+    // dot or empty segment, so refuse them outright rather than rely on that.
+    if (pathParts.some((part) => part === '' || part === '.' || part === '..')) {
+      log.warn('Image key contains a relative or empty path segment', { s3Key });
+      return new Response('Not Found', { status: 404 });
     }
+
+    // 6. Generate presigned URL for the image (valid for 1 hour).
+    // Signed against the SAME resolver `storeImageInS3` wrote with: the generic
+    // S3 client resolves its bucket from the database `S3_BUCKET` setting
+    // instead, which is not guaranteed to match (#1900).
+    const bucketName = getGeneratedImageBucket();
     
     const getObjectCommand = new GetObjectCommand({
       Bucket: bucketName,
       Key: s3Key
     });
     
+    // Same client (and so the same region) the image was written with.
+    const s3Client = await getGeneratedImageS3Client();
     const presignedUrl = await getSignedUrl(s3Client, getObjectCommand, {
       expiresIn: 60 * 60 // 1 hour in seconds
     });

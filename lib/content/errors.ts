@@ -66,6 +66,23 @@ export class ValidationError extends ContentError {
   }
 }
 
+/**
+ * 400 — a level change refused because the object is filed in a PRIVATE
+ * collection, where only `private` is allowed. A distinct subclass (still a
+ * ValidationError for every existing instanceof/status mapping) so the Share
+ * dialog's action can surface THIS rule's message without surfacing other
+ * validation text — notably `assertGrantTargetsExist`'s "Unknown user id(s)" /
+ * "Group(s) not synced", which would let an editor probe the directory.
+ */
+export class PrivateCollectionLevelError extends ValidationError {
+  constructor(
+    message = "Content in a private collection must remain private",
+    details?: Record<string, unknown>
+  ) {
+    super(message, details);
+  }
+}
+
 /** 409 — a uniqueness/version race (slug collision, version-number conflict). */
 export class ConflictError extends ContentError {
   constructor(message = "Conflict", details?: Record<string, unknown>) {

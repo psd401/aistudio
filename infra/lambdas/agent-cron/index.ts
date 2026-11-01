@@ -56,6 +56,7 @@ import {
   type PromotionReason,
 } from './job-promotion';
 import * as chatPkg from '@googleapis/chat';
+import { createGoogleChatWifAuth } from './google-chat-wif';
 import * as crypto from 'node:crypto';
 import {
   ExecuteStatementCommand,
@@ -71,6 +72,7 @@ import {
 import {
   buildScheduleFailureNoticeText,
   decideScheduleFailureNotice,
+  type ScheduleFailureNoticeReason,
 } from './schedule-failure-notice';
 import {
   loadAuthorizedSchedule,
@@ -234,7 +236,6 @@ const agentCoreSigner = new SignatureV4({
 
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE || '';
-const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
@@ -266,8 +267,6 @@ const runTelemetry = createRunTelemetry(
 // Cached secrets and clients
 // ---------------------------------------------------------------------------
 
-let cachedGoogleCredentials: string | null = null;
-let credentialsCachedAt: number | null = null;
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000;
 
 let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
@@ -316,26 +315,6 @@ interface InvokeResult {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function getGoogleCredentials(): Promise<string> {
-  if (
-    cachedGoogleCredentials &&
-    credentialsCachedAt &&
-    Date.now() - credentialsCachedAt < CREDENTIALS_TTL_MS
-  ) {
-    return cachedGoogleCredentials;
-  }
-  if (!GOOGLE_CREDENTIALS_SECRET_ARN) {
-    throw new Error('GOOGLE_CREDENTIALS_SECRET_ARN not configured');
-  }
-  const result = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN }),
-  );
-  cachedGoogleCredentials = result.SecretString || '';
-  credentialsCachedAt = Date.now();
-  cachedChatClient = null;
-  return cachedGoogleCredentials;
-}
 
 async function getInvocationSigningSecret(): Promise<string> {
   if (
@@ -390,8 +369,25 @@ async function getInternalApiKey(): Promise<string | null> {
 const CONSENT_LINK_ROUTE = '/api/agent/consent-link';
 const CONSENT_LINK_TIMEOUT_MS = 5000;
 
+type OwnerConsentLinkRequest =
+  | { kind: 'user_account' }
+  | { kind: 'credential_entry'; name: 'prr_pat' };
+
+/** Which link fixes each auth-type notice reason; `streak` gets none. */
+function consentLinkRequestFor(
+  reason: ScheduleFailureNoticeReason,
+): OwnerConsentLinkRequest | null {
+  if (reason === 'auth') return { kind: 'user_account' };
+  if (reason === 'prr-credential') {
+    return { kind: 'credential_entry', name: 'prr_pat' };
+  }
+  return null;
+}
+
 /**
- * Mint the owner's Google re-authorization link for a failure DM (#1890).
+ * Mint the owner's fix-it link for a failure DM (#1890): a Google
+ * re-authorization link by default, or a one-time credential-entry link for
+ * the owner's PSD Public Records token (`prr_pat`).
  *
  * Deliberately best-effort and `null` on every failure: the owner must still
  * hear that their schedule is broken even if the link cannot be issued (the
@@ -404,6 +400,7 @@ async function mintOwnerConsentLink(
   schedule: { ownerEmail: string; scheduleId: string; workspacePrefix: string },
   sessionId: string,
   log: Logger,
+  consent: OwnerConsentLinkRequest = { kind: 'user_account' },
 ): Promise<string | null> {
   if (!APP_BASE_URL) return null;
   try {
@@ -418,7 +415,7 @@ async function mintOwnerConsentLink(
         workspacePrefix: schedule.workspacePrefix,
       },
     );
-    const requestBody = JSON.stringify({ kind: 'user_account' });
+    const requestBody = JSON.stringify(consent);
     const response = await fetch(
       `${APP_BASE_URL.replace(/\/+$/, '')}${CONSENT_LINK_ROUTE}`,
       {
@@ -475,15 +472,13 @@ async function mintOwnerConsentLink(
   }
 }
 
+// Keyless WIF auth (#1989); the auth client refreshes its own token.
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
   if (cachedChatClient) return cachedChatClient;
-  const credentialsJson = await getGoogleCredentials();
-  const credentials = JSON.parse(credentialsJson) as Record<string, unknown>;
-  const googleAuth = new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/chat.bot'],
+  cachedChatClient = chatPkg.chat({
+    version: 'v1',
+    auth: createGoogleChatWifAuth(),
   });
-  cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
   return cachedChatClient;
 }
 
@@ -2204,10 +2199,15 @@ async function notifyOwnerIfScheduleFailing(
       currentErrorMessage: recorded.fullErrorMessage,
     });
     if (!decision.notify) return;
-    const consentUrl =
-      decision.reason === 'auth'
-        ? await dependencies.mintOwnerConsentLink(target, sessionId, log)
-        : null;
+    const consentRequest = consentLinkRequestFor(decision.reason);
+    const consentUrl = consentRequest
+      ? await dependencies.mintOwnerConsentLink(
+        target,
+        sessionId,
+        log,
+        consentRequest,
+      )
+      : null;
     await dependencies.sendChatMessage(
       target.dmSpaceName,
       buildScheduleFailureNoticeText({

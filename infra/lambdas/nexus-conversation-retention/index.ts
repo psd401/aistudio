@@ -302,13 +302,25 @@ export const BOUND_EPHEMERAL_REPOSITORIES_SQL = `
 
 /**
  * Prefixes that hold everything a conversation owns in S3.
- * See app/api/nexus/conversations/[id]/messages/route.ts, which authorises reads
- * against exactly these two.
+ *
+ * `conversations/` and `v2/generated-images/` are also what
+ * app/api/nexus/conversations/[id]/messages/route.ts authorises reads against.
+ *
+ * `v2/nexus-documents/` (#1898) holds the Word/Excel/PowerPoint/PDF files the
+ * chat `generate_document` tool produces — see `NEXUS_DOCUMENT_PREFIX` in
+ * lib/ai/document-generation-service.ts, which writes the same bucket this
+ * Lambda sweeps. It is spelled out here rather than imported because this
+ * Lambda is its own package outside the app's module graph, as the two prefixes
+ * above already are. Omitting it would leave every generated document in S3
+ * forever: the conversation row is gone after `claimConversation`, so the sweep
+ * can never find that id again, and the file may hold whatever the user pasted
+ * into the chat — so the hard delete that is supposed to erase it would not.
  */
 function conversationStoragePrefixes(conversationId: string): string[] {
   return [
     `conversations/${conversationId}/`,
     `v2/generated-images/${conversationId}/`,
+    `v2/nexus-documents/${conversationId}/`,
   ];
 }
 

@@ -10,9 +10,15 @@ openwiki:
     - lib/repositories/repository-catalog-service.ts
     - lib/nexus/conversation-repository-service.ts
     - app/api/nexus/chat/route.ts
+    - app/api/nexus/chat/pdf-attachment-documents.ts
     - app/api/nexus/chat/image-generation-handler.ts
     - lib/ai/generated-image-bucket.ts
     - lib/ai/image-generation-service.ts
+    - lib/nexus/generated-image-markdown.ts
+    - lib/nexus/attachment-search-tool-name.ts
+    - app/api/images/[...key]/route.ts
+    - app/api/nexus/conversations/[id]/messages/route.ts
+    - components/assistant-ui/markdown-text.tsx
     - actions/db/atrium/artifact-query.ts
     - actions/db/atrium/artifact-guards.ts
     - actions/db/atrium/workspace-panel.ts
@@ -23,6 +29,7 @@ openwiki:
     - actions/db/atrium/comments.ts
     - actions/db/atrium/publish-document.ts
     - lib/nexus/model-router/router.ts
+    - lib/nexus/routing-tool-names.ts
     - lib/nexus/model-router/types.ts
     - lib/nexus/model-router/psd-data-connector.ts
     - lib/nexus/workspace-routing-contract.ts
@@ -158,6 +165,8 @@ openwiki:
     - Generated image bucket resolver is separate from generic S3 client — getGeneratedImageBucket() reads DOCUMENTS_BUCKET_NAME directly; storeImageInS3 and resolvePreviousGeneratedImageReferences must use the same bucket (#1804)
     - Generated images use key prefix v2/generated-images/{conversationId}/ — only keys under this prefix are readable for edits, preventing cross-conversation access (#1804)
     - Edit-after-persistence reads by S3 key, not presigned URL — presigned URLs expire after one hour; edits work indefinitely by hydrating image bytes from durable storage (#1804)
+    - Reloaded generated images render through `/api/images/[...key]`, not a presigned URL — the proxy re-checks ownership and re-signs with the same bucket and region resolver that wrote the image (#1900)
+    - A model that answers an image request in text is not a failed turn — its explanation is saved as an assistant reply, and rollback applies only to an unexplained failure or a save that fails (#1900)
     - Bridge failures are typed — `err.code` is one of a closed set (unauthenticated, forbidden, not_query_mode, rate_limited, timeout, query_error, too_many_requests, unavailable); wrap every AtriumData call in try/catch and branch on the code (#1787)
     - query_error message is viewer-gated — the database error message is attached only when the requester can EDIT the artifact; plain readers get the code with a generic message (#1787)
     - Error messages are bounded and flattened — multi-line Postgres errors collapse to one line; length capped at 500 characters; never grow without bound or smuggle line structure into prompts (#1787)
@@ -270,7 +279,7 @@ openwiki:
     - tests/unit/use-toast-sonner-adapter.test.ts
     - tests/e2e/assistant-architect-create-add-field.functional.spec.ts
     - tests/unit/lib/tools/web-fetch-tool.test.ts
-    - tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts
+    - lib/nexus/model-router/__tests__/url-detection.test.ts
     - tests/e2e/nexus-url-access.functional.spec.ts
     - tests/unit/atrium-artifact-query-route.test.ts
     - tests/unit/atrium-artifact-record-transport-failure.test.tsx
@@ -294,7 +303,7 @@ openwiki:
     - tests/unit/atrium-rollback.test.ts
     - tests/e2e/atrium-group-visibility.functional.spec.ts
     - tests/e2e/atrium-share-live-follows-save.functional.spec.ts
-    - tests/unit/lib/nexus/model-router/__tests__/router.test.ts
+    - lib/nexus/model-router/__tests__/router.test.ts
     - tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts
 ---
 
@@ -329,6 +338,55 @@ Nexus defaults to **Standard** mode where the server classifies each request and
 
 See `/docs/features/nexus-model-routing.md` for full configuration.
 
+#### Tier Inference and Specialist Defaults (#1967)
+
+Each candidate model has a tier (`light`, `medium`, or `high`). `inferModelTier()` in `lib/ai/model-router/core.ts` uses a stored tier first (`providerMetadata.modelRouterTier` or `nexusRouterTier`). Without one, it matches the name and model ID against whole-word patterns:
+
+- `light`: haiku, flash-lite, flash lite, nano, mini, luna, micro
+- `high`: opus, fable, pro, sol, argon, o3, o1, high
+- anything else: `medium`
+
+The whole-word match is the fix in #1967. The old substring test matched `mini` inside `gemini`, so every Gemini model, Pro included, was routed as `light` when no tier was configured. A new high-tier name needs a word in the `high` list. Otherwise it is routed as `medium`.
+
+The specialist defaults in `nexusRouterConfigSchema` (`lib/nexus/model-router/types.ts`) apply when no router config is stored. Image uses `gemini-nano-banana-2.1`, instruction uses `gemini-3.8-flash`, and web search uses `gemini-3.8-flash` then `gemini-4-argon`. Stored configs are not changed by a default edit. The defaults that #1967 replaced named retired or deprecated image and Flash IDs.
+
+**Focused tests**: `lib/ai/model-router/__tests__/core.test.ts` (the test `infers tiers from current model names when no tier is configured`) and `lib/nexus/model-router/__tests__/config.test.ts` (asserts the default image and web-search specialists).
+
+**Minimal validation**: `bunx jest --silent lib/ai/model-router/__tests__/core.test.ts lib/nexus/model-router/__tests__/config.test.ts`
+
+**Scope boundary**: the Gemini budget and reasoning flag come from [the Gemini capability row](../architecture/streaming.md#gemini-model-capabilities-1967), not from tier. The tier only decides which candidate the router prefers.
+
+#### Instructional Specialist Family Rule (#1969)
+
+In Standard mode (`family === "auto"`), an instruction-intent request is normally limited to Google text models. `selectModel()` in `lib/nexus/model-router/router.ts` passes that check through `selectRoutedTextModel()` as `additionalEligibility`. The one exemption is a model listed in `config.specialists.instructionModels`, matched by `modelId` or numeric `id`, so an admin can set a Claude or GPT model as the instructional specialist. The exemption exists only for configured candidates. When no specialist is configured ("Automatic Gemini"), or when none of them is accessible to the user, the unconfigured route and the tier fallback sweep both stay on Gemini. Advanced family selection and the web-search Google-only rule are unchanged. Assistant Architect routing in `lib/assistant-architect/model-router.ts` never had the Google-only rule.
+
+The admin picker in `app/(protected)/admin/settings/_components/nexus-router-settings-card.tsx` feeds the Instructional questions select the full text-model list (image-generation and Deep Research models are still excluded). Its `SpecialistGrid` props are `textModels` and `googleWebSearchModels`. The web-search select still uses Google-only models.
+
+**Focused tests**: `lib/nexus/model-router/__tests__/router.test.ts`, the tests `routes Standard instructional requests to a configured non-Gemini specialist`, `falls back to Gemini when the configured non-Gemini specialist is inaccessible`, and `keeps an unconfigured instructional route on Gemini even when Auto tiers list other families`. The browser check is `tests/e2e/admin-nexus-router-settings.spec.ts`, which covers the Instructional questions select offering the Claude models.
+
+**Minimal validation**: `bunx jest --silent lib/nexus/model-router/__tests__/router.test.ts`
+
+**Scope boundary**: the rule covers only the Standard instructional route. Advanced mode with a family set is governed by the family filter, not this exemption. The documented behavior lives in `docs/features/nexus-model-routing.md`, which must agree with the predicate.
+
+#### Stale Client Fallback Model (#1975)
+
+Every turn carries `fallbackModelId`, the model the browser tab had selected. A tab opened before an admin replaced or removed that model keeps sending the old ID until reload. `routeNexusRequest()` in `lib/nexus/model-router/router.ts` looks the ID up in the unfiltered enabled-model list. When no enabled model matches and routing is on (`shadow` or `active`), `substituteFallback()` picks a stand-in from the routable models. Routable means the provider credential is configured, the model is accessible to the user, and it is not an image-generation or Deep Research model. The preference order is:
+
+1. Medium-tier candidates for the requested Advanced family (skipped when the family is Auto), so a ChatGPT tab stays on ChatGPT where possible.
+2. `config.auto.medium`.
+3. Medium-tier candidates of the anthropic, openai, and google families.
+4. Every remaining text model, in table order.
+
+The router logs a warning with `requestedFallbackModelId` and `substituteModelId`, then continues the turn. The substitute applies only when the requested ID matches no enabled model. A model the client still names is never swapped out here.
+
+With `NEXUS_ROUTER_MODE` set to `off`, a deleted fallback still throws `The fallback Nexus model is unavailable`. Legacy selection has no router to absorb the change, so the error is kept. This is the same failure the earlier explicit-pick rule preserved.
+
+**Focused tests**: `lib/nexus/model-router/__tests__/router.test.ts`, suite `defineNexusModelRouterStaleFallbackSuite`, called from `defineNexusModelRouterSuite1`. Its tests are `does not fail an active-mode turn whose client fallback model was deleted`, `substitutes the configured Auto medium-tier model for a deleted fallback`, `keeps an Advanced tab's deleted fallback within its requested family`, and `still fails an explicit pick of a deleted model when routing is off`.
+
+**Minimal validation**: `bunx jest --silent lib/nexus/model-router/__tests__/router.test.ts`
+
+**Scope boundary**: the substitute is a safety net for stale tabs, not a classification decision. It does not change the tier or the intent rules. Changing the preference order means changing `substituteFallback()` and the matching router tests together.
+
 ### Conversation Architecture
 
 - Hierarchical conversations with folders
@@ -337,6 +395,8 @@ See `/docs/features/nexus-model-routing.md` for full configuration.
 - Real-time streaming responses with SSE keep-alive
 
 **Streaming Reliability**: Long-running AI turns use SSE keep-alive to prevent ALB idle timeout during silent reasoning phases. Provider adapters automatically inject `: keep-alive\n\n` comment frames at 15-second intervals. See **[architecture/streaming.md](../architecture/streaming.md)** for implementation details.
+
+**Answer-less Turns (#1899)**: A turn that ends with reasoning, files, or tool calls but no written text gets an explicit notice rather than a blank bubble, and that notice is persisted so it survives a reload. A turn that produced a chart or a generated document is exempt, because that output is the answer. The classification rules, the persistence branches, and the sanitized stream-error text are documented in **[architecture/streaming.md](../architecture/streaming.md#answer-less-turns-and-error-notices-1899)**. Generated files are described in **[generated-documents.md](generated-documents.md)**.
 
 **Critical**: Read `/docs/features/nexus-conversation-architecture.md` before modifying any conversation code. This system has broken multiple times—follow documented patterns exactly.
 
@@ -424,9 +484,9 @@ Nexus chat can open a specific URL when the user pastes one. This closes a gap w
 
 **Focused Tests**:
 - `tests/unit/lib/tools/web-fetch-tool.test.ts` — 34 test cases covering tool behavior, fencing, neutralization, error handling
-- `tests/unit/lib/nexus/model-router/__tests__/classifier.test.ts` — URL routing classifier tests
-- `tests/unit/lib/nexus/model-router/__tests__/url-detection.test.ts` — URL detection patterns including IPv6
-- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Model selection preferences for URL messages
+- `lib/nexus/model-router/__tests__/classifier.test.ts` — URL routing classifier tests
+- `lib/nexus/model-router/__tests__/url-detection.test.ts` — URL detection patterns including IPv6
+- `lib/nexus/model-router/__tests__/router.test.ts` — Model selection preferences for URL messages
 - `tests/unit/lib/nexus/chat-step-budget.test.ts` — Step budget floor tests
 - `tests/e2e/nexus-url-access.functional.spec.ts` — E2E test for URL opening flow
 
@@ -438,6 +498,18 @@ Nexus supports AI image generation through OpenAI (DALL-E) and Google Gemini mod
 - **Generate**: Create images from text prompts
 - **Edit**: Modify existing generated images with new prompts
 - **Variations**: Generate variations of existing images (provider-dependent)
+
+#### Gemini Image Model IDs (#1967)
+
+`generateWithGemini()` in `lib/ai/image-generation-service.ts` uses the requested model when `isGeminiImageModelId()` accepts its ID. That check accepts any ID containing `image` or `nano-banana`. Google names the Nano Banana models `gemini-nano-banana-*` without `image`. The earlier `image`-only check missed them, so the request silently ran on a fallback model. An ID that is not an image model falls back to `DEFAULT_GEMINI_IMAGE_MODEL` (`gemini-nano-banana-2.1`).
+
+- `isImageGenerationModel()` also recognises the `nano-banana` substring.
+- `getGeminiCost()` has a per-image price for `gemini-nano-banana-2.1`.
+- Invariant: a Gemini image ID must reach the provider unchanged. A test that uses a non-`image` ID such as `gemini-nano-banana-3` is the one that discriminates the old check. A test on `gemini-nano-banana-2.1` alone does not, because that ID is also the new fallback.
+
+**Focused tests**: `tests/unit/lib/ai/image-generation-providers.test.ts` covers the requested-ID path, the fallback path, and the cost lookup.
+
+**Minimal validation**: `bunx jest --silent tests/unit/lib/ai/image-generation-providers.test.ts`
 
 #### Storage and Retrieval
 
@@ -455,14 +527,113 @@ Generated images can be edited hours or days after creation, not just within the
 
 **Security**: Only images under the conversation's own generated-images prefix (`v2/generated-images/{conversationId}/`) are readable. Keys outside this prefix point to another conversation's images and are rejected before any S3 read (enforced by `isGeneratedImageKeyForConversation`).
 
+#### Reload Rendering and the Image Proxy (#1900)
+
+A generated image must still render after a page reload, and the browser must be able to tell when it cannot. Stored image parts are re-pointed on load by `convertImagePart()` in `app/api/nexus/conversations/[id]/messages/route.ts`:
+
+- A part whose `s3Key` is under `generatedImageKeyPrefix(conversationId)` becomes markdown pointing at `generatedImageProxyPath(s3Key)`, which is `/api/images/...` with each segment encoded. It is not a presigned URL.
+- `/api/images/[...key]` (`app/api/images/[...key]/route.ts`) checks the session and the conversation's ownership on every load. It refuses keys with empty, `.` or `..` segments, then signs with `getGeneratedImageBucket()` and the client from `getGeneratedImageS3Client()`. That client reads its region from `Settings.getS3()`, so it signs with the same region that wrote the object. The proxy previously built its own client from environment variables, which defaulted to `us-east-1`.
+- Attachment keys and legacy rows without an `s3Key` keep the earlier presigned or stored `imageUrl` path. The proxy serves generated images only.
+
+**Alt text** comes from the stored `altText`, not from the fixed label `Generated Image`. `generatedImageMarkdown()` in `lib/nexus/generated-image-markdown.ts` collapses whitespace, clips to 125 graphemes without splitting an emoji, and escapes `[`, `]` and `\`. The `Generated Image` placeholder applies only when `altText` is empty. `persistImageExchange()` stores the provider's description, or `Generated image` when there is none, so older rows show that stored label. `lib/nexus/history-adapter.ts` uses the same helper for client-side history.
+
+`MarkdownImage` in `components/assistant-ui/markdown-text.tsx` replaces a failed `<img>` with an "Image unavailable — {alt}" chip and a Retry button. The failure is tracked per `src`, so a different URL renders normally. A broken `<img>` previously rendered nothing, and staff saw a reply that had silently lost its picture.
+
+**Invariant:** the reload URL and the write path must agree on bucket and region. A change to `getGeneratedImageS3Client()`, `getGeneratedImageBucket()`, or the proxy's ownership check affects every reloaded image.
+
+#### Explained Refusals Are Replies, Not Failures (#1900)
+
+A Gemini image turn can return text and no file, for example "I can't render recognisable people". `extractGeminiImage()` in `lib/ai/image-generation-service.ts` throws `NO_IMAGE` and attaches the model's text as `providerText`. `getNoImageExplanation()` in `app/api/nexus/chat/image-generation-handler.ts` returns that text only when `providerText` is present. Other `NO_IMAGE` errors, such as an oversized or blocked reference image or an empty provider response, stay failures.
+
+```mermaid
+flowchart TD
+    A[image generation throws] --> B{NO_IMAGE with providerText?}
+    B -- yes --> C[persistNoImageExchange, then createNoImageResponse]
+    B -- no --> R[rollback a newly created conversation]
+    C -- save fails --> R
+    C -- saved --> D[model text streamed under NO_IMAGE_LABEL, no X-Image-Generated]
+    R -- rollback fails --> F[return rollback error]
+    R -- rollback ok --> G[handleImageGenerationError]
+```
+
+Caption: `respondToImageFailure()` makes this decision. The route supplies the side effects, so the policy can be tested without a database.
+
+The saved reply is an ordinary assistant text message with `generationType: "image-no-image"`. It is shown as `buildNoImageMessage()` output: `**Image not generated.**`, a blank line, then the model's explanation. A reply that cannot be saved is rolled back, because a reply that vanishes on reload is worse than an error.
+
 **Key Sources**:
-- `/lib/ai/generated-image-bucket.ts` — Bucket resolver for generated images
-- `/lib/ai/image-generation-service.ts` — Provider-agnostic image generation with S3 storage
-- `/app/api/nexus/chat/image-generation-handler.ts` — Nexus integration, edit-after-persistence logic, reference hydration
-- `/app/api/nexus/chat/route.ts` — Routing classification for image generation
+- `/lib/ai/generated-image-bucket.ts` — Bucket resolver, `getGeneratedImageS3Client()`, `generatedImageKeyPrefix()`, `generatedImageProxyPath()`
+- `/lib/ai/image-generation-service.ts` — Provider-agnostic image generation with S3 storage; `providerText` on `NO_IMAGE`
+- `/lib/nexus/generated-image-markdown.ts` — Alt text and markdown for stored generated images
+- `/app/api/images/[...key]/route.ts` — Authenticated proxy that re-signs generated images on each load
+- `/app/api/nexus/conversations/[id]/messages/route.ts` — `convertImagePart()` re-points reloaded image parts at the proxy
+- `/components/assistant-ui/markdown-text.tsx` — `MarkdownImage` fallback
+- `/app/api/nexus/chat/image-generation-handler.ts` — Nexus integration, edit-after-persistence logic, reference hydration, no-image replies
+- `/app/api/nexus/chat/route.ts` — Routing classification for image generation; `respondWithNoImage()` persists the explanation
 
 **Focused Tests**:
 - `tests/unit/api/nexus/image-generation-handler.test.ts` — Handler behavior including reference hydration
+- `tests/unit/nexus-generated-image-serving.test.ts` — `generatedImageProxyPath` encoding, the proxy's bucket, region and ownership checks, and reloaded-message rewriting. Its `describe` blocks are `generatedImageProxyPath`, `GET /api/images/[...key]`, and `GET /api/nexus/conversations/[id]/messages`.
+- `tests/unit/nexus-generated-image-markdown.test.ts` — Alt text, placeholder fallback, escaping, and grapheme clipping
+- `tests/unit/markdown-image-fallback.test.tsx` — `MarkdownImage` fallback, labelling, and retry behavior
+- `tests/unit/nexus-no-image-result.test.ts` — `getNoImageExplanation`, `buildNoImageMessage`, and `respondToImageFailure` rollback decisions
+- `tests/e2e/nexus-image-reload.functional.spec.ts` — Browser check that an image renders on generation and again after reload. It needs the full app stack, so run it only when the rendering path changes.
+
+**Minimal validation**: `bunx jest --silent tests/unit/nexus-generated-image-serving.test.ts tests/unit/nexus-no-image-result.test.ts tests/unit/nexus-generated-image-markdown.test.ts tests/unit/markdown-image-fallback.test.tsx`
+
+#### Image Turns in Project and Skill Conversations (#1950)
+
+An image request in a conversation bound to a Project, Skill, or Assistant used to be refused, or sent to a text model that cannot draw. The binding adds repository search tools to every turn, so "draw a cat" looked like a tool turn. Since #1950 these turns go to the image model and keep their bindings.
+
+**Binding-only tools.** `splitRoutingToolNames()` in `lib/nexus/routing-tool-names.ts` returns `tools` (the routing tools, unchanged) and `bindingTools` (the tools present only because of a binding):
+- `searchProjectRepositories` and `searchSkillRepositories` are binding-only whenever their binding exists.
+- `searchConversationRepositories` is binding-only unless the user chose a repository. When the request carries `repositoryIds`, that selection decides, and an empty list means the picker was cleared. The stored `direct` binding decides only when the request sends none.
+- A Skill's pinned `allowed-tools` arrive as `enabledTools`. `skillPinnedTools()` in `app/api/nexus/chat/route.ts` reads them from the approved skill record, using the request's `skillId` or, after the first turn, the conversation's stored skill. They are binding-only.
+- Known limitation: a tool the user also picks by hand that the Skill pins looks the same as the pin, so it is treated as binding-only. Telling them apart needs client-sent provenance.
+
+`resolveRequestRouting()` in `app/api/nexus/chat/route.ts` passes `bindingTools` to the router as `bindingToolNames`.
+
+**Routing decision.** `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` runs once, right after classification and before anything reads `requiredTools`. For an `image` intent it removes binding-only tools and, under the attachment rule below, `searchNexusAttachments`. Non-image intents are untouched.
+
+```mermaid
+flowchart TD
+    A[image intent with required tools] --> B[drop binding-only tools]
+    B --> C{image in message and only image attachments?}
+    C -- yes --> D[drop searchNexusAttachments]
+    C -- no --> E{requiredTools empty?}
+    D --> E
+    E -- yes --> F[image specialist via selectsImageSpecialist]
+    E -- no --> G[tier-aware text routing]
+```
+
+Caption: the image specialist is chosen only when no required tool remains. A user-chosen repository keeps the turn on the text route.
+
+**Only image attachments reach the image path.** `hasOnlyImageAttachments()` in `app/api/nexus/chat/image-generation-handler.ts` is true only when the message carries an image, has no non-image inline file, every current attachment is an image, and, for an existing conversation, `nexusConversationHasNonImageAttachments()` in `lib/nexus/ephemeral-repository-service.ts` finds no earlier document. That query runs only for turns that carry an image. A PDF attached in an earlier turn keeps "draw a diagram of the attached report" on the text route, which can retrieve it.
+
+**Conversation setup.** An image turn no longer inserts its own conversation row. `setupImageConversation()` in `app/api/nexus/chat/route.ts` calls the standard `setupConversation()`, which applies the same ownership, Project-match, approved-skill, and skill-conflict checks as any turn. It then binds attachments first and writes repository bindings through `persistConversationRepositoryBindings()`, the function the text path also uses from `prepareConversationRepositories()`. Attachments come first so a rejected attachment does not leave repository selections committed. The bindings are stored because the client drops `skillId` from the URL after the first turn, so the next text turn can route only from durable rows.
+
+If this turn created the conversation, any failure after creation, returned or thrown, removes it through `rollbackFailedImageConversation()`. The client never receives the id of a failed new conversation. An existing conversation is never removed.
+
+**Prompt composition.** `boundImagePrompt()` in `app/api/nexus/chat/route.ts` calls `buildBoundImagePrompt()` in `image-generation-handler.ts`. The text path puts Project instructions and the Skill's SKILL.md in a system prompt, and an image model has none. The provider therefore receives the user's request first, followed by "Apply these instructions where they affect the image." and a labelled block for each source. The total stays within 4,000 characters, the smallest provider limit, and instructions are clipped by grapheme. The persisted user message keeps the user's own words.
+
+**Invariants**
+- A Project-bound image request reaches the image specialist. The former `image_project_unsupported` 400 was removed.
+- A user-chosen repository keeps an image turn on the text route, so "draw a chart of the repo I picked" still retrieves.
+- The image model never reads repository content, so a bound image request is generated without it. A text model cannot produce an image at all, so this is the chosen trade-off.
+
+**Key Sources**:
+- `/lib/nexus/routing-tool-names.ts` — `splitRoutingToolNames()`, binding-only classification
+- `/lib/nexus/model-router/router.ts` — `dropImagePathSatisfiedTools()`, `selectsImageSpecialist()`
+- `/app/api/nexus/chat/route.ts` — `buildRoutingEnabledTools()`, `skillPinnedTools()`, `setupImageConversation()`, `persistConversationRepositoryBindings()`, `boundImagePrompt()`
+- `/app/api/nexus/chat/image-generation-handler.ts` — `hasOnlyImageAttachments()`, `buildBoundImagePrompt()`
+- `/lib/nexus/ephemeral-repository-service.ts` — `nexusConversationHasNonImageAttachments()`
+
+**Focused Tests**:
+- `tests/unit/lib/nexus/routing-tool-names.test.ts` — Binding-only classification: Project and Skill tools, a request's picker against a stored direct binding, a cleared picker, hand-enabled tools and attachments that are never binding-only, and Skill-pinned tools.
+- `lib/nexus/model-router/__tests__/router.test.ts` — `defineNexusModelRouterBoundImageSuite` (a Project-bound image request reaches the image specialist, a binding-only tool stays required for a non-image turn, a user-chosen repository keeps the text route) and `defineNexusModelRouterImageAttachmentSuite` (a non-image attachment keeps an image turn on the text model).
+- `tests/unit/api/nexus/image-generation-handler.test.ts` — `hasOnlyImageAttachments` (an earlier document blocks the image path) and `buildBoundImagePrompt` (no instructions, both blocks appended, clipping within the limit).
+- `tests/e2e/nexus-bound-image.functional.spec.ts` — Gated flow `nexus-bound-image` (listed in `.psd/verify.json`): a Project chat's image request returns 200, the image decodes from `/api/images/...`, and a text follow-up succeeds. It is skipped unless an image-provider key is set (`GOOGLE_API_KEY` or `OPENAI_API_KEY`, or `E2E_IMAGE_GENERATION=true`) and the authenticated dev server is running.
+
+**Minimal validation**: `bunx jest --silent tests/unit/lib/nexus/routing-tool-names.test.ts tests/unit/api/nexus/image-generation-handler.test.ts lib/nexus/model-router/__tests__/router.test.ts`
 
 ### Attachments (#1735)
 
@@ -483,9 +654,105 @@ File attachments (documents and images) are handled through a unified adapter sy
 | `VisionImageAdapter` | JPEG, PNG, WebP, GIF | Base64 inline for vision models; 20MB limit; optional repository canonical reference |
 | `CompositeAttachmentAdapter` | Combines multiple adapters | `createEnhancedNexusAttachmentAdapter()` for Nexus; `createDocumentAttachmentAdapter()` for Assistant Architect (images excluded) |
 
-**Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service.
+**Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service. Images are the exception on a standard chat turn: they carry the marker and the inline data URL, and the model sees the data URL for the current turn and for every prior turn the client resends. Only the image-generation/edit route treats caller-carried pixels as untrusted: it reads the canonical attachment from storage by its `s3Key` (`getAttachmentFromS3` in `app/api/nexus/chat/image-generation-handler.ts`).
 
-**Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners.
+**Eager Upload**: Image uploads start at attach time (not send time), so 2+ minute repository ingestion doesn't freeze the composer. Processing callbacks fire immediately so the UI shows spinners. The repository upload keeps the original file; only the inline copy is downscaled.
+
+**PDFs** are the other exception, and only for the current turn. Extracted text drops anything drawn on the page, so see [Current-Turn PDFs for Visual Reading (#1982)](#current-turn-pdfs-for-visual-reading-1982) below.
+
+### Current-Turn PDFs for Visual Reading (#1982)
+
+Repository-backed attachments reach the model as extracted text through `searchNexusAttachments`. Extraction keeps printed characters and drops drawings, so a scanned answer sheet with circled letters read "A B C D" for every item and the model could not score it. For the current turn only, Nexus also gives the model the PDF bytes as a document it reads visually. Later turns still use repository search, and the bytes are never persisted or written to the durable history.
+
+```mermaid
+flowchart TD
+    A[resolveToolsAndStream] --> B[modelMessagesWithAttachedPdfs]
+    B --> C{references present and Bedrock Claude 4.x or 5.x?}
+    C -- no --> U[messages unchanged]
+    C -- yes --> D[resolveNexusAttachmentPdfSources]
+    D --> E[pdfContentSafetyCheck per PDF]
+    E -- refused, or no extracted text with guardrails on --> S[skip this PDF]
+    E -- allowed --> F["readPdf: repository key, 20MB cap, PDF magic"]
+    F -- fails --> S
+    F -- ok --> G{under 5 documents and 24MB total?}
+    G -- no --> S
+    G -- yes --> P[prepend file part to last user message]
+    P --> X[executeStreaming gets model copy]
+    B -. any thrown error .-> U
+```
+
+Caption: the model's copy of the message gains PDF file parts. The stored conversation and the earlier turns are not touched.
+
+**Where it sits.** `resolveToolsAndStream()` in `app/api/nexus/chat/route.ts` calls `modelMessagesWithAttachedPdfs()`, which wraps `withAttachedPdfDocuments()` in `app/api/nexus/chat/pdf-attachment-documents.ts`. The injection runs after inline-attachment canonicalization, persistence, and `processMessagesWithAttachments`, so none of those see the bytes. The routing rule in [Image turns in Project and Skill conversations (#1950)](#image-turns-in-project-and-skill-conversations-1950) is unchanged: a PDF in the message keeps `searchNexusAttachments` and the text route, and the PDF is attached in addition.
+
+**Eligibility** (`modelReadsPdfDocuments()`): provider `amazon-bedrock` with a Claude 4.x or 5.x model ID. This is the only path verified end to end on Bedrock. Gemini accepts PDFs, but its model IDs were not verified, so Gemini turns keep text retrieval. Bedrock GPT models are also excluded, because PDF input on the Responses endpoint is unverified.
+
+**Source resolution** (`lib/nexus/ephemeral-repository-service.ts`). `resolveNexusAttachmentPdfSources()` shares `queryBoundAttachmentSources()` with the image resolver, so both apply the same owner, conversation, active, clean, and processed rules. It filters to `document` items whose content type is `application/pdf` and returns the subset that resolves, because a turn can mix PDFs with other files. Unlike the image resolver, it does not fail the whole turn. `loadItemVersionText()` reads the item's extracted text (text layer and OCR) in chunk order for the safety check.
+
+**Content-safety gate.** `pdfContentSafetyCheck(sessionId)` applies the same `processInput` check that retrieved chunks pass. With guardrails off it allows without loading text. With guardrails on it checks the extracted text in 20,000-character slices and allows the PDF only if every slice passes. A PDF with no extracted text is refused, because the pages the model would see were never screened. Refusing a PDF only skips the visual copy. It never blocks the turn.
+
+**Bounds and failure handling.** At most 5 PDFs (`MAX_PDF_DOCUMENTS`, Bedrock's per-request maximum), 20MB each (`MAX_PDF_DOCUMENT_BYTES`), and 24MB combined (`MAX_PDF_DOCUMENTS_TOTAL_BYTES`). `readPdf()` enforces the size cap while streaming and rejects bytes without a `%PDF-` header. Each PDF is isolated in `loadAllowedPdf()`, so one failure skips only that PDF. Any error in `withAttachedPdfDocuments()` logs a warning and returns the input unchanged. `bedrockSafePdfFilename()` restricts names to Bedrock's document-name charset.
+
+**Invariants**
+- Only the current turn's references are considered, and only owner-bound, clean, processed PDFs.
+- A PDF whose content-safety check did not allow it, or that failed to load, is never attached.
+- The injected parts go only into the model's copy. The persisted message and the earlier turns stay unchanged.
+- Fail-open: the turn proceeds on text retrieval when anything here fails.
+
+**Focused tests**: `app/api/nexus/chat/__tests__/pdf-attachment-documents.test.ts`, describe blocks `withAttachedPdfDocuments` (prepend to the last user message, unchanged for GPT, OpenAI image, Latimer, and Claude 3.x, skip-one-failure, caps, refused PDFs never loaded), `pdfContentSafetyCheck` (guardrails off, no-text refusal, slice-level refusal), `modelReadsPdfDocuments`, `bedrockSafePdfFilename`, and `route wiring` (the route streams `modelMessagesWithAttachedPdfs` and passes `pdfContentSafetyCheck`).
+
+**Conditional live check**: `tests/e2e/nexus-pdf-visual-reading.functional.spec.ts` attaches a generated sheet whose answers exist only as drawn circles. It runs only with `E2E_RUN_EXTERNAL=1`, Bedrock credentials, and repository-backed attachments. It skips on a local stack without content-processing workers. Run it only when the Bedrock PDF path changes.
+
+**Minimal validation**: `bunx jest --silent app/api/nexus/chat/__tests__/pdf-attachment-documents.test.ts`.
+
+**Scope boundary:** the server does not render pages or OCR. The model reads the PDF bytes directly. Changing the router's attachment rule or the image path does not require changes here unless the eligibility or the content-safety gate changes.
+
+**Key Sources**:
+- `app/api/nexus/chat/pdf-attachment-documents.ts` — `withAttachedPdfDocuments`, `pdfContentSafetyCheck`, `modelReadsPdfDocuments`, bounds and filename rules
+- `app/api/nexus/chat/route.ts` — `modelMessagesWithAttachedPdfs`, `resolveToolsAndStream`
+- `lib/nexus/ephemeral-repository-service.ts` — `resolveNexusAttachmentPdfSources`, `queryBoundAttachmentSources`, `loadItemVersionText`
+- `docs/features/nexus-conversation-architecture.md` — the repository's own description of the current-turn PDF exception
+
+### Image Downscaling and the Proxied Body Limit (#1850)
+
+Phone photos are 5-10MB, about a third larger again as base64. Because the AI SDK resends the whole conversation every turn, one or two full-size photos pushed a Nexus chat request past the 10MB body that Next.js buffers for proxied routes. The body was truncated, `JSON.parse` failed, and the turn returned a 500. The fix has two layers: the client shrinks the inline copy, and the server raises the proxied body cap as a safety net.
+
+```mermaid
+flowchart TD
+    A[VisionImageAdapter.send] --> B[downscaleImageDataUrl file, original data URL]
+    B --> C{createImageBitmap and document available?}
+    C -- no --> O[send original]
+    C -- yes --> D[planImageDownscale width, height, bytes, type]
+    D -- null: GIF, unknown size, or within 2048px and 1.5MB --> O
+    D -- plan --> E[canvas re-encode at plan size]
+    E --> F{encoder produced the requested type and result is smaller?}
+    F -- no --> O
+    F -- yes --> R[send re-encoded data URL]
+    B -. decode or canvas error .-> O
+```
+
+Caption: every failure path returns the original data URL, so shrinking is an optimization and never loses the attachment.
+
+**Shrink rules** (`lib/attachments/image-downscale.ts`):
+- The longest edge is capped at `MAX_IMAGE_EDGE_PX` (2048). Aspect ratio is kept.
+- Images at or under both the 2048px edge and `MAX_UNTOUCHED_IMAGE_BYTES` (1.5MB) are sent untouched. Animated GIFs are never re-encoded, because a canvas round-trip would drop the animation.
+- PNG and WebP keep their format so transparency is not flattened. Other types become JPEG at quality 0.85.
+- If the browser's encoder falls back to PNG (for example WebP on older Safari), or the re-encode is larger, the original is sent.
+- `planImageDownscale` is pure and holds the rules. `downscaleImageDataUrl` owns the browser work and closes the `ImageBitmap` in `finally`.
+
+**Server-side safety net** (`next.config.mjs`, `experimental.proxyClientMaxBodySize: '50mb'`): Next buffers the body for middleware, and middleware matches `/api/nexus/chat`. The default silently truncates at 10MB. The limit is global, not per route, and Next buffers the body before the middleware auth check. This was an accepted risk recorded in the config comment: an unauthenticated client can make a request hold up to 50MB. The chat route is the only caller that needs more than 10MB. Revisit the value if memory pressure or abuse appears.
+
+**Why the 20MB pre-check stays.** `VisionImageAdapter.send` still rejects files over 20MB before any downscale, so the original size rule is unchanged.
+
+**Invariant:** the inline data URL on a standard chat turn must stay under the proxied body limit even after the history accumulates photos. The `contentType` on the completed attachment comes from the data URL's declared media type (`dataUrlMediaType`), so it matches the re-encoded bytes.
+
+**Focused tests**:
+- `lib/attachments/__tests__/image-downscale.test.ts` — `planImageDownscale` (portrait, WebP and PNG format keeping, GIF and small-image pass-through, unknown dimensions), `downscaleImageDataUrl` fail-open when `createImageBitmap` is missing or decoding fails, `dataUrlMediaType`, and a source check that `next.config.mjs` sets `proxyClientMaxBodySize: '50mb'`.
+- `tests/e2e/nexus-chat-photo-attachment.functional.spec.ts` (flow `nexus-chat-photo-attachment`) — conditional browser check at the network boundary: the request body stays under 10MB as photos accumulate, and each inline image is at most 2048px on its longest edge. It needs the authenticated app stack, so run it only when the adapter, the downscale rules, or the body limit change.
+
+**Minimal validation**: `bunx jest --silent lib/attachments/__tests__/image-downscale.test.ts lib/attachments/__tests__/chat-attachment-adapters.test.ts`. Run the Playwright spec only when the browser path changes, not for wording or threshold-only edits that the unit suite covers.
+
+**Scope boundary:** the server does not downscale. The 2048px rule applies only to the client's inline copy, so a change to the body limit is a Next config change and needs no adapter change.
 
 **Adapter Configuration**:
 - `purpose` — Product surface attribution (`"nexus"` or `"assistant-architect"`)
@@ -497,6 +764,7 @@ File attachments (documents and images) are handled through a unified adapter sy
 **Key Sources**:
 - `/lib/attachments/chat-attachment-adapters.ts` — Adapter implementations
 - `/lib/attachments/use-chat-attachments.ts` — Shared hook for attachment wiring
+- `/lib/attachments/image-downscale.ts` — Client-side photo shrink for the inline image copy (#1850)
 - `/components/assistant-ui/attachment.tsx` — Attachment UI primitives
 - `/components/assistant-ui/thread.tsx` — Processing-spinner rendering
 
@@ -569,7 +837,11 @@ While an **editable artifact** is bound to the turn, the router raises the tier 
 
 **Min-Tier Eligibility**: The candidate sweep (`[tier, medium, light, high]`) prefers accessible light models over high ones. To reach `high` instead when the floor is `medium`, the floor is passed as a hard minimum that makes below-floor models ineligible. Function-calling ability still outranks tier (a model that cannot invoke tools is useless regardless), and the floor is dropped for the final attempt so it never becomes a new way to fail a turn.
 
-**Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other.
+**Image Intent Exception**: The image-specialist branch (`intent === "image"` with no input tools) returns a capability-matched model without a tier-aware sweep, so the floor does not apply. An image turn THAT requires input tools falls through to normal tier-aware routing and is floored like any other. Binding-only tools are dropped before this check (see [Image Turns in Project and Skill Conversations](#image-turns-in-project-and-skill-conversations-1950)), so they do not count as input tools.
+
+**Attached images are not a retrieval need** (#1900, extended in #1950): `dropImagePathSatisfiedTools()` in `lib/nexus/model-router/router.ts` removes `searchNexusAttachments` (`NEXUS_ATTACHMENT_SEARCH_TOOL_NAME`) from the required tools when the intent is `image` and the turn carries an image with only image attachments (`hasOnlyImageAttachments`, computed in `resolveRequestRouting()` in `app/api/nexus/chat/route.ts`). The image route reads those bytes and passes them to the specialist, so "make this photo a cartoon" stays on the image model. A PDF or document in the same message, or attached in an earlier turn, keeps the tool and the text route. The same function drops binding-only tools; that rule is separate, and the attachment rule removes only `searchNexusAttachments`.
+
+The constant lives in `lib/nexus/attachment-search-tool-name.ts`. The router, the chat route, the chat helpers, and `createNexusAttachmentTools()` all import it, so a rename cannot leave one copy behind.
 
 **Reason Codes**:
 - `workspace_artifact_min_tier` — Floor was applied for this turn
@@ -578,12 +850,12 @@ While an **editable artifact** is bound to the turn, the router raises the tier 
 The presence of `workspace_artifact_min_tier` does NOT guarantee the floor took effect — when the final binding lands below floor (no accessible medium/high candidates), `workspace_artifact_min_tier_unmet` is also recorded.
 
 **Key Sources**:
-- `/lib/nexus/model-router/router.ts` — `WORKSPACE_ARTIFACT_MIN_TIER`, `artifactFloorMayApply()`, `workspaceArtifactMinTier()`, `meetsMinTier()`, `selectionIgnoresTier()`
+- `/lib/nexus/model-router/router.ts` — `WORKSPACE_ARTIFACT_MIN_TIER`, `artifactFloorMayApply()`, `workspaceArtifactMinTier()`, `meetsMinTier()`, `selectsImageSpecialist()`, `dropImagePathSatisfiedTools()`, `shadowMayRetainFallback()`
 - `/lib/nexus/workspace-routing-contract.ts` — `workspaceNeedsPsdData()` predicate shared with connector attach
 - `/docs/features/nexus-model-routing.md` — Full routing documentation
 
 **Focused Tests**:
-- `tests/unit/lib/nexus/model-router/__tests__/router.test.ts` — Unit suite for routing decisions, floor application, shadow mode handling, reason codes
+- `lib/nexus/model-router/__tests__/router.test.ts` — Unit suite for routing decisions, floor application, shadow mode handling, reason codes. The image-attachment cases (`routes an image request WITH an attachment to the image specialist`, `refuses an attachment image request rather than falling back to text`, `keeps an image plus a PDF in one message on a text model`) are in `defineNexusModelRouterImageAttachmentSuite`, under the `Nexus model router` describe.
 - `tests/e2e/nexus-workspace-artifact-tier-floor.spec.ts` — E2E wiring test proving browser state → transport → route integration with artifact bound
 - `tests/e2e/nexus-workspace-psd-data-connector.functional.spec.ts` — E2E (gated) popover behavior
 
@@ -1116,6 +1388,40 @@ Atrium objects have both a **visibility level** (who can access) and a **grant l
 - **Internal** — Staff with visibility grants (specific users, groups, roles, buildings, departments, grades)
 - **Public** — Anyone with the link, including anonymous visitors
 
+#### Private-Collection Content (#1958)
+
+**Sources**: `/lib/content/visibility-service.ts`, `/lib/content/errors.ts`, `/actions/db/atrium/set-visibility.ts`, `/actions/db/atrium/get-visibility.ts`, `/components/atrium/VisibilityChip.tsx`
+
+Content filed in an owner-bound (private) collection can only be `private`. `setLevelInTx` rejects every other level by throwing `PrivateCollectionLevelError`, a `ValidationError` subclass that keeps the `CONTENT_VALIDATION` code and 400 status. The rule itself is intentional and enforced on the server; the surrounding UI and error handling were the defect.
+
+```mermaid
+flowchart TD
+    A["Share dialog opens"] --> B["getVisibilityAction (editor only)"]
+    B --> C{"isInPrivateCollection?"}
+    C -->|yes| D["LevelPicker privateOnly: Group / Internal / Public disabled, note shown"]
+    C -->|no| E["All levels enabled"]
+    F["setVisibilityAction save"] --> G{"setLevelInTx: private collection and level != private?"}
+    G -->|yes| H["PrivateCollectionLevelError"]
+    H --> I["Action returns the rule's own message"]
+    G -->|other failure| J["Generic 'Failed to update visibility'"]
+```
+
+*Caption: how the private-collection rule reaches the Share dialog and the save path.*
+
+- **Picker lock**: `getVisibilityAction` sets `inPrivateCollection` on `VisibilityState` only for an editor; a viewer always gets `false` and no lookup. `VisibilityChip` forwards it as `privateOnly` to `LevelPicker`, which disables the wider levels (shown, not hidden) and renders the explanation. `Private` stays selectable so legacy content that is wider than its collection can still be narrowed.
+- **Error surfacing is deliberately narrow**: `setVisibilityAction` returns the message only for `PrivateCollectionLevelError`. Other `ValidationError`s, notably grant-target failures such as "Unknown user id(s)" and "Group(s) not synced", keep the generic message. Echoing them would let an editor probe which `users.id` values exist or which groups are synced.
+- **Lookup**: `visibilityService.isInPrivateCollection(collectionId)` applies the same `content_collections.owner_user_id IS NOT NULL` test as `setLevelInTx`. Unfiled content (`null`) returns `false` without a query.
+- **Invariant**: the disabled picker is a usability layer only; the server check in `setLevelInTx` remains the authority.
+
+**Focused Tests**:
+- `tests/unit/atrium-visibility.test.ts` — `describe("isInPrivateCollection")`: null short-circuits, owner-bound collection is `true`, district collection (null owner) and missing row are `false`
+- `tests/unit/atrium-set-visibility-action.test.ts` — `describe("setVisibilityAction — write")`: "surfaces the private-collection rule's message" and "does NOT surface grant-target validation text"
+- `tests/unit/atrium-get-visibility-action.test.ts` — "reports inPrivateCollection for an editor…" and "reports inPrivateCollection=false and skips the lookup for a non-editor"
+- `tests/components/visibility-chip.test.tsx` — "offers only Private, with a reason…" and "offers every level when the content is not in a private collection"
+- `tests/e2e/atrium-visibility-editor.spec.ts` — "content in a private collection offers only Private, and says why" (seeded by `tests/e2e/fixtures/atrium-visibility-seed.sql`)
+
+**Validation**: `bunx jest --silent tests/unit/atrium-visibility.test.ts tests/unit/atrium-set-visibility-action.test.ts tests/unit/atrium-get-visibility-action.test.ts tests/components/visibility-chip.test.tsx`. The Playwright spec is conditional: run `bun run test:e2e:local tests/e2e/atrium-visibility-editor.spec.ts` only when the seed fixture, the Share dialog DOM, or the `data-testid="visibility-private-collection-note"` element changes.
+
 #### Grant Types
 
 Each grant is `kind:value` where `kind` determines the value format:
@@ -1483,7 +1789,7 @@ The sandbox host's 45s clock covers the entire server turn, including network la
 
 **Dispatch Acknowledgment**: When a queued request starts, the parent posts `atrium-artifact-data-ack` to the frame. The host runs a queue-tolerant 315s pre-ack budget, then re-arms the real 45s server budget on the ack. This ensures the frame's timeout clock starts when work BEGINS, not when the page POSTED.
 
-**SQL Base64 Encoding**: The request body carries `sqlBase64` (UTF-8 base64) rather than raw SQL because the edge WAF's `SQLi_BODY` managed rule blocks request bodies that match SQL patterns with a bare 403 the app never sees. This is transport encoding only — the decoded SQL is validated and executed by the same code path as before, under the viewer's row-level permissions.
+**SQL Base64 Encoding**: The request body carries `sqlBase64` (UTF-8 base64) rather than raw SQL because the edge WAF's SQL-injection body rules (`SQLi_BODY`, `SQLiExtendedPatterns_BODY`; see [WAF body signatures](../infrastructure/overview.md#web-application-firewall-waf)) block request bodies that match SQL patterns with a bare 403 the app never sees. This is transport encoding only — the decoded SQL is validated and executed by the same code path as before, under the viewer's row-level permissions.
 
 **Key Sources**:
 - `/app/api/atrium/artifacts/[id]/query/route.ts` — Route handler with base64 decoding
@@ -1960,6 +2266,7 @@ Side-by-side evaluation of AI models for informed selection.
 |------|---------|
 | `/lib/compare/` | Comparison logic |
 | `/app/(protected)/compare/` | Comparison UI |
+| `app/api/compare/route.ts` | Compare endpoint. `createTextGenerator` calls `streamText` directly, not through `ClaudeAdapter`, so it passes `maxOutputTokens: defaultClaudeMaxOutputTokens(...)` itself. Without it, Bedrock caps Claude answers at 4,096 tokens (#1979). See [Claude Default Output Cap](../architecture/streaming.md#claude-default-output-cap-1979) |
 
 ---
 
@@ -1987,3 +2294,24 @@ Atrium
 - **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
+�� routes to AI Providers
+    ├── integrates → MCP Tools → exposed by → Agent Platform
+    └── grounds in → Knowledge Repositories
+
+Assistant Architect
+    ├── builds → Prompt Chains → executes → AI Providers
+    ├── attaches → Tools → gated by → Capabilities
+    └── links → Knowledge Repositories
+
+Atrium
+    ├── exposes → Content API → consumed by → Agent Skills
+    ├── publishes → to Intranet → with Group Visibility
+    └── stores → Documents & Artifacts → in S3 + PostgreSQL
+```
+
+## Related Concepts
+
+- **[architecture/overview.md](../architecture/overview.md)** — Overall system architecture
+- **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent skills and MCP integration
+- **[api-integration/overview.md](../api-integration/overview.md)** — External API access to these features
+API access to these features

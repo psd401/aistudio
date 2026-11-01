@@ -12,6 +12,7 @@ import type {
 // @assistant-ui/react 0.14.23 moved fromThreadMessageLike from the INTERNAL
 // namespace to a top-level export.
 import { fromThreadMessageLike } from "@assistant-ui/react";
+import { generatedImageMarkdown } from "@/lib/nexus/generated-image-markdown";
 
 // Import ExportedMessageRepository type and utility
 type ExportedMessageRepository = {
@@ -54,7 +55,10 @@ const convertPartToText = (part: {
   }
   if (part.type === "image" && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
     // Convert image parts to markdown image syntax (URL already validated as https: only)
-    return `![Generated Image](${part.imageUrl})`;
+    return generatedImageMarkdown(
+      part.imageUrl,
+      typeof part.altText === "string" ? part.altText : undefined,
+    );
   }
   // Skip step-start, step-finish, and other control types
   if (part.type === "step-start" || part.type === "step-finish") {
@@ -102,6 +106,7 @@ type StoredPartData = {
   type: string;
   text?: string;
   imageUrl?: string;
+  altText?: string;
   toolCallId?: string;
   toolName?: string;
   args?: unknown;
@@ -146,7 +151,7 @@ function storedContentPart(part: StoredPartData): ContentPartLike | null {
   }
   if (part.type === "tool-call") return storedToolPart(part);
   if (part.type === "image" && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
-    return { type: "text", text: `![Generated Image](${part.imageUrl})` };
+    return { type: "text", text: generatedImageMarkdown(part.imageUrl, part.altText) };
   }
   return null;
 }

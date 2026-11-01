@@ -50,7 +50,7 @@ export interface StreamRequest {
   // Advanced model options
   options?: {
     // Reasoning configuration
-    reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+    reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
 
     // Background processing for long-running models
@@ -108,6 +108,11 @@ export interface StreamResponse {
 export interface StreamConfig {
   model: LanguageModel;
   messages: ModelMessage[];
+  /**
+   * Which surface asked for this run. Adapters use it only to decide how strict
+   * the answer-less-turn check should be (#1899) — see `buildAbortAwareResponse`.
+   */
+  source?: StreamRequest['source'];
   system?: string;
   maxTokens?: number;
   maxSteps?: number;

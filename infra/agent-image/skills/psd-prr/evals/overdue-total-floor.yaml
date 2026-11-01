@@ -1,0 +1,12 @@
+id: prr-overdue-total-floor
+skill: psd-prr
+level: L1
+workspace: pure
+suite: regression
+prompt: "Use psd-prr to check how many of my public records requests are overdue. Reply with the overdue number only, worded exactly as the skill instructs for this result."
+trials: 3
+fixtures:
+  - fixtures/overdue-total-floor.json
+graders:
+  - {"type":"broker_request","route":"/api/agent/credentials","method":"POST","body":{"operation":{"exact":"prr-mcp"},"method":{"exact":"tools/call"},"toolName":{"exact":"psd_prr_overdue_requests_list"}}}
+  - {"type":"output_match","pattern":"(?i)at least 17"}

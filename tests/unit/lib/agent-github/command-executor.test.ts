@@ -1,4 +1,7 @@
-import { validateGitHubCommand } from "@/lib/agent-github/command-executor"
+import {
+  validateGitHubCommand,
+  validateScheduledGitHubCommand,
+} from "@/lib/agent-github/command-executor"
 
 describe("trusted GitHub command policy", () => {
   it.each([
@@ -61,5 +64,47 @@ describe("multi-line argument values", () => {
     expect(() =>
       validateGitHubCommand(["issue", "create", "--repo", "psd401/aistudio", "--body", body])
     ).toThrow(/Invalid GitHub command argument/)
+  })
+})
+
+// A scheduled run acts as its owner with no human approving each call and may
+// read outside content that tries to steer it, so it gets reads only.
+describe("scheduled GitHub command policy", () => {
+  const repo = ["--repo", "psd401/aistudio"]
+
+  it.each([
+    ["issue", "list", ...repo, "--state", "open"],
+    ["issue", "view", "42", ...repo],
+    ["pr", "list", ...repo, "--state", "open"],
+    ["pr", "view", "12", ...repo],
+    ["pr", "checks", "12", ...repo],
+    ["run", "list", ...repo],
+    ["search", "prs", "is:open"],
+    ["search", "issues", "is:open"],
+    ["auth", "status"],
+  ])("allows a read: %s %s", (...argv) => {
+    expect(() => validateScheduledGitHubCommand(argv)).not.toThrow()
+  })
+
+  it.each([
+    ["issue", "create", ...repo, "--title", "t"],
+    ["issue", "edit", "42", ...repo, "--title", "t"],
+    ["issue", "close", "42", ...repo],
+    ["issue", "reopen", "42", ...repo],
+    ["issue", "comment", "42", ...repo, "--body", "b"],
+    ["pr", "create", ...repo, "--title", "t"],
+    ["pr", "comment", "12", ...repo, "--body", "b"],
+    ["pr", "review", "12", ...repo, "--approve"],
+  ])("refuses a write: %s %s", (...argv) => {
+    expect(() => validateGitHubCommand(argv)).not.toThrow()
+    expect(() => validateScheduledGitHubCommand(argv)).toThrow(
+      /Scheduled runs may only read from GitHub/,
+    )
+  })
+
+  it("still applies the base policy before the read-only check", () => {
+    expect(() =>
+      validateScheduledGitHubCommand(["pr", "merge", "12", ...repo]),
+    ).toThrow(/not allowed/)
   })
 })

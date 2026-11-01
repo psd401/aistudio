@@ -66,3 +66,6 @@ dba4e97b67ffaaefa377aeeb928b050e45279a84:tests/unit/lib/agent-workspace/retired-
 # PR #1915 (#1887): test fixture "fs-key-abcdef123456" in two unit tests, since replaced with a low-entropy placeholder.
 cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/agent-credential-entry.test.ts:generic-api-key:79
 cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/credential-entry-form.test.tsx:generic-api-key:31
+# PR #1960: placeholder Bearer value ("bedrock-sigv4") createOpenAI requires but the SigV4
+# fetch strips before signing; not a credential. Since renamed to a low-entropy non-key constant.
+15992d15abf5464446486c44cff19710ce07eced:lib/ai/bedrock-openai.ts:generic-api-key:37

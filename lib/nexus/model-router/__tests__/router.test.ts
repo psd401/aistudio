@@ -6,6 +6,7 @@ const mockGetConfig = jest.fn()
 const mockClassify = jest.fn()
 const mockExecuteQuery = jest.fn()
 const mockGetConfiguredChatProviders = jest.fn()
+const mockLogWarn = jest.fn()
 
 jest.mock("@/lib/db/drizzle", () => ({ getNexusEnabledModels: () => mockGetNexusEnabledModels() }))
 jest.mock("@/lib/ai/provider-credentials", () => ({
@@ -18,7 +19,12 @@ jest.mock("@/lib/db/drizzle-client", () => ({ executeQuery: (...args: unknown[])
 jest.mock("../config", () => ({ getNexusRouterConfig: () => mockGetConfig() }))
 jest.mock("../classifier", () => ({ classifyNexusRequest: (...args: unknown[]) => mockClassify(...args) }))
 jest.mock("@/lib/logger", () => ({
-  createLogger: () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }),
+  createLogger: () => ({
+    info: jest.fn(),
+    warn: (...args: unknown[]) => mockLogWarn(...args),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
 }))
 
 import { mergeRoutedToolNames, routeNexusRequest } from "../router"
@@ -112,6 +118,69 @@ function defineNexusModelRouterSuite1Part1() {
     expect(result.modelId).toBe("gemini-3.1-flash-image")
   })
 
+  /**
+   * #1900: "make this photo into a cartoon" attaches an image, which adds
+   * `searchNexusAttachments` to the turn's required tools. Treating that as
+   * "this turn needs a tool loop" sent the request to a text model that cannot
+   * produce an image at all, and the user was told images were impossible. The
+   * image route reads the attached bytes itself, so nothing has to call the
+   * tool.
+   */
+  it("routes an image request WITH an attachment to the image specialist", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
+      experienceMode: "standard", requestedFamily: "auto",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true, hasOnlyImageAttachments: true,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+  })
+
+  /**
+   * The paired refusal: with no accessible image model the turn fails with a
+   * message that says so, rather than silently landing on a text model that
+   * will claim it cannot make images.
+   */
+  it("refuses an attachment image request rather than falling back to text", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    mockFilterAccessibleResourceIds.mockResolvedValue(["1", "2", "3", "4", "6"])
+    await expect(routeNexusRequest({
+      text: "Make this photo into a cartoon", fallbackModelId: "gpt-terra",
+      experienceMode: "standard", requestedFamily: "auto",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true, hasOnlyImageAttachments: true,
+      userId: 7,
+    })).rejects.toThrow("Image generation is not available")
+  })
+
+  /**
+   * The carve-out stays narrow: repository retrieval genuinely needs a model
+   * that can CALL the tool, so those turns keep tier-aware text routing.
+   */
+  it("keeps an image turn needing repository retrieval on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a chart of the attached repo", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchConversationRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+
   it("keeps attachment retrieval on a function-calling text model", async () => {
     const attachmentConfig = nexusRouterConfigSchema.parse({
       auto: {
@@ -199,25 +268,6 @@ function defineNexusModelRouterSuite1Part2() {it("enforces attachment tools when
 
     expect(result.modelId).toBe("gpt-terra")
     expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
-  })
-
-  it("does not route an attachment request to a specialist-only image model", async () => {
-    mockClassify.mockResolvedValue({
-      intent: "image", tier: "medium", confidence: 0.99,
-      reasonCodes: ["explicit_image_request"], source: "deterministic",
-    })
-
-    const result = await routeNexusRequest({
-      text: "Create an image based on my attachment",
-      fallbackModelId: "gpt-terra",
-      experienceMode: "standard",
-      requestedFamily: "auto",
-      enabledConnectorIds: [],
-      enabledToolNames: ["searchNexusAttachments"],
-      userId: 7,
-    })
-
-    expect(result.modelId).toBe("gpt-terra")
   })
 
   it("automatically attaches the database-backed PSD-data MCP server", async () => {
@@ -342,12 +392,255 @@ function defineNexusModelRouterSuite1Part3() {it("stays in the Advanced family w
       requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
     })).rejects.toThrow("PSD Data is not configured")
   })
+
+  it("routes Standard instructional requests to a configured non-Gemini specialist", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        specialists: { ...config.specialists, instructionModels: ["us.anthropic.claude-sonnet"] },
+      }),
+      mode: "active",
+    })
+    mockClassify.mockResolvedValue({
+      intent: "instruction", tier: "medium", confidence: 0.95,
+      reasonCodes: ["instruction_domain"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Build a differentiated lesson plan", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+  })
+
+  it("falls back to Gemini when the configured non-Gemini specialist is inaccessible", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        specialists: { ...config.specialists, instructionModels: ["us.anthropic.claude-sonnet"] },
+      }),
+      mode: "active",
+    })
+    mockFilterAccessibleResourceIds.mockResolvedValue(
+      models.filter(model => model.id !== 3).map(model => String(model.id))
+    )
+    mockClassify.mockResolvedValue({
+      intent: "instruction", tier: "medium", confidence: 0.95,
+      reasonCodes: ["instruction_domain"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Build a differentiated lesson plan", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-flash")
+  })
+
+  it("keeps an unconfigured instructional route on Gemini even when Auto tiers list other families", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["us.anthropic.claude-sonnet", "gpt-terra"], high: [] },
+        specialists: { ...config.specialists, instructionModels: [] },
+      }),
+      mode: "active",
+    })
+    mockClassify.mockResolvedValue({
+      intent: "instruction", tier: "medium", confidence: 0.95,
+      reasonCodes: ["instruction_domain"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Build a differentiated lesson plan", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-flash")
+  })
+
+  it("keeps an unconfigured Standard instructional route on Gemini", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        specialists: { ...config.specialists, instructionModels: [] },
+      }),
+      mode: "active",
+    })
+    mockClassify.mockResolvedValue({
+      intent: "instruction", tier: "medium", confidence: 0.95,
+      reasonCodes: ["instruction_domain"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Build a differentiated lesson plan", fallbackModelId: "gpt-terra", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-flash")
+  })
+}
+
+/** A tab opened before an admin replaced its saved model (2026-10-26 prod). */
+function defineNexusModelRouterStaleFallbackSuite() {
+  const STALE_WARNING = expect.stringContaining("no longer available")
+
+  it("does not fail an active-mode turn whose client fallback model was deleted", async () => {
+    // A tab opened before an admin replaced the model it has saved keeps
+    // sending the deleted id; with routing on, the turn must still be answered.
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      experienceMode: "advanced", requestedFamily: "anthropic", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("us.anthropic.claude-sonnet")
+    expect(mockLogWarn).toHaveBeenCalledWith(STALE_WARNING, {
+      requestedFallbackModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+      substituteModelId: "us.anthropic.claude-sonnet",
+    })
+  })
+
+  it("substitutes the configured Auto medium-tier model for a deleted fallback", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["gpt-terra"], high: [] },
+      }),
+      mode: "shadow",
+    })
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })
+    // Shadow mode with no required tools executes the fallback, so the
+    // substitute is exactly what runs (and differs from table order).
+    expect(result.modelId).toBe("gpt-terra")
+    expect(mockLogWarn).toHaveBeenCalledWith(STALE_WARNING, expect.objectContaining({
+      substituteModelId: "gpt-terra",
+    }))
+  })
+
+  it("keeps an Advanced tab's deleted fallback within its requested family", async () => {
+    mockGetConfig.mockResolvedValue({
+      config: nexusRouterConfigSchema.parse({
+        ...config,
+        auto: { light: [], medium: ["us.anthropic.claude-sonnet"], high: [] },
+      }),
+      mode: "shadow",
+    })
+    const result = await routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "advanced",
+      requestedFamily: "openai", enabledConnectorIds: [], userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("still fails an explicit pick of a deleted model when routing is off", async () => {
+    mockGetConfig.mockResolvedValue({ config, mode: "off" })
+    await expect(routeNexusRequest({
+      text: "Help", fallbackModelId: "deleted-model", experienceMode: "standard",
+      requestedFamily: "auto", enabledConnectorIds: [], userId: 7,
+    })).rejects.toThrow("The fallback Nexus model is unavailable")
+    expect(mockLogWarn).not.toHaveBeenCalledWith(STALE_WARNING, expect.anything())
+  })
+}
+
+function defineNexusModelRouterBoundImageSuite() {
+  /**
+   * A Project/Skill/Assistant binding adds its repository tools to EVERY turn,
+   * so in a bound conversation "draw a cat" carried required tools the image
+   * path cannot serve and went to a text model that cannot draw. Tools present
+   * only because of the binding are dropped for an image intent.
+   */
+  it("routes an image request in a Project-bound conversation to the image specialist", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const bindingTools = ["searchConversationRepositories", "searchProjectRepositories"]
+    const result = await routeNexusRequest({
+      text: "Draw a cat", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: bindingTools,
+      bindingToolNames: bindingTools,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gemini-3.1-flash-image")
+  })
+
+  it("keeps a binding-only tool required for a non-image turn", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "general", tier: "medium", confidence: 0.9,
+      reasonCodes: ["normal_request"], source: "classifier",
+    })
+    const result = await routeNexusRequest({
+      text: "Summarise the project brief", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchSkillRepositories"],
+      bindingToolNames: ["searchSkillRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).not.toBe("gemini-3.1-flash-image")
+    expect(result.metadata.reasonCodes).toContain("required_tools_enforced")
+  })
+
+  it("keeps a user-chosen repository required even in a bound conversation", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a chart of the repo I picked", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [],
+      enabledToolNames: ["searchConversationRepositories", "searchProjectRepositories"],
+      // A direct pick makes searchConversationRepositories NOT binding-only.
+      bindingToolNames: ["searchProjectRepositories"],
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+}
+
+/**
+ * The #1900 attachment carve-out applies only to an attached IMAGE. The same
+ * tool is required for a PDF or an earlier turn's document, which the image
+ * path cannot read; sending that turn straight to an image model would skip
+ * retrieval and generate an image that ignores the document.
+ */
+function defineNexusModelRouterImageAttachmentSuite() {
+  it("keeps an image request about a non-image attachment on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Draw a diagram of the attached report", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: false,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
+
+  it("keeps an image plus a PDF in one message on a text model", async () => {
+    mockClassify.mockResolvedValue({
+      intent: "image", tier: "medium", confidence: 0.99,
+      reasonCodes: ["explicit_image_request"], source: "deterministic",
+    })
+    const result = await routeNexusRequest({
+      text: "Turn this photo and report into a poster", fallbackModelId: "gpt-terra",
+      experienceMode: "advanced", requestedFamily: "openai",
+      enabledConnectorIds: [], enabledToolNames: ["searchNexusAttachments"],
+      hasImageInput: true, hasOnlyImageAttachments: false,
+      userId: 7,
+    })
+    expect(result.modelId).toBe("gpt-terra")
+  })
 }
 
 const defineNexusModelRouterSuite1 = () => {
   defineNexusModelRouterSuite1Part1()
   defineNexusModelRouterSuite1Part2()
   defineNexusModelRouterSuite1Part3()
+  defineNexusModelRouterStaleFallbackSuite()
+  defineNexusModelRouterImageAttachmentSuite()
+  defineNexusModelRouterBoundImageSuite()
 };
 
 describe("Nexus model router", defineNexusModelRouterSuite1)
@@ -1208,10 +1501,11 @@ describe("Nexus model router artifact floor with no medium model accessible", ()
   })
 
   /**
-   * `selectModel` takes its image-specialist branch only while no input tool is
-   * required. An image turn WITH one falls through to ordinary tier-aware text
-   * routing, so treating every image intent as tier-independent would drop the
-   * floor exactly where it still applies.
+   * `selectModel` takes its image-specialist branch only while every required
+   * tool is one the image path serves itself. An image turn needing a real tool
+   * caller — repository retrieval here, NOT an attachment (#1900) — falls
+   * through to ordinary tier-aware text routing, so treating every image intent
+   * as tier-independent would drop the floor exactly where it still applies.
    */
   it("applies the floor to an image turn that falls through to text routing", async () => {
     mockClassify.mockResolvedValue({
@@ -1221,7 +1515,7 @@ describe("Nexus model router artifact floor with no medium model accessible", ()
 
     const result = await routeNexusRequest({
       ...shortFollowUp,
-      enabledToolNames: ["searchNexusAttachments"],
+      enabledToolNames: ["searchConversationRepositories"],
       workspace: editableArtifact,
     })
 

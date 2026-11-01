@@ -810,9 +810,16 @@ CONTRACT_DIFF=""
 if DEPLOYED_COMMIT="$(deployed_commit)"; then
   CHANGED="$(git -C "${REPO_ROOT}" diff --name-only \
     "${DEPLOYED_COMMIT}..${SOURCE_COMMIT}" -- "${CUTOVER_PATHS[@]}" 2>/dev/null || true)"
+  # `|| CONTRACT_STATUS=$?`, not a bare `CONTRACT_STATUS=$?` on the next line:
+  # under `set -e` a non-zero command substitution in an assignment exits the
+  # script on the spot. It did exactly that on 2026-10-26 — workspace_contract
+  # returned 1 (contract changed), the script died right after "=== Done ==="
+  # with status 1, and the CUTOVER REQUIRED notice it exists to print never
+  # appeared. The guard was silent on precisely the builds where it mattered.
+  CONTRACT_STATUS=0
   CONTRACT_DIFF="$(python3 "${SCRIPT_DIR}/workspace_contract.py" \
-    --rev "${SOURCE_COMMIT}" --compare-to "${DEPLOYED_COMMIT}" 2>&1)"
-  CONTRACT_STATUS=$?
+    --rev "${SOURCE_COMMIT}" --compare-to "${DEPLOYED_COMMIT}" 2>&1)" \
+    || CONTRACT_STATUS=$?
   case "${CONTRACT_STATUS}" in
     0) ;;  # contract unchanged — no cutover, whatever the filenames say
     1)

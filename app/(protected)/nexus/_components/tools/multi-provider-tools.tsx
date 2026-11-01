@@ -8,6 +8,7 @@ import { Globe, Clock, Code2, Terminal, ExternalLink } from 'lucide-react'
 import { isSafeUrl } from '@/lib/utils'
 import { ChartVisualizationUI } from './chart-visualization-ui'
 import { WebFetchUI } from './web-fetch-ui'
+import { DocumentDownloadUI } from './document-download-ui'
 import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
 /**
@@ -362,6 +363,9 @@ export function MultiProviderToolUIs() {
 
       {/* URL reader - shows which page the assistant opened (Issue #1696) */}
       <WebFetchUI />
+
+      {/* Generated file - download card for Word/Excel/PowerPoint/PDF (#1898) */}
+      <DocumentDownloadUI />
 
       {/* Code Interpreter - shows execution results */}
       <CodeInterpreterUI />

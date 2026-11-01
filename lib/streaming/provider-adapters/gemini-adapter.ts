@@ -1,8 +1,6 @@
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import type { ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
-import { Settings } from '@/lib/settings-manager';
-import { ErrorFactories } from '@/lib/error-utils';
+import { createGoogleModelProvider, type GoogleModelProvider } from '@/lib/ai/google-provider';
 import { BaseProviderAdapter } from './base-adapter';
 import type { StreamingCallbacks } from '../types';
 import type { ProviderCapabilities, StreamRequest } from '../types';
@@ -17,20 +15,14 @@ const log = createLogger({ module: 'gemini-adapter' });
  */
 export class GeminiAdapter extends BaseProviderAdapter {
   protected providerName = 'google';
-  private googleClient?: ReturnType<typeof createGoogleGenerativeAI>;
+  private googleClient?: GoogleModelProvider;
 
   async createModel(modelId: string) {
     try {
-      const apiKey = await Settings.getGoogleAI();
-      if (!apiKey) {
-        log.error('Google API key not configured');
-        throw ErrorFactories.sysConfigurationError('Google API key not configured');
-      }
-
       log.debug(`Creating Gemini model: ${modelId}`, { modelId });
 
-      // Create and store client instance with API key
-      this.googleClient = createGoogleGenerativeAI({ apiKey });
+      // Vertex AI when deployed, Gemini API key only in local dev
+      this.googleClient = await createGoogleModelProvider();
       this.providerClient = this.googleClient;
 
       // Return model from configured client
@@ -110,12 +102,13 @@ export class GeminiAdapter extends BaseProviderAdapter {
   }
 
   getCapabilities(modelId: string): ProviderCapabilities {
-    // Gemini 3.x (and the 3.1/3.5 point releases). Listed FIRST so a new
+    // Gemini 3.x and 4.x (and their point releases). Listed FIRST so a new
     // generation is characterised rather than falling through to the defaults —
     // `gemini-3-flash-preview` matched nothing here and inherited a 30s abort
     // that killed long Nexus answers mid-response.
-    if (this.matchesPattern(modelId, ['gemini-3*', 'models/gemini-3*'])) {
-      const isPro = this.matchesPattern(modelId, ['*pro*']);
+    if (this.matchesPattern(modelId, ['gemini-3*', 'models/gemini-3*', 'gemini-4*', 'models/gemini-4*'])) {
+      // Flagship tier: Pro, and Gemini 4 Argon ("flagship reasoning model").
+      const isPro = this.matchesPattern(modelId, ['*pro*', '*argon*']);
       return {
         supportsReasoning: true,
         supportsThinking: false,

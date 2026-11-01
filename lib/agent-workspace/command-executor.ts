@@ -80,6 +80,11 @@ export class WorkspaceCommandValidationError extends Error {
 }
 
 const READ_ACTIONS = new Set([
+  // The BULK form of `get` — `sheets spreadsheets values batchGet` reads many
+  // ranges in one call. It reads exactly what `get` reads and was missing from
+  // this list purely because it is spelled differently, so the bulk read of a
+  // workbook was refused while the per-range read was allowed (#1893).
+  "batchget",
   "download",
   "export",
   "get",
@@ -100,9 +105,25 @@ const READ_ACTIONS = new Set([
   "finddirectmessage",
 ])
 
+/**
+ * Reads whose trailing token is not one of READ_ACTIONS.
+ *
+ * `calendar freebusy query` asks when a set of calendars is busy. It creates
+ * nothing and sends nothing, but `query` is not a read verb in general — a
+ * `query` elsewhere in Google's surface may well be a write — so the whole
+ * operation is named here rather than widening READ_ACTIONS with the verb
+ * (#1893). Everything in this set still goes through the same read screening
+ * as READ_ACTIONS: no helper verb, no earlier mutating token.
+ */
+const READ_OPERATIONS = new Set(["calendar freebusy query"])
+
 // Bare mutating verbs only. `+`-prefixed helper verbs are covered by the
 // prefix check in validateWorkspaceMutation and must not be enumerated here.
+// `append` and `resolve` are the verbs of allowlisted writes
+// (`sheets spreadsheets values append`, `drive accessproposals resolve`); they
+// were absent, so a trailing read verb after either passed as a read (#1893).
 const MUTATING_ACTIONS = new Set([
+  "append",
   "batchdelete",
   "batchmodify",
   "batchupdate",
@@ -117,6 +138,7 @@ const MUTATING_ACTIONS = new Set([
   "patch",
   "reply",
   "reply-all",
+  "resolve",
   "send",
   "stop",
   "trash",
@@ -162,20 +184,25 @@ const ALLOWED_WRITES = new Set([
   // for skip-inbox-and-label rules or for existing rules to be removed, and
   // every attempt was refused (agent_failures 12909, 13866, 14559).
   //
-  // NOTE THE TRUNCATION. operationTokens caps at FOUR positionals, so this one
-  // entry is the whole `gmail.users.settings.filters` resource — create, get,
-  // list and delete alike, since the fifth token never reaches the operation
-  // string. That is the intended grant here (removing a filter is half the
-  // ask), but it means this entry cannot be narrowed to a subset of actions
-  // without a payload-level validator. Sibling settings resources are NOT
-  // covered: `forwardingAddresses`, `sendAs`, `delegates` and `updateVacation`
-  // each occupy the fourth token themselves and so remain refused.
+  // Both mutating actions, named in full. This used to be the bare four-token
+  // resource `gmail users settings filters`, which matched only because
+  // operationTokens truncated the real action away — so the entry granted
+  // EVERY action beneath the resource, including any action Google might add
+  // and any token the model invented. With the truncation gone the two actions
+  // the grant was always meant to cover are listed explicitly, and a fifth
+  // token that is neither (nor a read) is refused (#1893). `get` and `list`
+  // need no entry: they are READ_ACTIONS.
+  //
+  // Sibling settings resources are NOT covered: `forwardingAddresses`,
+  // `sendAs`, `delegates` and `updateVacation` each occupy the fourth token
+  // themselves and so remain refused.
   //
   // Requires `gmail.settings.basic`, which `gmail.modify` does NOT imply — see
   // SCOPES_BY_KIND in actions/agent-workspace.actions.ts and the scope gap in
   // requiredWorkspaceScopeGap below, without which this widening would only
   // convert our refusal into a Google 403.
-  "gmail users settings filters",
+  "gmail users settings filters create",
+  "gmail users settings filters delete",
   "gmail users messages modify",
   // Helper forms of writes already permitted in canonical form. Verified
   // against the pinned gws v0.22.5 binary: `sheets +append` and `drive
@@ -355,21 +382,89 @@ function writesResponseToCallerPath(argv: readonly string[]): boolean {
   })
 }
 
-function operationTokens(argv: readonly string[]): string[] {
+/**
+ * A dotted Google API method path, e.g. `spreadsheets.values.batchUpdate`.
+ *
+ * Deliberately narrow: identifier segments only, so a positional that is a
+ * filesystem path (`/home/node/x.pdf`), an email address or a JSON blob can
+ * never match and be torn apart. Only tokens in the LEADING POSITIONAL run are
+ * tested at all — flag VALUES are never canonicalized, because a `--params`
+ * object or a Drive query legitimately contains dots.
+ */
+const METHOD_PATH_SEGMENT = /^[A-Za-z][A-Za-z0-9]*$/
+
+function isDottedMethodPath(token: string): boolean {
+  // Cheap reject first: the overwhelming majority of tokens have no dot, and
+  // the segment test must never run over a multi-megabyte argument.
+  if (!token.includes(".")) return false
+  const segments = token.split(".")
+  // One flat, star-height-1 test per segment rather than a single pattern with
+  // a quantified group inside a quantifier — `security/detect-unsafe-regex`
+  // rejects that shape however tightly it is bounded.
+  return segments.every((segment) => METHOD_PATH_SEGMENT.test(segment))
+}
+
+/**
+ * The operation path, one token per path segment, original case preserved.
+ *
+ * `gws` names a method with space-separated positionals (`sheets spreadsheets
+ * values batchUpdate`), but psd-workspace/SKILL.md documented the same methods
+ * in Google's dotted Discovery spelling, and the model reaches for both. The
+ * dotted form arrived here as ONE token, so `sheets spreadsheets.values.batchUpdate`
+ * was judged as the action `spreadsheets.values.batchupdate` — absent from
+ * every allowlist — and a fully dotted `forms.forms.batchUpdate` was a single
+ * token that could not even name a service and an operation. Both were refused
+ * while their spaced twins were allowed. Canonicalizing here makes the two
+ * spellings one operation for every gate downstream (#1893).
+ */
+function canonicalOperationPath(argv: readonly string[]): string[] {
   const positional: string[] = []
   for (const token of argv) {
     if (token.startsWith("-")) break
-    positional.push(token.toLowerCase())
-    if (positional.length === 4) break
+    if (isDottedMethodPath(token)) {
+      positional.push(...token.split("."))
+    } else {
+      positional.push(token)
+    }
   }
   return positional
+}
+
+/**
+ * Canonicalize the operation path IN the argv that executes, so `gws` receives
+ * the space-separated form it implements even when the caller wrote the dotted
+ * one. Case is preserved: the method segment is camelCase (`batchUpdate`) and
+ * the CLI matches it as written. Flag values are untouched.
+ */
+export function canonicalizeOperationPath(argv: readonly string[]): string[] {
+  const out: string[] = []
+  let inOperation = true
+  for (const token of argv) {
+    if (token.startsWith("-")) inOperation = false
+    if (inOperation && isDottedMethodPath(token)) {
+      out.push(...token.split("."))
+    } else {
+      out.push(token)
+    }
+  }
+  return out
+}
+
+/**
+ * The lowercased operation path. No positional cutoff: it used to stop at FOUR
+ * tokens, which meant a 5-segment method was evaluated by its fourth segment —
+ * `gmail users messages attachments get` was judged as `… attachments`, not a
+ * read, and refused, while an allowlisted 4-token prefix silently granted every
+ * action beneath it. The whole path is the operation now (#1893).
+ */
+function operationTokens(argv: readonly string[]): string[] {
+  return canonicalOperationPath(argv).map((token) => token.toLowerCase())
 }
 
 function operationExceedsDiagnosticLimit(argv: readonly string[]): boolean {
   let positionalCount = 0
   let operationLength = 0
-  for (const token of argv) {
-    if (token.startsWith("-")) break
+  for (const token of canonicalOperationPath(argv)) {
     const separatorLength = positionalCount === 0 ? 0 : 1
     if (
       operationLength + separatorLength + token.length >
@@ -379,7 +474,6 @@ function operationExceedsDiagnosticLimit(argv: readonly string[]): boolean {
     }
     operationLength += separatorLength + token.length
     positionalCount += 1
-    if (positionalCount === 4) break
   }
   return false
 }
@@ -1346,6 +1440,42 @@ interface MutationContext {
   ownerEmail?: string
 }
 
+/**
+ * Is this a read? Either the trailing action is a read verb, or the whole
+ * operation is one of the reads whose verb is not (`calendar freebusy query`).
+ */
+function isReadOperation(operation: string, action: string): boolean {
+  return READ_ACTIONS.has(action) || READ_OPERATIONS.has(operation)
+}
+
+/**
+ * A trailing read action must not smuggle an earlier mutation past the write
+ * allowlist. `+`-prefixed tokens are always helper verbs, never resources, so
+ * screening the whole class covers `+reply`, `+reply-all` and `+forward`
+ * without having to enumerate each new helper here.
+ */
+function assertReadCarriesNoMutation(
+  tokens: readonly string[],
+  helperVerb: string | undefined
+): void {
+  if (helperVerb) {
+    throw new Error(
+      `Workspace read command contains a mutation operation: helper verb \`${helperVerb}\` is not permitted; use the canonical read action (e.g. \`sheets spreadsheets values get\`)`
+    )
+  }
+  if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
+    throw new Error("Workspace read command contains a mutation operation")
+  }
+  // Structural backstop for the verb list above: a read whose path begins with
+  // an allowlisted write (`drive accessproposals resolve get`) would otherwise
+  // skip that write's shape rules, whatever its verb is spelled.
+  for (let end = 2; end < tokens.length; end++) {
+    if (ALLOWED_WRITES.has(tokens.slice(0, end).join(" "))) {
+      throw new Error("Workspace read command contains a mutation operation")
+    }
+  }
+}
+
 function validateWorkspaceMutation(
   argv: readonly string[],
   scope: WorkspaceCommand["scope"],
@@ -1358,19 +1488,8 @@ function validateWorkspaceMutation(
       "Workspace read command contains a mutation operation: helper verb `+read` is not permitted; use the canonical read action (e.g. `sheets spreadsheets values get`)"
     )
   }
-  if (READ_ACTIONS.has(action)) {
-    // A trailing read action must not smuggle an earlier mutation past the
-    // write allowlist. `+`-prefixed tokens are always helper verbs, never
-    // resources, so screening the whole class covers `+reply`, `+reply-all`
-    // and `+forward` without having to enumerate each new helper here.
-    if (helperVerb) {
-      throw new Error(
-        `Workspace read command contains a mutation operation: helper verb \`${helperVerb}\` is not permitted; use the canonical read action (e.g. \`sheets spreadsheets values get\`)`
-      )
-    }
-    if (tokens.slice(0, -1).some((token) => MUTATING_ACTIONS.has(token))) {
-      throw new Error("Workspace read command contains a mutation operation")
-    }
+  if (isReadOperation(operation, action)) {
+    assertReadCarriesNoMutation(tokens, helperVerb)
     return
   }
   refuseDriveUploadWithPublishGuidance(argv)
@@ -1531,7 +1650,10 @@ export function requiredWorkspaceScopeGap(
     //
     // Every user with an existing refresh token needs that re-consent: a
     // stored token keeps the scope set it was ISSUED with.
-    operation === "gmail users settings filters"
+    // Prefix, not equality: with the four-token truncation gone the operation
+    // carries its action (`… filters list`), and every action on the resource
+    // needs the same scope (#1893).
+    tokens.slice(0, 4).join(" ") === "gmail users settings filters"
       ? {
           scopes: [GMAIL_SETTINGS_SCOPE],
           capability: "manage the filters in your Gmail inbox",
@@ -1756,13 +1878,20 @@ export async function executeWorkspaceCommand(
     try {
       execFile(
         binary,
-        // Both transforms run AFTER validation, so the allowlist and every
-        // scope gate still judge the operation the model actually asked for
-        // (`gmail +draft`), while gws receives the canonical call it
+        // All three transforms run AFTER validation, so the allowlist and
+        // every scope gate still judge the operation the model actually asked
+        // for (`gmail +draft`), while gws receives the canonical call it
         // implements. A non-draft argv passes through untouched, and
         // withSharedDriveSupport only ever adds Drive query parameters that
         // the validator already permits (DRIVE_PARAM_FIELDS).
-        withSharedDriveSupport(expandGmailDraftHelper(command.argv)),
+        //
+        // canonicalizeOperationPath splits a dotted method path into the
+        // positional tokens gws expects. The validator canonicalizes the same
+        // way, so this cannot change WHICH operation was judged — it only
+        // spells it the way the CLI accepts (#1893).
+        withSharedDriveSupport(
+          expandGmailDraftHelper(canonicalizeOperationPath(command.argv)),
+        ),
         {
           cwd: commandDirectory,
           env: {

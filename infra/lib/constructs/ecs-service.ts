@@ -802,6 +802,9 @@ export class EcsServiceConstruct extends Construct {
           'arn:aws:bedrock:*::foundation-model/*',
           'arn:aws:bedrock:*:*:inference-profile/*',
           'arn:aws:bedrock:*:*:provisioned-model/*',
+          // OpenAI GPT models on bedrock-runtime's Responses API also authorize
+          // InvokeModel against the account's default project.
+          'arn:aws:bedrock:*:*:project/default',
         ],
       }),
       // Bedrock does not support resource-level permissions for Rerank.
@@ -1048,6 +1051,18 @@ export class EcsServiceConstruct extends Construct {
         `arn:aws:iam::${cdk.Stack.of(this).account}:role/psd-agent-scheduler-invoke-${environment}`,
       AGENT_SCHEDULE_DLQ_ARN:
         `arn:aws:sqs:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:psd-agent-async-dlq-${environment}`,
+      // Keyless Vertex AI for every Gemini call: chat, Google Search
+      // grounding, image, voice (Live) and Deep Research
+      // (lib/ai/google-provider.ts, lib/ai/google-vertex-wif.ts).
+      // Google side: psd401/psd-gcp-infra vertex-ai.tf, whose `vertex-ai`
+      // provider trusts this service's task role BY NAME. The name is
+      // CDK-generated; if this role is ever replaced, add the new name there
+      // first or every Gemini feature fails closed. None of these is a secret.
+      GOOGLE_VERTEX_WIF_AUDIENCE:
+        '//iam.googleapis.com/projects/1022506104054/locations/global/' +
+        'workloadIdentityPools/aws-agent-broker/providers/vertex-ai',
+      GOOGLE_VERTEX_SERVICE_ACCOUNT_EMAIL: `aistudio-vertex@psd-aistudio-${environment}.iam.gserviceaccount.com`,
+      GOOGLE_VERTEX_PROJECT_ID: `psd-aistudio-${environment}`,
       // The web-tier owner-operation broker calls psd-data-mcp on behalf of
       // AgentCore skills, so the endpoint belongs on this trusted container.
       PSD_DATA_MCP_URL:

@@ -21,6 +21,11 @@ import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import { createWebFetchTool, skillPinAllowsWebFetch } from '@/lib/tools/web-fetch-tool';
 import {
+  createDocumentCreateTool,
+  skillPinAllowsDocumentCreate,
+} from '@/lib/tools/document-create-tool';
+import { DOCUMENT_CREATE_TOOL_NAME } from '@/lib/tools/document-create-contract';
+import {
   createNexusAttachmentTools,
   createNexusRepositorySearchTools,
 } from '@/lib/nexus/attachment-repository-tool';
@@ -56,16 +61,23 @@ import {
 import {
   extractImagePrompt,
   validateImagePrompt,
-  getOrCreateImageConversation,
   extractReferenceImages,
   extractCanonicalRepositoryImages,
   resolvePreviousGeneratedImageReferences,
+  buildBoundImagePrompt,
   getImageRoutingContext,
+  hasOnlyImageAttachments,
   persistImageExchange,
   deleteUnpersistedGeneratedImage,
+  buildNoImageMessage,
   createImageStreamResponse,
+  createNoImageResponse,
   handleImageGenerationError,
+  respondToImageFailure,
+  persistNoImageExchange,
 } from './image-generation-handler';
+import { NEXUS_ATTACHMENT_SEARCH_TOOL_NAME } from '@/lib/nexus/attachment-search-tool-name';
+import { splitRoutingToolNames } from '@/lib/nexus/routing-tool-names';
 
 import {
   generateConversationTitle,
@@ -75,10 +87,13 @@ import {
   saveUserMessage,
   convertMessagesToPartsFormat,
   saveAssistantMessage,
-  saveConversationSteps,
   type StepData,
   incompleteTurnReason,
+  persistAssistantTurn,
+  turnNeedsEmptyNotice,
 } from './chat-helpers';
+import { EMPTY_TURN_PERSIST_NOTICE } from '@/lib/streaming/empty-turn-notice';
+import { sanitizeStreamErrorMessage } from '@/lib/streaming/stream-error-message';
 
 import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
@@ -139,6 +154,12 @@ import {
   repositoryBindingErrorResponse,
 } from '@/lib/nexus/conversation-repository-service';
 import { RepositoryReadinessError } from '@/lib/repositories/readiness-service';
+import { buildNexusStreamHeaders } from './stream-headers';
+import { pdfContentSafetyCheck, withAttachedPdfDocuments } from './pdf-attachment-documents';
+import {
+  isProviderConfigurationError,
+  providerConfigurationErrorResponse,
+} from './configuration-error-response';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -177,6 +198,35 @@ async function closeMcpClients(
   for (const result of pending) closedMcpClients.add(result);
   log.debug('Closing MCP clients', { context, clientCount: pending.length });
   await Promise.allSettled(pending.map(r => r.close()));
+}
+
+/**
+ * Write the durable empty-turn notice row (#1899).
+ *
+ * Reached from two places — a turn that produced nothing at all, and a turn
+ * whose tool rows were saved but which never wrote prose — so the row shape and
+ * the log line stay in one place.
+ */
+async function saveEmptyTurnNotice(params: {
+  conversationId: string;
+  dbModelId: number;
+  finishReason?: string;
+  routingMetadata: NexusRoutingMetadata;
+  log: ReturnType<typeof createLogger>;
+  reason: string;
+}): Promise<void> {
+  params.log.warn('Persisting empty-turn notice', {
+    conversationId: params.conversationId,
+    finishReason: params.finishReason,
+    reason: params.reason,
+  });
+  await persistAssistantTurn({
+    conversationId: params.conversationId,
+    text: EMPTY_TURN_PERSIST_NOTICE,
+    dbModelId: params.dbModelId,
+    finishReason: params.finishReason || 'no_content',
+    metadata: { routing: params.routingMetadata, emptyTurn: true },
+  });
 }
 
 function createOnFinishCallback(params: {
@@ -233,8 +283,8 @@ function createOnFinishCallback(params: {
       aborted: !!aborted,
     });
 
-    const skipReason = incompleteTurnReason({ text, aborted, steps });
-    if (skipReason) {
+    const skipReason = incompleteTurnReason({ text, aborted, steps, toolCalls });
+    if (skipReason === 'stream_aborted') {
       log.warn('Skipping assistant message persistence — incomplete turn', {
         conversationId,
         reason: skipReason,
@@ -243,34 +293,60 @@ function createOnFinishCallback(params: {
       // Still release MCP clients — the cleanup below is not reached on this
       // path, and an aborted turn would otherwise leak connector clients.
       await closeMcpClients(connectorToolResults, log, 'onFinish');
-      timer({
-        status: skipReason === 'stream_aborted' ? 'error' : 'success',
-        conversationId,
-        tokensUsed: usage?.totalTokens,
-      });
+      timer({ status: 'error', conversationId, tokensUsed: usage?.totalTokens });
       return;
     }
 
-    let assistantMessagePersisted = false;
-    try {
-      if (steps && steps.length > 1) {
-        // Multi-step agentic loop (MCP connectors): save each step as a separate
-        // assistant message to preserve the correct turn structure for replay.
-        // Consolidating into one message breaks convertToModelMessages — it cannot
-        // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
-        await saveConversationSteps({
-          conversationId, steps, dbModelId, usage, finishReason,
-          metadata: { routing: routingMetadata },
-        });
-      } else {
-        await saveAssistantMessage({
-          conversationId, text, usage, finishReason, toolCalls, dbModelId,
-          metadata: { routing: routingMetadata },
-        });
-      }
-      assistantMessagePersisted = true;
-    } catch (saveError) {
-      log.error('Failed to save assistant message', { error: saveError, conversationId });
+    if (skipReason === 'no_content') {
+      // #1899, cases 1 and 2: the stream has already told the user this turn
+      // produced no answer (`buildAbortAwareResponse`). Skipping the write made
+      // that notice vanish on reload, leaving the prompt looking unanswered —
+      // which is what drove people to resend the same message two to six times.
+      // Persist the notice instead, as a plain text row that replays safely
+      // (no tool_use block without its result).
+      await saveEmptyTurnNotice({
+        conversationId,
+        dbModelId,
+        finishReason,
+        routingMetadata,
+        log,
+        reason: 'turn produced no answer',
+      });
+      await closeMcpClients(connectorToolResults, log, 'onFinish');
+      timer({ status: 'success', conversationId, tokensUsed: usage?.totalTokens });
+      return;
+    }
+
+    // Writes the real reply, or a notice row if that write fails, so a reload
+    // never shows a prompt with no reply at all (#1899, case 4).
+    const { persisted: assistantMessagePersisted } = await persistAssistantTurn({
+      conversationId,
+      text,
+      steps,
+      usage,
+      finishReason,
+      toolCalls,
+      dbModelId,
+      metadata: { routing: routingMetadata },
+    });
+
+    // #1899 case 2: the tool rows above are the history worth keeping, but on
+    // reload they are tool cards and nothing else — the notice the stream
+    // appended is transient. Follow them with the durable notice, AFTER the
+    // tool rows so it reads last. Skipped when a direct-render tool ran: the
+    // chart or document IS the answer.
+    if (
+      assistantMessagePersisted &&
+      turnNeedsEmptyNotice({ text, steps, toolCalls })
+    ) {
+      await saveEmptyTurnNotice({
+        conversationId,
+        dbModelId,
+        finishReason,
+        routingMetadata,
+        log,
+        reason: 'text-free tool turn',
+      });
     }
 
     if (assistantMessagePersisted) {
@@ -309,6 +385,12 @@ function createOnFinishCallback(params: {
  * `createUniversalTools()` because Nexus is the surface with a multi-step
  * budget for it (`resolveMaxSteps`). Single-step unified-streaming callers would
  * end the turn on the tool result.
+ *
+ * `generate_document` (#1898) is attached on the same terms and for the same
+ * reason: a user who asks for a Word file or a deck cannot know they were meant
+ * to enable a toggle first. It is built from the authenticated `userId` and this
+ * turn's `conversationId`, never from model input, so the model cannot write a
+ * document into someone else's conversation.
  */
 async function buildMergedChatTools(params: {
   enabledTools: string[];
@@ -318,6 +400,12 @@ async function buildMergedChatTools(params: {
   memoryTools?: ToolSet;
   /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
   webFetchAllowed: boolean;
+  /** False when a bound skill's pin excludes `generate_document`. */
+  documentCreateAllowed: boolean;
+  /** Authenticated user id, for the server-built document tool. */
+  userId: number;
+  /** This turn's conversation id, for the server-built document tool. */
+  conversationId: string;
 }): Promise<ToolSet | undefined> {
   const {
     enabledTools,
@@ -326,7 +414,17 @@ async function buildMergedChatTools(params: {
     attachmentTools,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
+    userId,
+    conversationId,
   } = params;
+  const documentTool = documentCreateAllowed
+    ? createDocumentCreateTool({ userId, conversationId })
+    : undefined;
+  // Assigned LAST (see `attachNexusBuiltInTools`) so no connector or workspace
+  // tool of the same name can replace a server-built built-in.
+  const attachBuiltIns = (target: ToolSet): ToolSet =>
+    attachNexusBuiltInTools(target, { webFetchAllowed, documentTool });
   const hasWorkspaceTools = !!workspaceTools && Object.keys(workspaceTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
@@ -337,7 +435,8 @@ async function buildMergedChatTools(params: {
     !hasAttachmentTools &&
     !hasMemoryTools
   ) {
-    return webFetchAllowed ? { web_fetch: createWebFetchTool() } : undefined;
+    const builtIns = attachBuiltIns({});
+    return Object.keys(builtIns).length > 0 ? builtIns : undefined;
   }
   const merged: ToolSet = { ...(await createUniversalTools(enabledTools)) };
   for (const result of connectorToolResults) {
@@ -359,16 +458,34 @@ async function buildMergedChatTools(params: {
     // silently disable or widen them.
     Object.assign(merged, memoryTools);
   }
-  // Assigned LAST so a connector or workspace tool that happens to be named
-  // `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in. The
-  // Nexus tool card also expects this implementation's result shape. A skill
-  // pin that excludes it removes any same-named external tool too.
-  if (webFetchAllowed) {
-    merged.web_fetch = createWebFetchTool();
+  return attachBuiltIns(merged);
+}
+
+/**
+ * Attach the Nexus-only built-in tools, overwriting any same-named entry.
+ *
+ * Applied LAST in the merge so a connector or workspace tool that happens to be
+ * named `web_fetch` cannot replace the SSRF-guarded, content-fenced built-in,
+ * and nothing can replace the conversation-scoped `generate_document` whose
+ * result shape the download card depends on. A skill `allowed-tools` pin that
+ * excludes one of these deletes any same-named external tool too, rather than
+ * leaving a look-alike in its place.
+ */
+function attachNexusBuiltInTools(
+  target: ToolSet,
+  options: { webFetchAllowed: boolean; documentTool?: ToolSet[string] },
+): ToolSet {
+  if (options.webFetchAllowed) {
+    target.web_fetch = createWebFetchTool();
   } else {
-    delete merged.web_fetch;
+    delete target.web_fetch;
   }
-  return merged;
+  if (options.documentTool) {
+    target[DOCUMENT_CREATE_TOOL_NAME] = options.documentTool;
+  } else {
+    delete target[DOCUMENT_CREATE_TOOL_NAME];
+  }
+  return target;
 }
 
 function addConnectorToolHeader(
@@ -412,23 +529,19 @@ function buildStreamingResponseHeaders(params: {
   connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
 }): Record<string, string> {
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Unified-Streaming": "true",
-    "X-Supports-Reasoning": params.supportsReasoning.toString(),
-  };
-  const encodedRouting = encodeURIComponent(
-    JSON.stringify(params.routingMetadata),
-  );
-  if (encodedRouting.length <= 4096) {
-    headers["X-Nexus-Routing"] = encodedRouting;
-  }
-  if (!params.conversationIdValue && params.conversationId) {
-    headers["X-Conversation-Id"] = params.conversationId;
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle || "New Conversation",
-    );
-  }
+  const isNewConversation = !params.conversationIdValue && !!params.conversationId;
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: isNewConversation ? params.conversationId : undefined,
+    conversationTitle: isNewConversation
+      ? params.conversationTitle || "New Conversation"
+      : undefined,
+    extraHeaders: {
+      "X-Unified-Streaming": "true",
+      "X-Supports-Reasoning": params.supportsReasoning.toString(),
+    },
+  });
   const safeIds = params.failedConnectorIds.filter((id) =>
     /^[\da-f-]{36}$/i.test(id),
   );
@@ -437,6 +550,46 @@ function buildStreamingResponseHeaders(params: {
   }
   addConnectorToolHeader(headers, params.connectorToolResults, params.log);
   return headers;
+}
+
+/**
+ * The stream's lifecycle callbacks. Extracted so `executeStreaming` stays within
+ * the module's function-length budget; the behaviour is unchanged.
+ */
+function buildStreamCallbacks(params: {
+  conversationId: string;
+  userId: number;
+  sessionId: string;
+  requestId: string;
+  latestUserText: string;
+  dbModelId: number;
+  connectorToolResults: McpConnectorToolsResult[];
+  log: ReturnType<typeof createLogger>;
+  timer: (data: Record<string, unknown>) => void;
+  routingMetadata: NexusRoutingMetadata;
+}): StreamRequest["callbacks"] {
+  const { connectorToolResults, log, conversationId } = params;
+  return {
+    onFinish: createOnFinishCallback({
+      conversationId,
+      userId: params.userId,
+      cognitoSub: params.sessionId,
+      requestId: params.requestId,
+      latestUserText: params.latestUserText,
+      dbModelId: params.dbModelId,
+      connectorToolResults,
+      log,
+      timer: params.timer,
+      routingMetadata: params.routingMetadata,
+    }),
+    onError: async (error: Error) => {
+      log.warn("Stream error — closing MCP clients", {
+        conversationId,
+        error: error.message,
+      });
+      await closeMcpClients(connectorToolResults, log, "onError");
+    },
+  };
 }
 
 /**
@@ -477,11 +630,14 @@ async function executeStreaming(params: {
   memoryTools?: ToolSet;
   /** False when a bound skill's `allowed-tools` pin excludes `web_fetch`. */
   webFetchAllowed: boolean;
+  /** False when a bound skill's pin excludes `generate_document` (#1898). */
+  documentCreateAllowed: boolean;
   /** Sanitized, owner-scoped memory context for this turn. */
   userMemoryFragment?: string;
   /** Guardrail-processed latest user text used for post-turn extraction. */
   latestUserText: string;
-  reasoningEffort: "minimal" | "low" | "medium" | "high";
+  /** Unset = each model's own default (or its admin-set default). */
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
   responseMode: "standard" | "flex" | "priority";
   requestId: string;
   dbModelId: number;
@@ -510,6 +666,7 @@ async function executeStreaming(params: {
     repositoryPromptFragment,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
     userMemoryFragment,
     latestUserText,
     reasoningEffort,
@@ -525,7 +682,7 @@ async function executeStreaming(params: {
     !!attachmentTools && Object.keys(attachmentTools).length > 0;
   const hasAttachmentTools =
     !!attachmentTools &&
-    Object.hasOwn(attachmentTools, "searchNexusAttachments");
+    Object.hasOwn(attachmentTools, NEXUS_ATTACHMENT_SEARCH_TOOL_NAME);
   const systemPrompt = buildNexusSystemPrompt({
     skillInstructions,
     skillName,
@@ -552,6 +709,9 @@ async function executeStreaming(params: {
     attachmentTools: hasRepositoryTools ? attachmentTools : undefined,
     memoryTools,
     webFetchAllowed,
+    documentCreateAllowed,
+    userId,
+    conversationId,
   });
 
   const streamRequest: StreamRequest = {
@@ -576,27 +736,18 @@ async function executeStreaming(params: {
     // `lib/nexus/chat-step-budget.ts` for why a workspace turn gets a wider bound.
     maxSteps: resolveMaxSteps({ multiStepToolsActive, hasWorkspaceTools }),
     options: { reasoningEffort, responseMode },
-    callbacks: {
-      onFinish: createOnFinishCallback({
-        conversationId,
-        userId,
-        cognitoSub: sessionId,
-        requestId,
-        latestUserText,
-        dbModelId,
-        connectorToolResults,
-        log,
-        timer,
-        routingMetadata,
-      }),
-      onError: async (error: Error) => {
-        log.warn("Stream error — closing MCP clients", {
-          conversationId,
-          error: error.message,
-        });
-        await closeMcpClients(connectorToolResults, log, "onError");
-      },
-    },
+    callbacks: buildStreamCallbacks({
+      conversationId,
+      userId,
+      sessionId,
+      requestId,
+      latestUserText,
+      dbModelId,
+      connectorToolResults,
+      log,
+      timer,
+      routingMetadata,
+    }),
   };
 
   log.info("Starting unified streaming service", {
@@ -688,7 +839,7 @@ const ChatRequestSchema = z.object({
   // `contentId` is checked against the object actually bound before the model
   // sees anything, so a stale/mismatched buffer is dropped rather than reported.
   workspacePreviewDiagnostics: workspacePreviewDiagnosticsSchema.optional(),
-  reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
+  reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional(),
   nexusMode: nexusExperienceModeSchema.default('standard'),
   modelFamily: nexusModelFamilySchema.default('auto'),
@@ -785,20 +936,19 @@ async function persistGeneratedImage(params: {
 }
 
 async function rollbackFailedImageConversation(params: {
-  attachmentReferences: NexusAttachmentReference[];
+  /**
+   * This turn created the conversation. Every such conversation is removed on
+   * failure — with or without attachments — because the client never gets its
+   * id, and a Project/Skill one also carries repository bindings.
+   */
+  created: boolean;
   conversationId: string;
-  existingConversationId?: string;
   userId: number;
   requestId: string;
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
 }): Promise<Response | null> {
-  if (
-    params.existingConversationId ||
-    params.attachmentReferences.length === 0
-  ) {
-    return null;
-  }
+  if (!params.created) return null;
   try {
     await rollbackNewNexusAttachmentConversation({
       ownerId: params.userId,
@@ -828,6 +978,119 @@ async function rollbackFailedImageConversation(params: {
  * Handle image generation models
  */
 
+/**
+ * Create or reuse the conversation for an image turn. The standard setup, not
+ * an image-only insert: an image request in a Project or Skill conversation
+ * reaches this path, and the conversation must keep those bindings, pass the
+ * same ownership, project-match and approved-skill checks as any turn, and
+ * store the repository bindings its next text turn routes and searches from.
+ */
+async function setupImageConversation(params: {
+  existingConversationId?: string;
+  messages: z.infer<typeof ChatRequestSchema>["messages"];
+  userId: number;
+  provider: string;
+  modelId: string;
+  bindings: ConversationBindings;
+  attachmentReferences: NexusAttachmentReference[];
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+  log: ReturnType<typeof createLogger>;
+}): Promise<
+  | {
+      conversationId: string;
+      conversationTitle: string;
+      created: boolean;
+      skillId?: string;
+    }
+  | { error: Response }
+> {
+  const convResult = await setupConversation({
+    conversationIdValue: params.existingConversationId,
+    messages: params.messages,
+    userId: params.userId,
+    provider: params.provider,
+    modelId: params.modelId,
+    requestId: params.requestId,
+    log: params.log,
+    projectId: params.bindings.projectBinding?.projectId,
+    skillId: params.bindings.skillId,
+  });
+  if ("error" in convResult) return convResult;
+  // A conversation this turn just created never reaches the client unless the
+  // turn succeeds, so any failure from here on — returned or thrown — removes
+  // it, exactly as the standard path compensates a failed first turn.
+  const rollbackIfCreated = async (): Promise<void> => {
+    if (!convResult.created) return;
+    await rollbackNewNexusAttachmentConversation({
+      ownerId: params.userId,
+      conversationId: convResult.conversationId,
+    });
+  };
+  let repositoryBindingError: Response | null;
+  try {
+    // Attachments first, as `prepareConversationRepositories` does: a rejected
+    // attachment must not leave this turn's repository selections committed.
+    // A returned error here has already compensated a new conversation.
+    const attachmentError = await bindAttachmentReferencesOrError({
+      ownerId: params.userId,
+      conversationId: convResult.conversationId,
+      references: params.attachmentReferences,
+      conversationCreated: convResult.created,
+      requestId: params.requestId,
+      timer: params.timer,
+      log: params.log,
+    });
+    if (attachmentError) return { error: attachmentError };
+    repositoryBindingError = await persistConversationRepositoryBindings({
+      conversationId: convResult.conversationId,
+      userId: params.userId,
+      requestedRepositoryIds: params.bindings.requestedRepositoryIds,
+      projectBinding: params.bindings.projectBinding,
+      skillId: convResult.skillId,
+      requestId: params.requestId,
+    });
+  } catch (error) {
+    await rollbackIfCreated().catch((cleanupError: unknown) => {
+      params.log.error("Failed to compensate a failed image conversation setup", {
+        conversationId: convResult.conversationId,
+        error: cleanupError instanceof Error ? cleanupError.message : "Unknown cleanup error",
+      });
+    });
+    throw error;
+  }
+  if (repositoryBindingError) {
+    await rollbackIfCreated();
+    return { error: repositoryBindingError };
+  }
+  return {
+    conversationId: convResult.conversationId,
+    conversationTitle: convResult.conversationTitle,
+    created: convResult.created,
+    skillId: convResult.skillId,
+  };
+}
+
+/**
+ * The image prompt with the conversation's Project instructions and Skill
+ * SKILL.md applied; see `buildBoundImagePrompt`. The persisted user message
+ * stays the user's own words — only the provider sees the combined prompt.
+ */
+async function boundImagePrompt(
+  imagePrompt: string,
+  projectBinding: SuccessfulProjectBinding,
+  skillId: string | undefined,
+  log: ReturnType<typeof createLogger>,
+): Promise<string> {
+  const skill = await loadBoundSkill(skillId, log);
+  return buildBoundImagePrompt(imagePrompt, [
+    ...(projectBinding
+      ? [{ label: `Project "${projectBinding.name}"`, instructions: projectBinding.instructions }]
+      : []),
+    ...(skill ? [{ label: `Skill "${skill.name}"`, instructions: skill.instructions }] : []),
+  ]);
+}
+
 async function handleImageGeneration(params: {
   messages: z.infer<typeof ChatRequestSchema>["messages"];
   persistenceMessages: z.infer<typeof ChatRequestSchema>["messages"];
@@ -837,6 +1100,7 @@ async function handleImageGeneration(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
+  bindings: ConversationBindings;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -866,35 +1130,25 @@ async function handleImageGeneration(params: {
     return validation.error;
   }
 
-  // Determine provider and create/get conversation
   const imageProvider = modelConfig.provider === "google" ? "google" : "openai";
-  const convResult = await getOrCreateImageConversation({
+  const convResult = await setupImageConversation({
     existingConversationId,
-    imagePrompt,
-    imageProvider,
-    modelId,
+    messages,
     userId,
+    provider: imageProvider,
+    modelId,
+    bindings: params.bindings,
+    attachmentReferences,
     requestId,
+    timer,
+    log,
   });
-
   if ("error" in convResult) {
     return convResult.error;
   }
-
-  const { conversationId, title: conversationTitle } = convResult;
+  const { conversationId, conversationTitle } = convResult;
 
   try {
-    const bindingError = await bindAttachmentReferencesOrError({
-      ownerId: userId,
-      conversationId,
-      references: attachmentReferences,
-      conversationCreated: !existingConversationId,
-      requestId,
-      timer,
-      log,
-    });
-    if (bindingError) return bindingError;
-
     const referenceImages = await resolveImageReferences({
       messages,
       attachmentReferences,
@@ -910,16 +1164,19 @@ async function handleImageGeneration(params: {
     // Generate the image
     const { generateImageForNexus } =
       await import("@/lib/ai/image-generation-service");
+    const generationPrompt = await boundImagePrompt(
+      imagePrompt, params.bindings.projectBinding, convResult.skillId, log,
+    );
 
     log.info("Starting image generation", {
       provider: imageProvider,
       modelId: modelConfig.model_id,
-      promptLength: imagePrompt.length,
+      promptLength: generationPrompt.length,
       referenceImageCount: referenceImages.length,
     });
 
     const imageResult = await generateImageForNexus({
-      prompt: imagePrompt,
+      prompt: generationPrompt,
       modelId: modelConfig.model_id,
       provider: imageProvider as "openai" | "google",
       conversationId,
@@ -950,18 +1207,90 @@ async function handleImageGeneration(params: {
       routingMetadata: { ...routingMetadata },
     });
   } catch (imageError) {
-    const rollbackError = await rollbackFailedImageConversation({
-      attachmentReferences,
+    return respondToImageFailure({
+      error: imageError,
       conversationId,
-      existingConversationId,
-      userId,
-      requestId,
-      log,
-      timer,
+      replyWithExplanation: (explanation) =>
+        respondWithNoImage({
+          explanation,
+          conversationId,
+          conversationTitle,
+          existingConversationId,
+          imagePrompt,
+          persistenceMessages,
+          dbModelId,
+          routingMetadata,
+          requestId,
+          log,
+          timer,
+        }),
+      rollback: () =>
+        rollbackFailedImageConversation({
+          created: convResult.created,
+          conversationId,
+          userId,
+          requestId,
+          log,
+          timer,
+        }),
+      toErrorResponse: (failure) =>
+        handleImageGenerationError(failure, conversationId, requestId),
     });
-    if (rollbackError) return rollbackError;
-    return handleImageGenerationError(imageError, conversationId, requestId);
   }
+}
+
+/**
+ * Turn a model's text-instead-of-image answer into an ordinary assistant
+ * reply (#1900).
+ *
+ * Throws if the exchange cannot be saved: a reply that vanishes on reload,
+ * over a new conversation left with no messages, is worse than an error, so
+ * the caller rolls back exactly as it does for a failed image save.
+ */
+async function respondWithNoImage(params: {
+  explanation: string;
+  conversationId: string;
+  conversationTitle: string;
+  existingConversationId?: string;
+  imagePrompt: string;
+  persistenceMessages: z.infer<typeof ChatRequestSchema>["messages"];
+  dbModelId: number;
+  routingMetadata: NexusRoutingMetadata;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  timer: (data: Record<string, unknown>) => void;
+}): Promise<Response> {
+  const text = buildNoImageMessage(params.explanation);
+  const lastMessage =
+    params.persistenceMessages[params.persistenceMessages.length - 1];
+  const persistedUser =
+    lastMessage?.role === "user"
+      ? extractUserContent(lastMessage as UIMessage)
+      : {
+          content: params.imagePrompt,
+          parts: [{ type: "text", text: params.imagePrompt }],
+        };
+  await persistNoImageExchange({
+    conversationId: params.conversationId,
+    userContent: persistedUser.content,
+    userParts: persistedUser.parts,
+    assistantText: text,
+    dbModelId: params.dbModelId,
+    routingMetadata: { ...params.routingMetadata },
+  });
+  params.log.info("Image generation returned no image; returning the model's text", {
+    conversationId: params.conversationId,
+    requestId: params.requestId,
+  });
+  params.timer({ status: "success", reason: "no_image", conversationId: params.conversationId });
+  return createNoImageResponse({
+    text,
+    conversationId: params.conversationId,
+    conversationTitle: params.conversationTitle,
+    isNewConversation: !params.existingConversationId,
+    requestId: params.requestId,
+    routingMetadata: { ...params.routingMetadata },
+  });
 }
 
 /**
@@ -983,7 +1312,39 @@ function formatDeepResearchReport(
   return body;
 }
 
-function createDeepResearchResponse(params: {
+/**
+ * Keep a failed Deep Research turn readable after a reload (#1899, case 4).
+ *
+ * The user message is written before the research starts, so a failure that is
+ * only streamed leaves the prompt with no reply the next time the conversation
+ * loads. A failure of this write is logged, never thrown — the stream and the
+ * research lease still have to unwind.
+ */
+async function persistDeepResearchFailure(
+  params: DeepResearchResponseParams,
+  text: string,
+): Promise<void> {
+  try {
+    await params.persistAssistantMessage({
+      conversationId: params.conversationId,
+      text,
+      finishReason: "error",
+      dbModelId: params.dbModelId,
+      metadata: { routing: params.routingMetadata, deepResearchFailed: true },
+    });
+  } catch (persistError) {
+    params.log.error("Failed to persist Deep Research failure notice", {
+      conversationId: params.conversationId,
+      error:
+        persistError instanceof Error
+          ? persistError.message
+          : String(persistError),
+    });
+  }
+}
+
+/** Everything `createDeepResearchResponse` and its helpers need for one run. */
+interface DeepResearchResponseParams {
   prompt: string;
   modelId: string;
   dbModelId: number;
@@ -1001,21 +1362,19 @@ function createDeepResearchResponse(params: {
   createUIMessageStream: (typeof import("ai"))["createUIMessageStream"];
   createUIMessageStreamResponse: (typeof import("ai"))["createUIMessageStreamResponse"];
   releaseDeepResearch: (typeof import("@/lib/ai/deep-research-budget"))["releaseDeepResearch"];
-}): Response {
+}
+
+function createDeepResearchResponse(params: DeepResearchResponseParams): Response {
   const messageId = `dr-${Date.now()}`;
-  const headers: Record<string, string> = {
-    "X-Request-Id": params.requestId,
-    "X-Conversation-Id": params.conversationId,
-    "X-Deep-Research": "true",
-    "X-Nexus-Routing": encodeURIComponent(
-      JSON.stringify(params.routingMetadata),
-    ),
-  };
-  if (params.isNewConversation) {
-    headers["X-Conversation-Title"] = encodeURIComponent(
-      params.conversationTitle,
-    );
-  }
+  const headers = buildNexusStreamHeaders({
+    requestId: params.requestId,
+    routingMetadata: params.routingMetadata,
+    conversationId: params.conversationId,
+    conversationTitle: params.isNewConversation
+      ? params.conversationTitle
+      : undefined,
+    extraHeaders: { "X-Deep-Research": "true" },
+  });
   return params.createUIMessageStreamResponse({
     status: 200,
     headers,
@@ -1089,12 +1448,19 @@ function createDeepResearchResponse(params: {
             message,
           });
           if (!streamEnded) {
+            // #1899: the raw provider/tool message can carry request ids and
+            // prompt fragments, and "An error occurred."-grade text tells the
+            // user nothing. Say which kind of failure it was instead — and
+            // persist it, or the prompt reloads with no reply under it at all
+            // (the user message was saved before the research started).
+            const notice = `\n\n**Research failed:** ${sanitizeStreamErrorMessage(error)}`;
             writer.write({
               type: "text-delta",
               id: messageId,
-              delta: `\n\n**Research failed:** ${message}`,
+              delta: notice,
             });
             writer.write({ type: "text-end", id: messageId });
+            await persistDeepResearchFailure(params, notice.trim());
           }
           params.timer({
             status: "error",
@@ -1316,6 +1682,7 @@ async function routeSpecialModel(params: {
   dbModelId: number;
   userId: number;
   existingConversationId?: string;
+  bindings: ConversationBindings;
   requestId: string;
   timer: (data: Record<string, unknown>) => void;
   log: ReturnType<typeof createLogger>;
@@ -1336,6 +1703,7 @@ async function routeSpecialModel(params: {
       dbModelId: params.dbModelId,
       userId: params.userId,
       existingConversationId: params.existingConversationId,
+      bindings: params.bindings,
       requestId: params.requestId,
       timer: params.timer,
       log: params.log,
@@ -1456,6 +1824,9 @@ async function resolveRequestRouting(args: {
   modelFamily: z.infer<typeof nexusModelFamilySchema>;
   manuallyEnabledConnectors: string[];
   manuallyEnabledTools: string[];
+  bindingToolNames: string[];
+  /** `itemType` of each canonical attachment on the latest message. */
+  attachmentItemTypes: string[];
   userId: number;
   sessionId: string;
   existingConversationId?: string;
@@ -1481,8 +1852,15 @@ async function resolveRequestRouting(args: {
     requestedFamily: args.nexusMode === 'advanced' ? args.modelFamily : 'auto',
     enabledConnectorIds: args.manuallyEnabledConnectors,
     enabledToolNames: args.manuallyEnabledTools,
+    bindingToolNames: args.bindingToolNames,
     userId: args.userId,
     hasImageInput: imageContext.hasImageInput,
+    hasOnlyImageAttachments: await hasOnlyImageAttachments({
+      imageContext,
+      attachmentItemTypes: args.attachmentItemTypes,
+      conversationId: args.existingConversationId,
+      userId: args.userId,
+    }),
     hasPreviousGeneratedImage: imageContext.hasPreviousGeneratedImage,
     workspace: args.workspace,
   });
@@ -2205,6 +2583,21 @@ type SuccessfulProjectBinding = Exclude<
   { error: Response }
 >;
 
+/** The request's Project, Skill and picked repositories, for turn setup. */
+interface ConversationBindings {
+  projectBinding: SuccessfulProjectBinding;
+  skillId?: string;
+  requestedRepositoryIds?: number[];
+}
+
+function conversationBindingsOf(prepared: PreparedChatRequest): ConversationBindings {
+  return {
+    projectBinding: prepared.projectBinding,
+    skillId: prepared.skillId,
+    requestedRepositoryIds: prepared.validationData.repositoryIds,
+  };
+}
+
 interface PreparedChatRequest {
   validationData: ChatRequestData;
   conversationIdValue?: string;
@@ -2226,6 +2619,7 @@ interface PreparedChatRequest {
   safePersistenceMessages: ChatMessages;
   safeModelMessages: ChatMessages;
   routingEnabledTools: string[];
+  routingBindingTools: string[];
 }
 
 type PreparedChatResult =
@@ -2269,6 +2663,7 @@ type ConversationRepositoryResult =
   | { ok: true; context: ConversationRepositoryContext }
   | { ok: false; response: Response };
 
+/** Routing tools for this turn; see `splitRoutingToolNames`. */
 async function buildRoutingEnabledTools(params: {
   conversationId?: string;
   userId: number;
@@ -2276,8 +2671,11 @@ async function buildRoutingEnabledTools(params: {
   enabledTools: string[];
   hasProjectBinding: boolean;
   hasSkillBinding: boolean;
-  requestedRepositoryIds: number[];
-}): Promise<string[]> {
+  skillId?: string;
+  /** This request's picker selection; undefined when the client sent none. */
+  requestedRepositoryIds?: number[];
+}): Promise<{ tools: string[]; bindingTools: string[] }> {
+  const requestedRepositoryIds = params.requestedRepositoryIds ?? [];
   const attachmentRepositoryIds = params.conversationId
     ? await resolveNexusConversationRepositoryIds({
         ownerId: params.userId,
@@ -2295,20 +2693,61 @@ async function buildRoutingEnabledTools(params: {
     : [];
   const hasDurableRepositoryBinding =
     durableBindings.length > 0 ||
-    params.requestedRepositoryIds.length > 0 ||
+    requestedRepositoryIds.length > 0 ||
     params.hasProjectBinding ||
     params.hasSkillBinding;
-  return [
-    ...new Set([
-      ...params.enabledTools,
-      ...(requiresAttachmentTools ? ["searchNexusAttachments"] : []),
-      ...(hasDurableRepositoryBinding
-        ? ["searchConversationRepositories"]
-        : []),
-      ...(params.hasProjectBinding ? ["searchProjectRepositories"] : []),
-      ...(params.hasSkillBinding ? ["searchSkillRepositories"] : []),
-    ]),
-  ];
+  return splitRoutingToolNames({
+    enabledTools: params.enabledTools,
+    requiresAttachmentTools,
+    hasDurableRepositoryBinding,
+    requestedRepositoryIds: params.requestedRepositoryIds,
+    hasStoredDirectBinding: durableBindings.some(
+      (binding) => binding.source === "direct",
+    ),
+    hasProjectBinding: params.hasProjectBinding,
+    hasSkillBinding: params.hasSkillBinding,
+    skillPinnedTools: await skillPinnedTools({
+      skillId: params.skillId,
+      conversationId: params.conversationId,
+      userId: params.userId,
+    }),
+  });
+}
+
+/**
+ * The `allowed-tools` of the Skill this turn runs under, from the approved
+ * skill record. After the first turn the client drops `skillId` from the URL
+ * but keeps sending the pinned tools, so the conversation's STORED skill is
+ * used when the request names none — otherwise those tools look hand-picked
+ * again and an image request goes back to a text model. Used only to tell
+ * pinned tools from picked ones; it adds no tool to the turn.
+ */
+async function skillPinnedTools(params: {
+  skillId?: string;
+  conversationId?: string;
+  userId: number;
+}): Promise<string[]> {
+  let skillId = params.skillId;
+  if (!skillId && params.conversationId) {
+    const conversationId = params.conversationId;
+    const rows = await executeQuery(
+      (db) =>
+        db
+          .select({ skillId: nexusConversations.skillId })
+          .from(nexusConversations)
+          .where(
+            and(
+              eq(nexusConversations.id, conversationId),
+              eq(nexusConversations.userId, params.userId),
+            ),
+          )
+          .limit(1),
+      "routingStoredConversationSkill",
+    );
+    skillId = rows[0]?.skillId ?? undefined;
+  }
+  if (!skillId) return [];
+  return (await getApprovedSkillSession(skillId))?.allowedTools ?? [];
 }
 
 async function prepareChatRequest(params: {
@@ -2382,14 +2821,15 @@ async function prepareChatRequest(params: {
     })),
   );
   const enabledTools = data.enabledTools ?? [];
-  const routingEnabledTools = await buildRoutingEnabledTools({
+  const routingTools = await buildRoutingEnabledTools({
     conversationId: conversationIdValue,
     userId: auth.userId,
     attachmentPreflight: preflight.preflight,
     enabledTools,
     hasProjectBinding: !!projectBinding,
     hasSkillBinding: !!data.skillId,
-    requestedRepositoryIds: data.repositoryIds ?? [],
+    skillId: data.skillId,
+    requestedRepositoryIds: data.repositoryIds,
   });
   // #1786: routing needs to know an artifact is open BEFORE the classifier runs,
   // so a follow-up like "add a school dropdown" keeps the PSD Data tools. The
@@ -2423,20 +2863,21 @@ async function prepareChatRequest(params: {
       projectBinding,
       attachmentPreflight: preflight.preflight,
       safePersistenceMessages: prepared.messages as ChatMessages,
-      // #1791 finding 7: drop superseded artifact/document sources from what the
-      // MODEL sees. `safePersistenceMessages` above keeps them, so the thread
-      // still reloads byte-for-byte; only the re-sent history shrinks.
+      // #1791 finding 7: drop superseded artifact/document sources — and, since
+      // #1898, the bodies of earlier generated documents — from what the MODEL
+      // sees. `safePersistenceMessages` above keeps them, so the thread still
+      // reloads byte-for-byte; only the re-sent history shrinks.
       safeModelMessages: pruneStaleWorkspaceToolPayloads(
         prepared.modelMessages as UIMessage[]
       ) as ChatMessages,
-      routingEnabledTools,
+      routingEnabledTools: routingTools.tools,
+      routingBindingTools: routingTools.bindingTools,
     },
   };
 }
 
 function createSpecialModelCompatibilityError(params: {
   isDeepResearchModel: boolean;
-  isImageGenerationModel: boolean;
   hasAttachmentReferences: boolean;
   hasProjectBinding: boolean;
   requestId: string;
@@ -2454,17 +2895,6 @@ function createSpecialModelCompatibilityError(params: {
       JSON.stringify({
         error:
           "Deep Research does not support repository-backed project content. Choose a chat model for this request.",
-        requestId: params.requestId,
-      }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
-  if (params.isImageGenerationModel && params.hasProjectBinding) {
-    params.timer({ status: "error", reason: "image_project_unsupported" });
-    return new Response(
-      JSON.stringify({
-        error:
-          "Image generation does not use project repository context. Choose a chat model for this request.",
         requestId: params.requestId,
       }),
       { status: 400, headers: { "Content-Type": "application/json" } },
@@ -2492,6 +2922,8 @@ async function resolveChatModel(params: {
     modelFamily: prepared.validationData.modelFamily,
     manuallyEnabledConnectors: prepared.manuallyEnabledConnectors,
     manuallyEnabledTools: prepared.routingEnabledTools,
+    bindingToolNames: prepared.routingBindingTools,
+    attachmentItemTypes: prepared.attachmentPreflight.resolutions.map((r) => r.itemType),
     userId: prepared.userId,
     sessionId: prepared.session.sub,
     existingConversationId: prepared.conversationIdValue,
@@ -2570,7 +3002,6 @@ async function resolveChatModel(params: {
   );
   const compatibilityError = createSpecialModelCompatibilityError({
     isDeepResearchModel,
-    isImageGenerationModel,
     hasAttachmentReferences: prepared.attachmentPreflight.references.length > 0,
     hasProjectBinding: !!prepared.projectBinding,
     requestId,
@@ -2590,6 +3021,7 @@ async function resolveChatModel(params: {
     dbModelId,
     userId: prepared.userId,
     existingConversationId: prepared.conversationIdValue,
+    bindings: conversationBindingsOf(prepared),
     requestId,
     timer,
     log,
@@ -2627,6 +3059,74 @@ async function resolveChatModel(params: {
   };
 }
 
+/**
+ * Store the conversation's durable repository bindings: the user's direct
+ * picks, its Project's repositories, and its Skill's. Later turns route and
+ * search from these rows, so every path that runs a turn must write them —
+ * an image turn that skipped this left an image-first Skill or Project
+ * conversation with nothing to search on its next text turn.
+ *
+ * Returns an error response for a binding the user can fix; rethrows
+ * anything else.
+ */
+async function persistConversationRepositoryBindings(params: {
+  conversationId: string;
+  userId: number;
+  requestedRepositoryIds?: number[];
+  projectBinding: SuccessfulProjectBinding;
+  skillId?: string;
+  requestId: string;
+}): Promise<Response | null> {
+  try {
+    if (params.requestedRepositoryIds !== undefined) {
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: params.requestedRepositoryIds,
+        source: "direct",
+      });
+    }
+    if (params.projectBinding) {
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: params.projectBinding.repositoryIds,
+        source: "project",
+        sourceId: params.projectBinding.projectId,
+      });
+    }
+    if (params.skillId) {
+      const skill = await getApprovedSkillSession(params.skillId);
+      if (!skill) {
+        return Response.json(
+          {
+            error: "The skill bound to this conversation is unavailable",
+            code: "SKILL_NOT_AVAILABLE",
+            requestId: params.requestId,
+          },
+          { status: 409 }
+        );
+      }
+      await replaceConversationRepositoryBindings({
+        conversationId: params.conversationId,
+        userId: params.userId,
+        repositoryIds: skill.repositoryIds,
+        source: "skill",
+        sourceId: params.skillId,
+      });
+    }
+    return null;
+  } catch (error) {
+    if (
+      error instanceof ConversationRepositoryBindingError ||
+      error instanceof RepositoryReadinessError
+    ) {
+      return repositoryBindingErrorResponse(error, params.requestId);
+    }
+    throw error;
+  }
+}
+
 async function prepareConversationRepositories(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2648,58 +3148,16 @@ async function prepareConversationRepositories(params: {
   if (bindingError) {
     return { ok: false, response: bindingError };
   }
-  try {
-    if (prepared.validationData.repositoryIds !== undefined) {
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: prepared.validationData.repositoryIds,
-        source: "direct",
-      });
-    }
-    if (prepared.projectBinding) {
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: prepared.projectBinding.repositoryIds,
-        source: "project",
-        sourceId: prepared.projectBinding.projectId,
-      });
-    }
-    if (conversation.skillId) {
-      const skill = await getApprovedSkillSession(conversation.skillId);
-      if (!skill) {
-        return {
-          ok: false,
-          response: Response.json(
-            {
-              error: "The skill bound to this conversation is unavailable",
-              code: "SKILL_NOT_AVAILABLE",
-              requestId,
-            },
-            { status: 409 }
-          ),
-        };
-      }
-      await replaceConversationRepositoryBindings({
-        conversationId: conversation.conversationId,
-        userId: prepared.userId,
-        repositoryIds: skill.repositoryIds,
-        source: "skill",
-        sourceId: conversation.skillId,
-      });
-    }
-  } catch (error) {
-    if (
-      error instanceof ConversationRepositoryBindingError ||
-      error instanceof RepositoryReadinessError
-    ) {
-      return {
-        ok: false,
-        response: repositoryBindingErrorResponse(error, requestId),
-      };
-    }
-    throw error;
+  const repositoryBindingError = await persistConversationRepositoryBindings({
+    conversationId: conversation.conversationId,
+    userId: prepared.userId,
+    requestedRepositoryIds: prepared.validationData.repositoryIds,
+    projectBinding: prepared.projectBinding,
+    skillId: conversation.skillId,
+    requestId,
+  });
+  if (repositoryBindingError) {
+    return { ok: false, response: repositoryBindingError };
   }
   const attachmentRepositoryIds = await resolveNexusConversationRepositoryIds({
     ownerId: prepared.userId,
@@ -2817,6 +3275,34 @@ function buildRepositoryPromptFragment(params: {
   return fragments.join("\n\n---\n\n") || undefined;
 }
 
+/**
+ * Let the model SEE this turn's attached PDFs (circled answers, handwriting),
+ * not only their extracted text. Model copy only; fail-open (see
+ * pdf-attachment-documents.ts).
+ */
+async function modelMessagesWithAttachedPdfs(
+  prepared: {
+    attachmentPreflight: { references: NexusAttachmentReference[] };
+    userId: number;
+    session: { sub: string };
+  },
+  resolved: { modelConfig: { provider: string; model_id: string } },
+  conversation: { conversationId: string },
+  repositories: { lightweightMessages: UIMessage[] },
+  log: ReturnType<typeof createLogger>,
+): Promise<UIMessage[]> {
+  const { messages } = await withAttachedPdfDocuments({
+    messages: repositories.lightweightMessages,
+    references: prepared.attachmentPreflight.references,
+    ownerId: prepared.userId,
+    conversationId: conversation.conversationId,
+    modelConfig: resolved.modelConfig,
+    log,
+    isPdfContentAllowed: pdfContentSafetyCheck(prepared.session.sub),
+  });
+  return messages;
+}
+
 async function resolveToolsAndStream(params: {
   prepared: PreparedChatRequest;
   resolved: ResolvedChatRequest;
@@ -2932,7 +3418,8 @@ async function resolveToolsAndStream(params: {
     toolsBound: !!memoryContext.tools,
   });
   return executeStreaming({
-    messages: repositories.lightweightMessages,
+    // The model's copy also carries this turn's PDFs to read visually.
+    messages: await modelMessagesWithAttachedPdfs(prepared, resolved, conversation, repositories, log),
     modelConfig: resolved.modelConfig,
     userId: prepared.userId,
     sessionId: prepared.session.sub,
@@ -2969,9 +3456,12 @@ async function resolveToolsAndStream(params: {
     }),
     memoryTools: memoryContext.tools,
     webFetchAllowed: skillPinAllowsWebFetch(skillBinding.skillAllowedTools),
+    documentCreateAllowed: skillPinAllowsDocumentCreate(
+      skillBinding.skillAllowedTools,
+    ),
     userMemoryFragment: memoryContext.userMemoryFragment,
     latestUserText: resolved.protectedLatestUserText,
-    reasoningEffort: prepared.validationData.reasoningEffort || "medium",
+    reasoningEffort: prepared.validationData.reasoningEffort,
     responseMode: prepared.validationData.responseMode || "standard",
     requestId: params.requestId,
     dbModelId: resolved.dbModelId,
@@ -3126,7 +3616,9 @@ export async function POST(req: Request) {
 
 /**
  * Map a pre-stream POST error to an HTTP Response. Content-safety blocks return
- * 400 with category detail; everything else returns a generic 500. Extracted
+ * 400 with category detail; a provider-configuration error (missing/invalid
+ * provider credentials) returns 503 PROVIDER_NOT_CONFIGURED (#1849); everything
+ * else returns a generic 500. Extracted
  * from POST to keep the route handler's cyclomatic complexity within bounds.
  */
 function buildChatErrorResponse(
@@ -3187,6 +3679,14 @@ function buildChatErrorResponse(
       }),
       { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
     );
+  }
+
+  if (isProviderConfigurationError(error)) {
+    log.error('Nexus model provider is not configured', {
+      error: { message: error.message, name: error.name, code: error.code },
+    });
+    timer({ status: 'error', reason: 'provider_not_configured' });
+    return providerConfigurationErrorResponse(requestId);
   }
 
   log.error('Nexus chat API error', {

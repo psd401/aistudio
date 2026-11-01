@@ -91,7 +91,7 @@ describe("RESOURCE_SERVER_SCOPES", () => {
 
   it("advertises assistants:execute but keeps the other assistant scopes API-key only", () => {
     // Atrium Capture's two first-party OAuth clients need to request
-    // assistants:execute (migration 190). Without it here, oidc-provider
+    // assistants:execute (migration 191). Without it here, oidc-provider
     // neither advertises nor accepts the scope and every token request
     // carrying it is rejected before the grant is ever consulted.
     expect(RESOURCE_SERVER_SCOPES).toContain("assistants:execute")

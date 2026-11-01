@@ -153,6 +153,49 @@ def _is_safe_path_component(value: str) -> bool:
     return bool(_SAFE_PATH_ID.match(value or "")) and value not in {".", ".."}
 
 
+# OpenClaw's own system prompt teaches the model to attach a file by ending its
+# reply with a `MEDIA:<path>` line. OpenClaw strips that line from the reply
+# text and hands the file to its native channel delivery, which this deployment
+# never uses: the reply reaches Google Chat through the router, which only
+# carries text. So the file was silently dropped while the reply still said
+# "here's the CSV" (dev smoke test 2026-10-26; the same report from prod on
+# 2026-10-21, "user cannot see MEDIA attachment"). The harness now delivers
+# those files itself — see OpenClawAdapter._deliver_media_directives.
+_MEDIA_DIRECTIVE_LINE = re.compile(r"^\s*MEDIA:\s*(\S.*?)\s*$", re.IGNORECASE)
+MEDIA_DIRECTIVE_MAX_FILES = 5
+
+
+def extract_media_directive_targets(texts: Iterable[str]) -> List[str]:
+    """`MEDIA:` targets in assistant text, in order, de-duplicated.
+
+    A target is a local path or an http(s) URL. Wrapping quotes, backticks and
+    angle brackets and a `file://` scheme are removed; lines inside a fenced
+    code block are ignored, so an example the model quotes is not delivered.
+    """
+    targets: List[str] = []
+    seen = set()
+    for text in texts:
+        if not isinstance(text, str) or "media:" not in text.lower():
+            continue
+        in_fence = False
+        for line in text.splitlines():
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = _MEDIA_DIRECTIVE_LINE.match(line)
+            if not match:
+                continue
+            target = match.group(1).strip().strip("`'\"<>").strip()
+            if target.lower().startswith("file://"):
+                target = target[len("file://"):]
+            if target and target not in seen:
+                seen.add(target)
+                targets.append(target)
+    return targets
+
+
 def _catalog_tool_names(catalog: object) -> List[str]:
     """Return explicit catalog-entry names without traversing their schemas."""
 
@@ -1346,6 +1389,232 @@ class OpenClawAdapter(HarnessAdapter):
             lambda: self._sum_transcript_usage(jsonl_path, since_ms),
             session_uuid,
         )
+
+    # The ONLY folders a MEDIA: path may resolve into: the agent's output
+    # folder and the user's own uploads. Never the whole state dir — it holds
+    # the transcript database (every session's conversation) and
+    # openclaw.json, and a MEDIA: line is model output that injected text in an
+    # uploaded document can steer. Not /tmp either: it is not the documented
+    # output location (Rule 16) and other processes write there.
+    MEDIA_DIRECTIVE_ROOTS = (
+        "/home/node/.openclaw/work",
+        "/home/node/.openclaw/attachments",
+    )
+    MEDIA_PUBLISH_SCRIPT = "/opt/psd-skills/psd-publish-file/publish.js"
+    MEDIA_PUBLISH_TIMEOUT_S = 120
+    # Total wall-clock budget for all deliveries in one turn. Runs after the
+    # model has finished, before the reply is returned, so it must stay well
+    # inside the turn deadline rather than stack MAX_FILES x per-file timeout.
+    MEDIA_DELIVERY_BUDGET_S = 180
+
+    def _read_turn_media_targets(
+        self,
+        session_uuid: Optional[str],
+        agent_id: Optional[str],
+        since_ms: int,
+    ) -> List[str]:
+        """`MEDIA:` targets the model wrote in THIS turn's assistant records.
+
+        Read from the transcript database, not the chat event: OpenClaw removes
+        the directive line from the text it broadcasts, so the event never
+        carries it, while the transcript keeps the model's raw text (verified
+        against a dev transcript, 2026-10-26). Same containment and read-only
+        open as the usage read. Never raises; an unreadable store means no
+        targets.
+        """
+        try:
+            if not session_uuid or not _is_safe_path_component(session_uuid):
+                return []
+            if agent_id and not _is_safe_path_component(agent_id):
+                return []
+            db_dir = os.path.join(
+                self.WORKSPACE_DIR, "agents", agent_id or "main",
+                self.TRANSCRIPT_DB_SUBDIR,
+            )
+            db_path = self._contained_transcript_path(
+                db_dir, self.TRANSCRIPT_DB_FILENAME,
+            )
+            if db_path is None:
+                return []
+            connection = sqlite3.connect(
+                f"{pathlib.Path(db_path).as_uri()}?mode=ro",
+                uri=True,
+                timeout=self.USAGE_SQLITE_TIMEOUT_S,
+            )
+            try:
+                rows = connection.execute(
+                    "SELECT event_json FROM transcript_events "
+                    "WHERE session_id = ? AND created_at >= ? "
+                    "AND event_json LIKE '%MEDIA:%' ORDER BY seq",
+                    (session_uuid, since_ms),
+                ).fetchall()
+            finally:
+                connection.close()
+            texts: List[str] = []
+            for (raw,) in rows:
+                try:
+                    record = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                msg = record.get("message") if isinstance(record, dict) else None
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                ts = self._record_timestamp_ms(record, msg)
+                if ts is not None and ts < since_ms:
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str):
+                    texts.append(content)
+                elif isinstance(content, list):
+                    texts.extend(
+                        block.get("text", "")
+                        for block in content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    )
+            return extract_media_directive_targets(texts)
+        except Exception as exc:  # noqa: BLE001 - never break a turn
+            logger.warning("media directive read failed: %s", str(exc)[:200])
+            return []
+
+    def _resolve_media_path(self, target: str) -> Tuple[Optional[str], str]:
+        """`(real_path, "")` for a deliverable local MEDIA: target, else
+        `(None, reason)`. Deliverable means a regular file whose resolved path
+        (symlinks followed) sits strictly inside one of MEDIA_DIRECTIVE_ROOTS.
+        """
+        candidate = target
+        if candidate.startswith("~/"):
+            candidate = os.path.join("/home/node", candidate[2:])
+        if not os.path.isabs(candidate):
+            candidate = os.path.join(self.WORKSPACE_DIR, candidate)
+        real = os.path.realpath(candidate)
+        for root in self.MEDIA_DIRECTIVE_ROOTS:
+            if real.startswith(os.path.realpath(root) + os.sep):
+                if os.path.isfile(real):
+                    return real, ""
+                return None, "file not found"
+        return None, "outside the folders files can be sent from"
+
+    @staticmethod
+    def _parse_publish_output(stdout: str) -> Dict[str, Any]:
+        """publish.js prints its result pretty-printed across many lines
+        (JSON.stringify(obj, null, 2)) and its errors as one line, so parse the
+        whole output; an unparseable one is an empty result."""
+        try:
+            payload = json.loads(stdout.strip())
+        except (TypeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _deliver_media_directives(
+        self, targets: List[str], session_id: Optional[str], model: Optional[str],
+    ) -> str:
+        """Deliver each MEDIA: target and return the text to append to the reply.
+
+        A local file goes through psd-publish-file with its default
+        destination: the agent's Drive, shared with the caller alone — the same
+        call Rule 16 asks the model to make. It runs inside the turn, so the
+        local broker proxy still holds this invocation's signed context. An
+        http(s) target is already a link and is passed through. A file that
+        cannot be delivered is named in the reply instead of vanishing, and
+        recorded as a warn-level failure.
+        """
+        lines: List[str] = []
+        # (name, reason) for the user; the failure record gets only codes.
+        failures: List[Tuple[str, str]] = []
+        failure_codes: List[str] = []
+        published = 0
+        deadline = time.monotonic() + self.MEDIA_DELIVERY_BUDGET_S
+        for target in targets[:MEDIA_DIRECTIVE_MAX_FILES]:
+            if re.match(r"^https?://", target, re.IGNORECASE):
+                lines.append(target)
+                continue
+            name = os.path.basename(target.rstrip("/")) or "file"
+            path, reason = self._resolve_media_path(target)
+            if path is None:
+                failures.append((name, reason))
+                failure_codes.append(
+                    "not_found" if reason == "file not found" else "outside_roots"
+                )
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                failures.append((name, "out of time to send it this turn"))
+                failure_codes.append("budget_exhausted")
+                continue
+            try:
+                done = subprocess.run(
+                    ["node", self.MEDIA_PUBLISH_SCRIPT, "--file", path],
+                    capture_output=True,
+                    text=True,
+                    timeout=min(self.MEDIA_PUBLISH_TIMEOUT_S, remaining),
+                )
+            except subprocess.TimeoutExpired:
+                failures.append((name, "delivery timed out"))
+                failure_codes.append("timeout")
+                continue
+            except OSError:
+                failures.append((name, "delivery could not start"))
+                failure_codes.append("spawn_failed")
+                continue
+            payload = self._parse_publish_output(done.stdout)
+            url = payload.get("url")
+            if done.returncode == 0 and isinstance(url, str) and url.startswith("https://"):
+                lines.append(f"{payload.get('fileName') or name}:")
+                lines.append(url)
+                published += 1
+                continue
+            message = payload.get("message")
+            failures.append((
+                name,
+                message[:200] if isinstance(message, str) and message
+                else "delivery failed",
+            ))
+            code = payload.get("error")
+            failure_codes.append(
+                code if isinstance(code, str) and _SAFE_PATH_ID.match(code)
+                else "publish_failed"
+            )
+        skipped = max(0, len(targets) - MEDIA_DIRECTIVE_MAX_FILES)
+        if skipped:
+            failure_codes.append("over_limit")
+        logger.info(
+            "media directives: targets=%d published=%d failed=%d",
+            len(targets), published, len(failures),
+        )
+        not_sent = len(failures) + skipped
+        if not_sent:
+            # Counts and codes only: a file name can identify a student, and
+            # this record goes to CloudWatch and the failure broker.
+            record_failure(
+                source="harness",
+                severity="warn",
+                error_class="MediaDirectiveDeliveryFailed",
+                error_message=(
+                    f"{not_sent} of {len(targets)} MEDIA: file(s) not "
+                    f"delivered: {', '.join(sorted(set(failure_codes)))}"
+                ),
+                session_id=session_id,
+                model=model,
+                context={
+                    "phase": "media_directive",
+                    "targets": len(targets),
+                    "published": published,
+                    "codes": sorted(set(failure_codes)),
+                },
+            )
+        if failures:
+            lines.append(
+                "I couldn't send "
+                + ("this file" if len(failures) == 1 else "these files")
+                + ": "
+                + "; ".join(f"{name}: {why}" for name, why in failures)
+            )
+        if skipped:
+            lines.append(
+                f"{skipped} more file(s) were not sent "
+                f"(limit {MEDIA_DIRECTIVE_MAX_FILES} per reply)."
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _contained_transcript_path(
@@ -3345,6 +3614,20 @@ class OpenClawAdapter(HarnessAdapter):
             # existing metric's history stays comparable.
             turn_usage["model_calls"],
         )
+
+        media_targets = self._read_turn_media_targets(
+            observed_session_uuid, observed_agent_id, int(chat_send_at * 1000),
+        )
+        if media_targets:
+            appendix = self._deliver_media_directives(
+                media_targets, session_id, observed_model or model_override,
+            )
+            if appendix:
+                response_text = (
+                    f"{response_text.rstrip()}\n\n{appendix}"
+                    if response_text.strip()
+                    else appendix
+                )
 
         if response_text.strip():
             return _result(_format_for_chat(response_text.strip()))

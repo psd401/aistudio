@@ -1,5 +1,5 @@
 -- =====================================================
--- Migration: 190-atrium-capture-execute-scope.sql
+-- Migration: 191-atrium-capture-execute-scope.sql
 -- Description: Allow the two first-party Atrium Capture clients to request
 --              assistants:execute for the district Capture Guide Writer.
 -- Dependencies: 134-oauth-first-party-clients.sql,

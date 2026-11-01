@@ -1,7 +1,7 @@
 ---
 type: Platform Overview
 title: Agent Platform & Skills System
-description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, and transport truncation awareness for K-12 AI assistants.
+description: Extensible agent skill system with 39 domain-specific capabilities including media processing, private Drive delivery of agent-made files, harness delivery of files named in MEDIA reply lines, Google Workspace integration, Cedar governance, MCP tool exposure, email triage with content-first classification and rhetorical question guard, scheduled run silent reply, schedule failure streaks with one owner DM per streak, scheduled-post thread mapping, one-time credential entry links that keep user secrets out of chat, PSD Public Records (PRR) requests through each person's own token, and transport truncation awareness for K-12 AI assistants.
 tags: [agents, skills, mcp, workspace, governance]
 openwiki:
   roles: [infrastructure, domain]
@@ -27,6 +27,8 @@ openwiki:
     - lib/content/people-search.ts
     - lib/agent-workspace/atrium-owner-operation.ts
     - lib/agent-workspace/command-executor.ts
+    - lib/agent-github/command-executor.ts
+    - lib/agent-credentials/owner-operation-broker.ts
     - lib/agents/platform-model.ts
     - infra/agent-image/openclaw.json
     - infra/database/schema/186-agent-sonnet-5-5-pricing.sql
@@ -40,7 +42,15 @@ openwiki:
     - infra/agent-image/openclaw_aborted_hint.mjs
     - infra/agent-image/openclaw_runtime_patch.mjs
     - infra/agent-image/openclaw_patch_text.mjs
+    - infra/agent-image/skills/psd-prr/run.js
+    - app/api/agent/credentials/route.ts
+    - infra/lambdas/agent-cron/schedule-failure-notice.ts
+    - infra/agent-image/skills/psd-deep-research/research.js
+    - lib/ai/deep-research-budget.ts
+    - lib/ai/gemini-deep-research-service.ts
   test_paths:
+    - tests/unit/lib/agent-credentials/prr-broker.test.ts
+    - infra/agent-image/skills/psd-prr/run.test.js
     - infra/agent-image/test_aborted_run_hint.py
     - tests/unit/agent-image-openclaw-runtime-patch.test.ts
     - tests/unit/lib/agent-workspace/drive-delivery.test.ts
@@ -60,12 +70,18 @@ openwiki:
     - tests/unit/agent-atrium-owner-operation.test.ts
     - lib/agents/__tests__/platform-model.test.ts
     - infra/agent-image/test_harness_adapter.py
+    - tests/unit/agent-image-skill-scratch-dir.test.ts
     - infra/lambdas/agent-cron/silent-scheduled-run.test.ts
     - infra/agent-image/skills/psd-atrium/run.test.js
     - tests/unit/agent-credential-entry.test.ts
     - tests/unit/agent-consent-link-route.test.ts
     - tests/smoke/agent-credential-entry-token.smoke.ts
     - infra/agent-image/skills/psd-credentials/request_entry.test.js
+    - tests/unit/agent-deep-research-operation.test.ts
+    - tests/unit/lib/ai/deep-research-budget.test.ts
+    - tests/unit/lib/ai/gemini-deep-research-service.test.ts
+    - tests/unit/agent-credentials-route.test.ts
+    - infra/agent-image/skills/psd-deep-research/research.test.js
 ---
 
 # Agent Platform
@@ -109,7 +125,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-media` — ffprobe inspection + ffmpeg transcode via named presets (`social-mp4`, `web-mp4`, `audio-mp3`); routes through agent-media Lambda
 - `psd-transcribe` — Speech-to-text using Amazon Transcribe over audio/video in owner's private workspace; routes through agent-media Lambda
 - `psd-pdf-to-markdown` — PDF to Markdown conversion; scanned/image-only PDFs rendered to page images via `--rasterize-pages`
-- `psd-image-gen` — Image generation
+- `psd-image-gen` — Image generation through the owner-gated broker; the model ID is pinned in one broker constant (see [Agent Image Generation](#agent-image-generation-psd-image-gen))
 - `psd-sop-creator` — PSD Standard Operating Procedure document creation
 - `psd-instructional-vision` — PSD instructional framework (Instructional Essentials, UDL, MTSS) from live repository
 - `psd-publish-file` — Hands a generated local file to the requesting user. Default: a private Drive file in the agent's account, shared with that one user (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)). `--to public` remains an unsigned public-by-link S3 URL that expires after 30 days
@@ -120,15 +136,16 @@ infra/agent-image/skills/{skill-name}/
 - `psd-credentials` — Owner-bound credential broker client. Collects user-held secrets through a one-time entry link (`request_entry.js`) instead of chat; see [Credential Entry](credential-entry.md) (#1887)
 - `psd-canva` — Canva design integration
 - `psd-plaud` — Plaud note integration
+- `psd-prr` — PSD Public Records (PRR) requests, overdue items, collection tasks, and draft letters through PRR's hosted MCP with the caller's own personal token (see [PSD Public Records](#psd-public-records-psd-prr-1991))
 - `psd-open-adaptive-district` — Open Adaptive District operating model (six-week build cycle)
 
 **Analysis & Reporting**
-- `psd-deep-research` — Gemini Deep Research for cited multi-source reports
+- `psd-deep-research` — Gemini Deep Research for cited multi-source reports, one active run per user, and resume of the active run after a cut-off turn (see [Deep Research](#deep-research-psd-deep-research))
 - `psd-workflows` — Dynamic PSD gateway workflows (evaluations, requests, timesheets) with caller binding
 - `quartile-growth-report` — Growth-by-quartile spreadsheet generator for elementary school principals (one tab per grade, data-only output)
 - `psd-failure-report` — Failure analysis and reporting
 - `psd-last30days` — Recent activity analysis
-- `psd-github` — GitHub integration
+- `psd-github` — GitHub integration through the owner-bound `gh` broker; scheduled runs may only read (see [GitHub Command Broker and Scheduled Read-Only Access](github-access.md))
 - `psd-summarize` — Content summarization
 - `psd-tts` — Text-to-speech
 - `psd-strategic-plan` — Peninsula 2030 strategic plan queries from live repository 166
@@ -408,6 +425,154 @@ Skills run in the agent container defined by `/infra/agent-image/Dockerfile`. Th
 3. Executes skill logic with requested capabilities
 4. Audits all credential reads and tool invocations
 
+The Dockerfile installs `jq`, `poppler-utils` (`pdftotext`, `pdftoppm`), and `file` in the same apt layer as the base tools. The model reaches for them in `exec` on its own. Its own comment records 47 "not found" failures across about 25 users between 2026-10-04 and 2026-10-26. Add a tool to that layer when the model keeps calling it directly, and keep the install in the existing `RUN` rather than adding a new one.
+
+### Agent Image Generation (`psd-image-gen`)
+
+**When to consult**: changing the image model, the OpenAI image request body, or the error text an image failure produces. Nexus chat image generation is a separate path. It is documented in [app-features/overview.md](../app-features/overview.md#gemini-image-model-ids-1967).
+
+**Flow**: `infra/agent-image/skills/psd-image-gen/generate.js` calls the agent broker with `kind: "openai-image"` on `/api/agent/credentials`. That route checks `canAccessSkill(ownerEmail, "skill.image-gen")` and then calls `executeOpenAiImageOperation` in `lib/agent-credentials/owner-operation-broker.ts`. The broker reads the shared `openai_api_key` through `AgentCredentialBroker.get` with `sharedOnly`, posts to OpenAI's image endpoint, and returns the base64 image. The skill then stores the image under the workspace `public-images/` prefix and returns an unsigned link, as described in `SKILL.md`.
+
+**Model pin**: `AGENT_IMAGE_MODEL_ID` (`"gpt-image-2.5-flare"`) is exported from `owner-operation-broker.ts` and written into the request body by `openAiImageRequestBody`. The skill's `MODEL_ID` only reports the model back, but it must equal the broker value. The `SKILL.md` text and the skill's `package.json` description also name it. On 2026-10-26 OpenAI stopped serving `gpt-image-2` to the district project, and every call failed with 403 `model_not_found`.
+
+**Error detail**: `openAiErrorDetail` reads up to 64 KiB of an error body and appends OpenAI's `error.code` and a clipped `error.message` (300 characters) to the thrown `Image provider HTTP <status>`. It never throws. An unreadable body keeps the bare status. Before this change a retired model logged the same text as a credential fault.
+
+**Invariants**
+- The broker value and the skill's `MODEL_ID` change together. A skill that reports a different model than the broker used gives the user a wrong answer.
+- A caller without `skill.image-gen` gets 403 before any credential is read. A missing or user-scoped `openai_api_key` throws `Image generation credential is not configured`.
+- Image bytes are never returned from the failure path, only the bounded error text.
+
+**Change navigation**
+- Start in `executeOpenAiImageOperation`, then `validatedImageOperation` for the accepted size, quality, and background values and `openAiImageRequestBody` for the outgoing body.
+- Changing the model requires three edits: `AGENT_IMAGE_MODEL_ID`, `MODEL_ID` in `generate.js`, and `SKILL.md`. The skill ships in the agent image, so it needs an image rebuild.
+- Non-goal: the skill directory has no unit test file. Behavior is covered from the broker side.
+
+**Focused tests**: `tests/unit/agent-owner-operation-broker.test.ts`, describe `OpenAI image operation`. It checks that the request uses `AGENT_IMAGE_MODEL_ID`, that OpenAI's code and message reach the thrown error, and that an unreadable error body leaves the bare `HTTP 502`.
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/agent-owner-operation-broker.test.ts`.
+
+### PSD Public Records (`psd-prr`, #1991)
+
+**When to consult**: changing which PRR tools the agent may name, the personal-token handling, the `needs-auth` path, or the scheduled PRR failure notice. The skill is the agent-facing side of the district's Public Records system. Its tools run on the web tier, so the token never reaches the agent.
+
+**Flow**:
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-prr run.js
+    participant Route as /api/agent/credentials
+    participant Broker as executePrrOperation
+    participant Creds as AgentCredentialBroker getUserOnly
+    participant PRR as PRR hosted MCP
+    Skill->>Route: signed request with operation prr-mcp
+    Route->>Broker: method, toolName, toolArgs
+    Broker->>Broker: allow only PRR_ALLOWED_TOOLS
+    Broker->>Creds: read the caller's prr_pat slot
+    Creds-->>Broker: stored token or none
+    Broker->>PRR: initialize, then tools/call with Authorization Token
+    PRR-->>Broker: MCP result, 401, 403, or 429
+    Broker-->>Skill: ok, needs-auth, forbidden, or rate-limited
+```
+
+*Caption: the route dispatches `prr-mcp` in `executeOwnerIntegrationOperation`, which runs before the shared-credential switch. The skill only receives the MCP result or a status.*
+
+**Mechanics**: `app/api/agent/credentials/route.ts` dispatches `prr-mcp` to `executePrrOperation` in `lib/agent-credentials/owner-operation-broker.ts`. That function validates the method (`tools/list` or `tools/call`), checks the tool name against `PRR_ALLOWED_TOOLS` (eleven `psd_prr_*` tools), and reads the caller's own `prr_pat` slot with `AgentCredentialBroker.getUserOnly`. The token must start `prr_pat_` and be header-safe, or the call is reported as `prr_token_rejected` without contacting PRR. The request goes to `PRR_MCP_URL`, defaulting to `https://prr.psd401.net/mcp`, using the Streamable HTTP session helpers shared with the Plaud operation (`runStreamableMcpOperation`).
+
+**Authorization model**: PRR's own roles and human-only hand-offs decide what each person may do. The allowlist only bounds which tools the agent can name. Allowed in owner and scheduled mode alike, because a daily overdue check is a schedule. The three tools that write (`psd_prr_clarification_letter_draft`, `psd_prr_collection_task_notes_propose`, `psd_prr_exemption_citations_suggest`) create drafts or proposals inside PRR. A person approves them in PRR's staff UI, so nothing reaches a requester.
+
+**Token handling**: Like Freshservice, the caller's own token is the authorization. A missing token returns `prr_token_missing`, and a 401 from PRR returns `prr_token_rejected`. The skill turns either into a one-time credential-entry link for `prr_pat`. The `psd-prr` skill never receives the token. The slot's shape rule is enforced in `lib/agent-workspace/credential-entry.ts` (`SLOT_PREFIXES`), see [Credential Entry](credential-entry.md).
+
+**Reading results**: `SKILL.md` requires reporting `total` from `psd_prr_overdue_requests_list`, not `count`, which is only the rows on one page. When `scan_complete` is false, `total` is a floor, and the agent must say "at least N". The regression suite includes `infra/agent-image/skills/psd-prr/evals/overdue-total-floor.yaml` for this rule.
+
+**Exit codes** (`run.js`): 0 ok, 1 usage, 10 needs-auth, 11 forbidden, 12 upstream error, 14 rate-limited.
+
+**Scheduled failure notice**: a scheduled run that fails with `prr_token_missing` or `prr_token_rejected` earns an owner DM on the first failure, with a `prr_pat` credential-entry link. The detection and link selection are in [Schedule Failure Streaks and Owner Notices](schedule-failure-notices.md#prr-token-failures).
+
+**Invariants**
+- The allowlist holds exactly the eleven PRR tools in `psd-prr/SKILL.md`. Adding a tool needs both the allowlist and the skill table.
+- The stored value is never echoed in a result or log line. `executePrrOperation` returns only the MCP payload.
+- PRR's hosted MCP is reachable only from the web tier. `infra/policies/mcp-allowlist.json` records the endpoint as enabled for that reason, and `infra/test/agent-skill-cdn-allowlist.test.ts` lists `prr.psd401.net` as a permitted reference host.
+
+**Change navigation**
+- Start in `executePrrOperation`, then `validatedPrrOperation` (tool allowlist) and `prrToken` (token shape).
+- A new PRR tool needs changes in `PRR_ALLOWED_TOOLS`, the `SKILL.md` table, and, for an operation the agent can invoke directly, `run.js`.
+- A new PRR error code must also be handled by `isPrrCredentialFailure` in `infra/lambdas/agent-cron/schedule-failure-notice.ts` if it should reach the owner.
+
+**Focused tests**:
+- `tests/unit/lib/agent-credentials/prr-broker.test.ts`: `PRR broker allowlist`, `PRR token handling` (missing token, whitespace trimming, 403 and 429 mapping), and `PRR Streamable HTTP session`.
+- `tests/unit/agent-credentials-route.test.ts`: the `prr-mcp` dispatch.
+- `infra/agent-image/skills/psd-prr/run.test.js`: CLI exit codes and the `needs-auth` link path.
+- `infra/lambdas/agent-cron/schedule-failure-notice.test.ts`: `isPrrCredentialFailure` and the `prr-credential` notice.
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/lib/agent-credentials/prr-broker.test.ts` and `cd infra/agent-image/skills/psd-prr && bun test run.test.js`. For a change limited to `run.js` or `SKILL.md`, the skill suite is enough. CI runs that suite from the agent-image skill test list in `.github/workflows/ci.yml`.
+
+### Deep Research (`psd-deep-research`)
+
+<!-- openwiki: broken internal link [../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research] heading anchor "vertex-ai-for-deep-research" does not exist in "../infrastructure/google-workload-identity.md". Fix the href or restore the target, then delete this comment. -->
+**When to consult**: changing the start or status broker operations, the one-run-per-user concurrency rule, the resume behavior after a cut-off turn, or the CLI output. The Vertex client that makes the upstream calls is documented in [Keyless Google Auth](../infrastructure/google-workload-identity.md#vertex-ai-for-deep-research); this section covers the agent-facing contract.
+
+**Flow**: the skill's `research.js` calls `/api/agent/credentials` with `deep-research-start`. The start reserves a lease, creates the interaction, and binds the lease to the `interactionId`. The CLI then polls `deep-research-status`.
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-deep-research research.js
+    participant Route as /api/agent/credentials
+    participant Broker as executeDeepResearchStartOperation
+    participant Budget as reserveDeepResearch
+    participant Svc as gemini-deep-research-service
+    Skill->>Route: deep-research-start with prompt
+    Route->>Broker: start for the signed owner
+    Broker->>Budget: reserve user and deployment limits
+    alt reservation allowed
+        Broker->>Svc: createDeepResearchInteraction
+        Broker->>Budget: bindDeepResearchInteraction sets interactionId
+        Broker-->>Skill: interactionId and status
+        Skill->>Route: deep-research-status every 20 seconds
+    else user_concurrency with a bound active run
+        Broker->>Svc: getDeepResearchInteractionPrompt for the active run
+        alt active run has the same prompt
+            Broker-->>Skill: 429 user_concurrency with activeInteractionId
+            Skill->>Route: deep-research-status for the active run
+        else different prompt or lookup failure
+            Broker-->>Skill: 429 user_concurrency without an id
+        end
+    end
+```
+
+*Caption: a start denial names a run only when that run was started with the same question. Otherwise the CLI fails and never reports another question's run.*
+
+**Mechanics**:
+- `infra/agent-image/skills/psd-deep-research/research.js` requires `--user` and exactly one of `--prompt` or `--check`. `--max-wait-min` defaults to 20. The start notice (`Deep Research started: interactionId …`) is written to stderr before any polling, with the resume command. A wait cap throws `timeout` and keeps the `interactionId`.
+- `executeDeepResearchStartOperation` in `lib/agent-credentials/owner-operation-broker.ts` calls `reserveDeepResearch` in `lib/ai/deep-research-budget.ts`. The lease lasts 30 minutes (`LEASE_MS`). Defaults are 1 concurrent run per user, 5 per deployment, a 500-cent reserved cost per run, and hourly budgets of 1,000 cents per user and 5,000 per deployment. The environment variables `DEEP_RESEARCH_*` override them. A `user_concurrency` denial carries `activeInteractionId`, the newest active lease of that user. It is `null` until the lease is bound.
+- On a `user_concurrency` denial the broker calls `resumableActiveRun`. That helper reads the active run's original `user_input` text through `getDeepResearchInteractionPrompt` in `lib/ai/gemini-deep-research-service.ts`, and it returns the id only when the trimmed text equals the new prompt. A lookup error is logged and falls back to the plain denial.
+- `app/api/agent/credentials/route.ts` forwards `activeInteractionId` in the 429 body only when it is present. The CLI's `activeRunFromDenial` reads that field, and then `runResearch` polls the existing run instead of retrying the start.
+- Server deadline: `MAX_DEEP_RESEARCH_RUN_DURATION_MS` is 25 minutes. The first status check past it cancels the interaction upstream, releases the lease, and returns 504. The lease lasts 5 minutes longer than the deadline. It is released only when a status check runs past the deadline. If no status check runs, the lease stays active until it expires 30 minutes after the start.
+
+**Why resume exists**: an agent turn that outlives the interactive deadline is promoted to a background job (see [Background-Job Deferral Acknowledgement](#background-job-deferral-acknowledgement-1892)). The command that was waiting dies with the turn, and the job re-runs the same command. Without the resume path, that retry is refused by the still-held lease, and after the lease expires it starts a second paid run.
+
+**Invariants**
+- A start denial names another run only when that run has the same trimmed question. A different question never receives another question's report.
+- The status operation checks ownership with `ownedDeepResearchReservation`. Another caller's interaction returns 404.
+- Before the interaction is bound to the lease, the denial has no `activeInteractionId`, so the caller gets the plain refusal.
+- A start refused by `reserveDeepResearch` never creates an interaction. Resume reads only the existing run's prompt, and only after a denial.
+
+**Change navigation**
+- Start in `executeDeepResearchStartOperation`, then `resumableActiveRun`, then `reserveDeepResearch`. On the CLI side, start at `activeRunFromDenial` and `runResearch`.
+- The 429 body shape is shared by three layers: `DeepResearchOperationError` (broker), the route's error branch, and `activeRunFromDenial`. Change them together.
+- The same-question rule is enforced in the broker, not the skill. The skill's `SKILL.md` Errors section says never to retry `--prompt` in a loop, because each retry after the lease expires starts another paid run.
+- Non-goal: changing the 30-minute lease or the 25-minute deadline is a cost and lifecycle decision. Both must be reviewed together, because the lease must outlive the server deadline.
+
+**Focused tests**
+- `tests/unit/agent-deep-research-operation.test.ts`: `Deep Research start owner operation: resuming the active run` (same prompt names the run; different question, lookup failure, and missing prompt get `null`) and `Deep Research status owner operation` (foreign-owner 404, completed report, and the server deadline cancellation).
+- `tests/unit/lib/ai/deep-research-budget.test.ts`: `Deep Research durable reservations` (`denies a concurrent second user lease without inserting and names the active run`, `reports no active run id while the active lease is not yet bound`).
+- `tests/unit/lib/ai/gemini-deep-research-service.test.ts`: `Gemini Deep Research original prompt` (reads `user_input` text, returns `null` when none).
+- `tests/unit/agent-credentials-route.test.ts`: `POST /api/agent/credentials Deep Research resume hint`.
+- `infra/agent-image/skills/psd-deep-research/research.test.js` (Node test runner): `psd-deep-research CLI after a cut-off turn` (id printed before waiting, resume on a named run, failure for an unnamed denial).
+
+**Minimal validation (quiet)**: `bunx jest --silent tests/unit/agent-deep-research-operation.test.ts tests/unit/lib/ai/deep-research-budget.test.ts tests/unit/lib/ai/gemini-deep-research-service.test.ts tests/unit/agent-credentials-route.test.ts` and `cd infra/agent-image/skills/psd-deep-research && node --test research.test.js`. The root `package.json` has no `test:skill:*` script for this skill. CI runs `research.test.js` in the Bun agent-image skill list in `.github/workflows/ci.yml`.
+
+**Scope boundary**: the Vertex client, the Google-side trust, and the `GOOGLE_VERTEX_*` settings are outside this section. A skill-only edit does not need the root `bun run typecheck` or `bun run lint`, which the root instructions require only before a commit.
+
 ### Media Relay Transport
 
 **Source**: `/infra/agent-image/skills/_shared/media-relay.js`, `/infra/agent-image/mantle_proxy.py`
@@ -481,7 +646,68 @@ sequenceDiagram
 - `bun run test -- tests/unit/lib/agent-workspace/drive-delivery.test.ts tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts tests/unit/agent-image-drive-delivery-drift.test.ts` (root Jest, narrow paths).
 - Consumer boundary: the drift test and `infra/test/agent-skill-cdn-allowlist.test.ts` (which allowlists `drive.google.com` for returned Drive links) are the checks that cross from broker code into the shipped skill. Changing the skill files requires rebuilding the agent image; the source of truth for skill text is `infra/agent-image/skills/`.
 
-**Scope boundaries**: this path does not change public-artifact lifecycle or the public reconciliation ledger (see [Workspace Checkpoint Recovery](#workspace-checkpoint-recovery)). Mint and Drive token details live in [Google Workspace Integration](#google-workspace-integration). `drive +upload` remains refused by the Workspace command allowlists in `command-executor.ts`; the broker operations above are the replacement, not a relaxation of that refusal.
+**Scope boundaries**: this path does not change public-artifact lifecycle or the public reconciliation ledger (see [Workspace Checkpoint Recovery](#workspace-checkpoint-recovery)). Mint and Drive token details live in [Google Workspace Integration](#google-workspace-integration). `drive +upload` remains refused by the Workspace command allowlists in `command-executor.ts`; the broker operations above are the replacement, not a relaxation of that refusal. A file the model names in a reply `MEDIA:` line takes the same private Drive path in the harness; see [MEDIA Directive Delivery](#media-directive-delivery).
+
+### MEDIA Directive Delivery
+
+**When to consult**: any change to how a file the model mentions in its reply reaches the user (`MEDIA:` lines, `_deliver_media_directives` in `harness_adapter.py`), the file-delivery rules in `psd-rules`, or the folders a `MEDIA:` path may resolve into.
+
+**Why it exists**: OpenClaw's own system prompt teaches the model to attach a file by ending its reply with a `MEDIA:<path>` line. OpenClaw strips that line from the reply and hands the file to its native channel delivery. This deployment never uses that channel: replies reach Google Chat through the router, which carries text only. The file was silently dropped while the reply still said "here's the CSV" (dev report 2026-10-26; the same symptom in prod on 2026-10-21). The harness now delivers those files itself, through the same private Drive path as `psd-publish-file`.
+
+**Flow**: `OpenClawAdapter._process_once` runs this after the model has finished and before the reply is returned. The directive line is read from the transcript database, not from the chat event, because OpenClaw removes the line from the text it broadcasts.
+
+```mermaid
+sequenceDiagram
+    participant Turn as _process_once
+    participant DB as openclaw-agent.sqlite read-only
+    participant Parse as extract_media_directive_targets
+    participant Pub as psd-publish-file publish.js
+    participant Log as record_failure
+    Turn->>DB: assistant events LIKE MEDIA since chat_send_at
+    DB-->>Turn: raw assistant text of this turn
+    Turn->>Parse: parse MEDIA lines, skip fenced code, de-duplicate
+    alt no targets
+        Turn-->>Turn: reply returned unchanged
+    else targets found
+        loop first 5 targets
+            alt https URL
+                Turn-->>Turn: append URL as a link
+            else local path inside work or attachments
+                Turn->>Pub: node publish.js --file realpath, default destination
+                Pub-->>Turn: JSON with https url
+                Turn-->>Turn: append file name line and URL line
+            else refused or failed
+                Turn-->>Turn: name the file and reason in the reply
+            end
+        end
+        Turn->>Log: warn MediaDirectiveDeliveryFailed with codes only
+    end
+```
+
+*The appendix is added after the model's text. If the model wrote no text, the appendix becomes the whole reply.*
+
+**Runtime invariants**:
+- **This turn only.** `_read_turn_media_targets` reads assistant records for the session and agent whose timestamp is at or after `chat_send_at`. It opens the database read-only with a 0.1 s timeout and never raises; an unreadable store yields no targets.
+- **Containment.** `_resolve_media_path` follows symlinks with `realpath` and accepts only a regular file strictly inside `MEDIA_DIRECTIVE_ROOTS`: `/home/node/.openclaw/work` and `/home/node/.openclaw/attachments`. The state directory is excluded because it holds every session's transcript and `openclaw.json`. `/tmp` is excluded because it is not the documented output location.
+- **Model text is not authority.** Text in an uploaded document can steer the model into writing a `MEDIA:` line, so the roots are the only trust boundary. Targets outside them are reported as "outside the folders files can be sent from" and never reach `subprocess`.
+- **Default destination only.** Local files go to `psd-publish-file` with no `--to`, so the file lands in the agent's private Drive and is shared with the caller alone. The call runs inside the turn so the broker proxy still holds this invocation's signed context.
+- **Limits.** At most `MEDIA_DIRECTIVE_MAX_FILES` (5) targets per reply. Each publish has a `MEDIA_PUBLISH_TIMEOUT_S` (120 s) timeout, and all deliveries share one `MEDIA_DELIVERY_BUDGET_S` (180 s) budget, which must stay inside the turn deadline.
+- **Links stay links.** An `https://` target is appended as-is and is not fetched or published. A published file is listed as `<name>:` followed by its URL on its own line, so Chat renders it as a link.
+- **Failures are named, not silent.** Each undelivered file is named in the reply with its reason. `record_failure` (see [Failure Telemetry Hygiene](#failure-telemetry-hygiene)) receives only counts and error codes, never file names, because a file name can identify a student.
+
+**Skill parity.** `psd-rules/SKILL.md` carries the model-side half of this. It says that "show me", "send me", or "give me" a file or image means run `psd-publish-file` in the same turn and put the returned link in the reply. Viewing an image with the `image` tool does not show it to the user, and offering to publish is not delivery. The rule keeps the default private destination and forbids `--to public` for student or staff data. It also says not to write a `MEDIA:` line, because Chat does not show one; the harness fallback is only a backstop. The self-check's R16 item requires delivery with a delivery skill. The rule text ships in the agent image, so a change to it needs an image rebuild.
+
+**Extension seams and non-goals**: adding a root, raising the file cap, or sending to a public destination changes the trust boundary and needs explicit review. Do not widen `MEDIA_DIRECTIVE_ROOTS` to the state directory or `/tmp` to make one file work. Changing the wording of the model-side rule and the harness behavior together is the only consistent way to change delivery.
+
+**Focused tests**:
+- `infra/agent-image/test_harness_adapter.py`, class `MediaDirectiveParsingTests`: the directive line is found; wrapper quotes, `file://`, and lower-case `media:` are handled.
+- Same file, class `MediaDirectiveTranscriptReadTests`: only this turn's assistant records for this session are read; missing databases and unsafe session ids yield nothing.
+- Same file, class `MediaDirectiveDeliveryTests`: production roots are only `work` and `attachments`; the transcript database and config are never published; a local file is published with the default destination and its link on its own line; a refused publish is named in the reply and recorded with codes only; out-of-root and missing paths never run `subprocess`; unparseable publisher output is a failure, not a crash; the budget stops further deliveries; an https target passes through; at most five files are sent.
+- `tests/unit/agent-image-skill-scratch-dir.test.ts`, test "tells the agent that 'show me' means publish now, privately": pins the `psd-rules` wording, including the no-`MEDIA:` rule and the FERPA routing sentence.
+
+**Minimal validation (quiet)**: `cd infra/agent-image && python -m pytest -q test_harness_adapter.py -k MediaDirective` and `bunx jest --silent tests/unit/agent-image-skill-scratch-dir.test.ts`. The `-q` and `--silent` flags suppress passing output and keep failure diagnostics.
+
+**Escalation**: run the full `test_harness_adapter.py` when `_process_once` or the transcript read changes, since the reply path is shared with silent-reply and usage handling. The publish call depends on `psd-publish-file`; run `bun run test:skill:publish-file` when `publish.js` changes. The `MEDIA:` rule text and harness code must stay consistent: they are validated separately, so change both in the same edit.
 
 ### Artifact Content Security Policy (#1750)
 
@@ -1132,6 +1358,7 @@ cd infra/lambdas/agent-router && bun test --test-name-pattern="front-door reject
 - `/infra/agent-image/workspace_contract.py` — Contract fingerprint extraction
 - `/infra/agent-image/build-and-push.sh` — CI integration
 - `/infra/agent-image/test_workspace_contract.py` — Tests
+- `/infra/agent-image/test_cutover_guard.py` — Exit-status handling of the build script's cutover decision
 
 When deploying a new agent image, a rolling update briefly runs old and new writers simultaneously. This is only dangerous when the two disagree about something **persisted**: the proof string format, the checkpoint manifest or journal shape, the object-key layout, or the generation schema.
 
@@ -1168,6 +1395,10 @@ The guard runs during `build-and-push.sh`:
 - **Exit 0**: Contract unchanged — no cutover required
 - **Exit 1**: Contract changed — full cutover procedure required
 - **Exit 2**: Extraction failed — fail closed, treat as cutover required
+
+The build script runs under `set -euo pipefail`, so the status must be captured with `|| CONTRACT_STATUS=$?`. A bare `CONTRACT_STATUS=$?` on the next line would exit the script on a non-zero status before the `WORKSPACE CUTOVER REQUIRED` notice printed. That happened on 2026-10-26, when a changed contract (exit 1) ended the build silently. Keep the capture form when editing the block. `CutoverDecisionSurvivesErrexit` in `infra/agent-image/test_cutover_guard.py` runs the extracted decision block under a stub `python3` for statuses 0, 1, and 2 and asserts the notice and the end marker.
+
+**Minimal validation (quiet)**: `python -m unittest infra/agent-image/test_cutover_guard.py` (the same suite CI runs in its agent-image unittest step). Run `test_workspace_contract.py` as well when the contract extraction changes.
 
 ---
 
@@ -1360,8 +1591,10 @@ Google Workspace operations are classified into allowlist categories:
 
 | Category | Description | Examples |
 |----------|-------------|----------|
-| `READ_ACTIONS` | Read-only operations, never mutate | `get`, `list`, `search`, `findDirectMessage` |
-| `ALLOWED_WRITES` | User-slot permitted mutations | `gmail +draft`, `gmail users drafts create`, `gmail users drafts update`, `gmail users settings filters`, `tasks tasks move` |
+| `READ_ACTIONS` | Read-only operations, never mutate. Judged by the trailing action token. | `get`, `batchGet`, `list`, `search`, `findDirectMessage` |
+| `READ_OPERATIONS` | Whole-operation reads whose trailing verb is not a read verb in general, so the entire path is named | `calendar freebusy query` |
+| `MUTATING_ACTIONS` | Bare mutating verbs that a trailing read may not carry past the write allowlist | `create`, `delete`, `append`, `resolve`, `send` |
+| `ALLOWED_WRITES` | User-slot permitted mutations, matched against the whole operation path | `gmail +draft`, `gmail users drafts create`, `gmail users drafts update`, `gmail users settings filters create`, `gmail users settings filters delete`, `tasks tasks move` |
 | `AGENT_ONLY_WRITES` | Agent-slot mutations only | `tasks tasks patch`, `tasks tasks update` |
 
 **Removed Operations**: `drive +upload` is explicitly refused (both `ALLOWED_WRITES` and `AGENT_ONLY_WRITES`) because the Workspace CLI runs in an empty temp directory where container paths don't exist. Hand generated files to the user with `psd-publish-file`, which by default creates them in the agent's Drive through the broker rather than through `drive +upload` (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885)).
@@ -1371,8 +1604,55 @@ The allowlist evolves based on production failure patterns.
 | Operation | Reason |
 |-----------|--------|
 | `spaces.findDirectMessage` | DM lookup sends nothing; was refusing scheduled digests with no way to find target DM |
-| `gmail users settings filters` | Inbox filter management; requires separate `gmail.settings.basic` scope |
+| `gmail users settings filters create` and `… delete` | Inbox filter management; requires separate `gmail.settings.basic` scope. Named by action since #1893: the bare four-token resource used to grant every action beneath it. |
+| `calendar freebusy query` | Free/busy lookup creates and sends nothing; named as a whole operation so `query` stays a write everywhere else |
 | `tasks tasks move` | Task reordering within lists the user-slot can already insert into |
+
+#### Operation Parsing (#1893)
+
+**Source**: `/lib/agent-workspace/command-executor.ts`, `/infra/agent-image/skills/psd-workspace/common.js`
+
+The gate judges the **whole** leading positional path of an argv, not a prefix of it. Two parsing defects had refused valid work for about 21 users, and the fix changes how every allowlist entry is matched:
+
+- **Dotted method paths** such as `sheets spreadsheets.values.batchUpdate` arrived as one token and were judged as an unknown action. `psd-workspace/SKILL.md` had taught that spelling, so the documented form of an allowed write was refused. `canonicalizeOperationPath` now splits a dotted path in the leading positional run into space-separated tokens, keeps method case (`batchUpdate`), and never touches flag values such as `--params` objects or Drive queries. The validator and the executed argv use the same canonicalization.
+- **Four-token truncation** ended the operation at the fourth positional. `gmail users messages attachments get` was therefore judged as `… attachments`, and an allowlisted four-token prefix granted every action beneath it. `operationTokens` has no positional cutoff now.
+
+```mermaid
+flowchart TD
+    A["argv from workspace-execute route"] --> B["validateWorkspaceArguments, which runs assertParamsParse first"]
+    B --> C["normalizedOperation: canonicalize leading positionals, lowercase, join"]
+    C --> D{"+read helper?"}
+    D -- yes --> X["refuse: mutation operation"]
+    D -- no --> E{"trailing action in READ_ACTIONS, or operation in READ_OPERATIONS?"}
+    E -- yes --> F["assertReadCarriesNoMutation: no helper verb, no earlier MUTATING_ACTIONS token, no allowlisted write prefix"]
+    E -- no --> G{"operation in ALLOWED_WRITES?"}
+    G -- no --> Y["refuse: operation_not_allowed with workspaceOperation diagnostic"]
+    G -- yes --> H["shape gates: AGENT_ONLY_WRITES by scope, drive permissions shape, accessproposals resolve, gmail modify"]
+```
+
+*Reads are classified before writes. A read verb only admits the command when nothing earlier in the path is a mutation.*
+
+**Invariants**
+
+- **One operation, two spellings.** A dotted and a spaced spelling of the same method get the same allow or refuse verdict, in both directions. Positionals after the first flag are not canonicalized.
+- **Whole-path matching.** `ALLOWED_WRITES` entries are exact operation strings. List each new write with its full action (for example `gmail users settings filters create`). A resource-prefix entry such as `gmail users settings filters` no longer grants its sibling actions.
+- **Reads cannot smuggle writes.** A trailing read verb after a mutating token (`drive accessproposals resolve get`, `sheets spreadsheets values append get`) is refused, in both slots.
+- **Containment.** A made-up fifth token under an allowlisted resource is refused. Sibling settings resources (`forwardingAddresses`, `sendAs`, `delegates`, `updateVacation`) remain refused.
+- **Diagnostics stay bounded.** `workspaceOperation` returns the full path for logs and refusal messages, but returns `<operation-too-long>` past `MAX_DIAGNOSTIC_OPERATION_LENGTH` (128 characters).
+- **The skill mirrors the broker.** `splitCommand` in `psd-workspace/common.js` uses the same dotted-path rule, so the skill's local Phase 1 gates judge the same tokens the broker judges.
+- **Scope gaps key on the resource.** `requiredWorkspaceScopeGap` matches the four-token prefix `gmail users settings filters`, so `create` and `delete` both ask for `gmail.settings.basic`.
+
+**Change navigation**
+
+- Start in `canonicalizeOperationPath` and `isDottedMethodPath`, then `normalizedOperation` and `validateWorkspaceMutation`. Read classification is in `isReadOperation` and `assertReadCarriesNoMutation`.
+- Add a read verb to `READ_ACTIONS` only when that bare verb is a read in every Google service. For a verb that is a write elsewhere (such as `query`), name the whole operation in `READ_OPERATIONS`.
+- Add every mutating verb to `MUTATING_ACTIONS`, so trailing reads cannot carry it past the write allowlist.
+- Keep `psd-workspace/SKILL.md` examples in the spaced form. `allowlist-doc-drift.test.ts` fails on dotted `gws` examples and checks that each documented operation is reachable through the validator.
+- Changing `common.js` or `SKILL.md` ships through the agent image, so a deployed skill needs an agent image rebuild. The broker change is separate and takes effect on the next deploy.
+- Non-goals: do not canonicalize flag values; do not make a prefix allowlist entry for a resource with mixed read and write actions.
+- Focused tests: `tests/unit/lib/agent-workspace/allowlist-operation-parsing.test.ts` has the suites `dotted and spaced spellings are one operation`, `the operation is the WHOLE positional path`, and `reads that were missing from the read classification`. `tests/unit/lib/agent-workspace/allowlist-widening-2026-08-28.test.ts` covers the `gmail users settings filters` suite. `tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts` covers the SKILL.md spelling and reachability checks. `tests/unit/agent-workspace-skill-split-command.test.ts` covers the skill-side `splitCommand`.
+- Minimal validation (quiet, narrow): `bunx jest --silent tests/unit/lib/agent-workspace/allowlist-operation-parsing.test.ts tests/unit/lib/agent-workspace/allowlist-widening-2026-08-28.test.ts tests/unit/lib/agent-workspace/allowlist-doc-drift.test.ts tests/unit/agent-workspace-skill-split-command.test.ts`. Add `bun run test:skill:workspace` when `common.js` changes.
+- Escalate to `tests/unit/agent-workspace-execute-route.test.ts` (route validator errors and caller forwarding) when the route's argv handling or log fields change. The route logs `workspaceOperation(body.argv)`, so the completion log shows the full path.
 
 #### HTML Content Routing
 
@@ -1478,6 +1758,8 @@ Schedule management routes use a **read/write split** for authorization:
 This allows scheduled runs to audit their own schedules without mutating them. A scheduled-mode turn that attempts `create`, `update`, or `delete` receives a 403 after the same cryptographic verification as owner-mode requests.
 
 The `SCHEDULED_READ_OPERATIONS` allowlist ensures new write operations default to owner-only rather than silently inheriting scheduled access.
+
+The GitHub broker applies the same split. A scheduled run may call `github-execute` only for the read-only `gh` commands, and a write is refused with 400 before the owner's token is read. See [GitHub Command Broker and Scheduled Read-Only Access](github-access.md).
 
 Expression validation (the EventBridge cron dialect rules), the `description` and `nextRuns` read-back that every schedule response carries, the duplicate and name refusals on create and update, and the read-only audit of stored schedules are documented in **[agent-schedules.md](agent-schedules.md)**. What happens when a schedule keeps failing (the run statuses, the `failing` marker on `list`, and the owner DM) is documented in **[schedule-failure-notices.md](schedule-failure-notices.md)**.
 
@@ -1606,4 +1888,6 @@ Skills are published and managed through:
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
 **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+ernal API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment

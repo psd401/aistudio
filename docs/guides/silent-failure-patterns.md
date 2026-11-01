@@ -336,8 +336,8 @@ stream nobody was reading. The user saw the turn stop with no answer and no
 error, and `incompleteTurnReason()` correctly declined to persist it (#1698).
 
 ```typescript
-// WRONG — a data-* chunk as the keep-alive. `isVisibleChunkType` counts data-*
-// as visible output, so it suppresses the "empty response" notice from #1686.
+// WRONG — a data-* chunk as the keep-alive. `classifyChunkVisibility` buckets
+// data-* as rendered output, so it suppresses the empty-turn notice (#1686/#1899).
 controller.enqueue({ type: 'data-keepalive' })
 
 // CORRECT — an SSE comment frame, below the transport. eventsource-parser routes
@@ -351,6 +351,37 @@ well inside 300s. Raising the ALB timeout is not the fix — intermediary proxie
 idle out too, and it needs a CDK deploy. Always release the keep-alive timer on
 end-of-stream, on error, *and* on consumer cancel, or every abandoned turn leaks
 an interval.
+
+### A turn with no text part renders a blank bubble, not an error
+
+"Some chunk arrived" is not the same question as "the user has something to
+read". The Nexus Thread (`DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS`)
+registers no Reasoning and no File renderer, so `reasoning-*` and `file` parts
+draw **nothing** — a model that thinks and then returns no text produced an
+empty bubble, and because those chunks counted as "visible output" the
+empty-response notice was suppressed (#1899). A turn can also spend its whole
+step budget (`resolveMaxSteps`, three steps on an ordinary turn) on tool calls
+and end with tool cards and no answer.
+
+```typescript
+// WRONG — any chunk at all counts as an answer.
+if (!producedVisibleOutput) enqueueNotice()
+
+// CORRECT — anchor on a TEXT part, and name which shape it was.
+const kind = classifyEmptyTurn(seen)   // lib/streaming/empty-turn-notice.ts
+if (kind) controller.enqueue({ type: 'error', errorText: emptyTurnNotice(kind) })
+```
+
+**Review rules:**
+- Adding a part type to `classifyChunkVisibility` means checking what the thread
+  actually renders for it — a part with no registered component is not visible.
+- `toUIMessageStream()` without `onError` ships the AI SDK default,
+  "An error occurred.". Pass `sanitizeStreamErrorMessage`
+  (`lib/streaming/stream-error-message.ts`): specific, and it never echoes the
+  provider's own text.
+- A persist failure that is only logged leaves the user's prompt with no reply
+  on reload, because the user message was saved before streaming. Write a notice
+  row instead (`persistAssistantTurn`).
 
 ## HTML Entity Decoding
 

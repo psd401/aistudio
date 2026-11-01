@@ -5,52 +5,26 @@
  * including the rich-output envelope handling, so the user gets a
  * proper card rather than plain text.
  *
- * The Chat API client uses the SAME Google credentials secret as the
- * cron Lambda — service-account JWT, scope `chat.bot`.
+ * The Chat API client uses the SAME keyless WIF auth as the cron Lambda
+ * (google-chat-wif.ts, #1989) — the Chat app service account, scope
+ * `chat.bot`.
  */
 
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
 import * as chatPkg from "@googleapis/chat";
+
+import { createGoogleChatWifAuth } from "./google-chat-wif";
 
 import type { GmailMessageMeta, Suggestion } from "./types";
 import type { Label } from "./rules";
 
-const GOOGLE_CREDENTIALS_SECRET_ARN =
-  process.env.GOOGLE_CREDENTIALS_SECRET_ARN ?? "";
-
-let cachedSecret: { json: string; fetchedAt: number } | null = null;
 let cachedClient: ReturnType<typeof chatPkg.chat> | null = null;
-
-async function getCredentials(): Promise<Record<string, unknown>> {
-  // 10-minute cache, matches the cron Lambda's TTL.
-  if (cachedSecret && Date.now() - cachedSecret.fetchedAt < 10 * 60_000) {
-    return JSON.parse(cachedSecret.json);
-  }
-  const sm = new SecretsManagerClient({
-    region: process.env.AWS_REGION ?? "us-east-1",
-  });
-  const resp = await sm.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN }),
-  );
-  if (!resp.SecretString) {
-    throw new Error("Google credentials secret has no SecretString");
-  }
-  cachedSecret = { json: resp.SecretString, fetchedAt: Date.now() };
-  cachedClient = null; // force re-init with fresh creds
-  return JSON.parse(resp.SecretString);
-}
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
   if (cachedClient) return cachedClient;
-  const credentials = await getCredentials();
-  const googleAuth = new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/chat.bot"],
+  cachedClient = chatPkg.chat({
+    version: "v1",
+    auth: createGoogleChatWifAuth(),
   });
-  cachedClient = chatPkg.chat({ version: "v1", auth: googleAuth });
   return cachedClient;
 }
 

@@ -62,8 +62,10 @@ function pathPrefixMatch(prefix: string): Statement {
 }
 
 // Every `_BODY` rule each group ships, per `describe-managed-rule-group`
-// (REGIONAL, 2026-09-22). If AWS adds one, this list and BODY_SIGNATURE_RULES
-// must both grow, or the new signature blocks AI bodies again.
+// (REGIONAL, 2026-09-22; re-checked 2026-10-26, when SQLi Version_2.5's
+// SQLiExtendedPatterns_BODY was found blocking the agent API). If AWS adds
+// one, this list and BODY_SIGNATURE_RULES must both grow, or the new
+// signature blocks AI bodies again.
 const MANAGED_BODY_RULES: Record<string, string[]> = {
   AWSManagedRulesCommonRuleSet: [
     'SizeRestrictions_BODY',
@@ -77,7 +79,7 @@ const MANAGED_BODY_RULES: Record<string, string[]> = {
     'Log4JRCE_BODY',
     'ReactJSRCE_BODY',
   ],
-  AWSManagedRulesSQLiRuleSet: ['SQLi_BODY'],
+  AWSManagedRulesSQLiRuleSet: ['SQLi_BODY', 'SQLiExtendedPatterns_BODY'],
 };
 
 // The labels those rules add, verbatim from the same API call.
@@ -89,6 +91,7 @@ const EXPECTED_BLOCK_LABELS = [
   'awswaf:managed:aws:known-bad-inputs:Log4JRCE_Body',
   'awswaf:managed:aws:known-bad-inputs:ReactJSRCE_Body',
   'awswaf:managed:aws:sql-database:SQLi_Body',
+  'awswaf:managed:aws:sql-database:SQLiExtendedPatterns_Body',
 ];
 
 const MANAGED_GROUP_NAMES = Object.keys(MANAGED_BODY_RULES);

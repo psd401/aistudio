@@ -19,6 +19,9 @@ import {
   DOCUMENT_FORMATS,
   type DocumentFormat,
 } from "@/lib/agents/agent-tools/descriptors";
+// Single-sourced with the download card so the path the tool result carries and
+// the path the card accepts cannot drift apart.
+import { NEXUS_DOCUMENT_DOWNLOAD_PREFIX } from "@/lib/tools/document-create-contract";
 
 const log = createLogger({ module: "document-generation-service" });
 
@@ -42,14 +45,77 @@ export interface GenerateDocumentRequest {
   title?: string;
   filename?: string;
   userId: string;
+  /**
+   * Nexus conversation this document belongs to (#1898). When set, the object is
+   * stored under the conversation-scoped prefix and delivered through the
+   * authenticated `/api/nexus/documents/...` route — which re-checks that the
+   * caller owns this conversation on every download — instead of a presigned S3
+   * URL. A presigned URL cannot be re-authorized, stops working after an hour,
+   * and would be handed to the model as a bearer credential in the tool result.
+   */
+  conversationId?: string;
 }
 
 export interface GenerateDocumentResult {
-  url: string;
+  /**
+   * Presigned S3 GET URL, valid one hour. Omitted for conversation-scoped
+   * documents — those use {@link GenerateDocumentResult.downloadPath}.
+   */
+  url?: string;
+  /**
+   * App-relative authenticated download path, present only when the request
+   * carried a `conversationId`.
+   */
+  downloadPath?: string;
   s3Key: string;
   format: DocumentFormat;
   filename: string;
   bytes: number;
+}
+
+/** S3 prefix for conversation-scoped Nexus documents (#1898). */
+export const NEXUS_DOCUMENT_PREFIX = "v2/nexus-documents/";
+
+/**
+ * A conversation-scoped key is `v2/nexus-documents/{conversationId}/{requestId}/{filename}`.
+ *
+ * The request id is its OWN segment rather than a prefix on the filename, so
+ * the object's basename is exactly the filename the download card advertises.
+ * The download route takes `Content-Disposition` from that basename; with the
+ * earlier `{requestId}-{filename}` form the browser saved
+ * `V1StGXR8_Z-staff-newsletter.docx` while the card said
+ * `staff-newsletter.docx` (Codex review, PR #1941).
+ *
+ * `generateRequestId` is a nanoid: `[\w-]` only, so a request segment can never
+ * be `.` or `..`. The bound is generous against a longer id, never a dot.
+ */
+const REQUEST_SEGMENT_PATTERN = /^[\w-]{1,32}$/;
+
+
+/**
+ * Canonical UUID form. The conversation id becomes a path segment that the
+ * download route parses back out and uses as a DB lookup key, so anything that
+ * is not a plain UUID is rejected at generation time rather than stored under a
+ * prefix the route would later refuse to serve.
+ */
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isConversationScopedDocumentKey(s3Key: string): boolean {
+  if (!s3Key.startsWith(NEXUS_DOCUMENT_PREFIX)) return false;
+  const rest = s3Key.slice(NEXUS_DOCUMENT_PREFIX.length).split("/");
+  if (rest.length !== 3) return false;
+  const [conversationId, requestId, objectName] = rest;
+  if (!UUID_PATTERN.test(conversationId)) return false;
+  if (!REQUEST_SEGMENT_PATTERN.test(requestId)) return false;
+  // `safeBaseName` restricts the base to [\w-]; the extension is a known format.
+  return /^[\w-]+\.[a-z]{2,5}$/.test(objectName);
+}
+
+/** The conversation id embedded in a conversation-scoped key, else null. */
+export function conversationIdFromDocumentKey(s3Key: string): string | null {
+  if (!isConversationScopedDocumentKey(s3Key)) return null;
+  return s3Key.slice(NEXUS_DOCUMENT_PREFIX.length).split("/")[0];
 }
 
 export function isDocumentFormat(value: unknown): value is DocumentFormat {
@@ -129,11 +195,102 @@ function wrapPdfLines(
 }
 
 /**
+ * Readable CP1252 stand-ins for the characters a chat model most often emits
+ * that WinAnsi cannot encode (Issue #1898).
+ *
+ * Without this, every one of them became "?" — the arrow in "Draft -> Review"
+ * and the check in a checklist alike. Note what is NOT in this table: curly
+ * quotes, en/em dashes, the ellipsis, the bullet, the euro sign and every
+ * accented Latin-1 letter are all *inside* CP1252 and already round-trip
+ * unchanged, so transliterating them would degrade correct output.
+ *
+ * Tab is here because WinAnsi rejects control characters, so an indented line
+ * previously lost its indentation to a "?" rather than keeping it as spaces.
+ */
+const WIN_ANSI_TRANSLITERATIONS: ReadonlyMap<string, string> = new Map([
+  ["\t", "    "],
+  // Zero-width and BOM characters carry no visual meaning in a PDF line.
+  ["​", ""],
+  ["‌", ""],
+  ["‍", ""],
+  ["﻿", ""],
+  // Exotic spaces → a plain space.
+  [" ", " "],
+  [" ", " "],
+  [" ", " "],
+  [" ", " "],
+  [" ", " "],
+  [" ", " "],
+  [" ", " "],
+  ["　", " "],
+  // Hyphen variants CP1252 lacks (the en/em dash it has).
+  ["‐", "-"],
+  ["‑", "-"],
+  ["‒", "-"],
+  ["―", "--"],
+  ["−", "-"],
+  // Arrows.
+  ["←", "<-"],
+  ["↑", "^"],
+  ["→", "->"],
+  ["↓", "v"],
+  ["↔", "<->"],
+  ["⇐", "<="],
+  ["⇒", "=>"],
+  ["⇔", "<=>"],
+  // Comparison / math.
+  ["≠", "!="],
+  ["≤", "<="],
+  ["≥", ">="],
+  ["≈", "~="],
+  ["±", "+/-"],
+  ["∞", "infinity"],
+  // Marks commonly used in checklists and tables.
+  ["✓", "[x]"],
+  ["✔", "[x]"],
+  ["✗", "[ ]"],
+  ["✘", "[ ]"],
+  ["☑", "[x]"],
+  ["☐", "[ ]"],
+  ["■", "•"],
+  ["▪", "•"],
+  ["●", "•"],
+  ["◦", "•"],
+  ["‣", "•"],
+  ["⁃", "•"],
+  // Primes, used for feet/inches and minutes/seconds.
+  ["′", "'"],
+  ["″", '"'],
+]);
+
+/**
+ * Replace known non-WinAnsi characters with CP1252 equivalents. Characters not
+ * in the table are left alone for the caller's encodability check to handle.
+ *
+ * Exported for unit testing.
+ */
+export function transliterateForWinAnsi(text: string): string {
+  let out = "";
+  let changed = false;
+  for (const ch of text) {
+    const replacement = WIN_ANSI_TRANSLITERATIONS.get(ch);
+    if (replacement === undefined) {
+      out += ch;
+    } else {
+      out += replacement;
+      changed = true;
+    }
+  }
+  return changed ? out : text;
+}
+
+/**
  * pdf-lib's StandardFonts (Helvetica) use WinAnsi (CP1252) encoding, so drawText
  * and width measurement throw on any character outside CP1252 (emoji, CJK, Cyrillic,
- * Greek, most math/arrow symbols). Replace those code points with "?" so a single
- * such character no longer fails the entire PDF request (REV-COR-499). ASCII/CP1252
- * text is returned unchanged via the whole-string fast path.
+ * Greek, most math/arrow symbols). Known characters are transliterated to readable
+ * CP1252 equivalents first (#1898); anything still unencodable becomes "?" so a
+ * single such character no longer fails the entire PDF request (REV-COR-499).
+ * ASCII/CP1252 text is returned unchanged via the whole-string fast path.
  *
  * Exported for unit testing.
  */
@@ -145,12 +302,21 @@ export function sanitizeForWinAnsi(
     font.encodeText(text);
     return text;
   } catch {
+    // Retry once after transliteration: it resolves whole classes of input
+    // (tab-indented text, arrows) without entering the per-character path.
+    const source = transliterateForWinAnsi(text);
+    try {
+      font.encodeText(source);
+      return source;
+    } catch {
+      // Fall through to the per-character pass below.
+    }
     let out = "";
     let replaced = 0;
     // Cache per-character encodability: natural-language text is highly repetitive,
     // so this turns the fallback from O(N) encodeText calls into O(unique chars).
     const cache = new Map<string, boolean>();
-    for (const ch of text) {
+    for (const ch of source) {
       // \r/\n never reach drawText directly — wrapPdfLines splits on them first —
       // so preserve them unconditionally instead of letting the WinAnsi control-
       // character rejection turn every line break into "?".
@@ -229,23 +395,46 @@ async function buildPdf(title: string | undefined, content: string): Promise<Uin
   return pdf.save();
 }
 
+/**
+ * DOCX from markdown (#1898). The body is parsed as markdown rather than being
+ * written out verbatim, so `## Heading`, `**bold**`, `- bullets`, `1.` lists and
+ * pipe tables become real Word structures instead of literal punctuation on the
+ * page. Lazy-imported so `docx` stays out of every other format's graph.
+ */
 async function buildDocx(title: string | undefined, content: string): Promise<Buffer> {
-  const { Document, Packer, Paragraph, HeadingLevel } = await import("docx");
-  const children = [];
-  if (title) {
-    children.push(new Paragraph({ text: title, heading: HeadingLevel.HEADING_1 }));
-  }
-  for (const para of content.split(/\n{2,}/)) {
-    children.push(new Paragraph({ text: para.replace(/\n/g, " ") }));
-  }
-  const doc = new Document({ sections: [{ children }] });
-  return Packer.toBuffer(doc);
+  const { buildDocxDocument, packDocx } = await import(
+    "@/lib/ai/document-docx-builder"
+  );
+  return packDocx(buildDocxDocument(title, content));
+}
+
+/**
+ * Excel forbids `* ? : \ / [ ]` in a worksheet name and caps it at 31
+ * characters; `addWorksheet` THROWS on any of them. Passing the document title
+ * straight through therefore turned an ordinary request — "a spreadsheet called
+ * Q4 Results: Mathematics" — into a failed download rather than a file, and a
+ * colon in a title is about as common as titles get.
+ *
+ * The sheet name is sanitized independently of the title, which is still shown
+ * verbatim wherever else the document uses it.
+ *
+ * Exported for unit testing.
+ */
+export function safeWorksheetName(title: string | undefined): string {
+  const cleaned = (title ?? "")
+    // eslint-disable-next-line no-useless-escape -- the class lists Excel's own forbidden set verbatim
+    .replace(/[*?:\\\/\[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 31)
+    .trim();
+  return cleaned || "Sheet1";
 }
 
 async function buildXlsx(title: string | undefined, content: string): Promise<Buffer> {
   const ExcelJS = (await import("exceljs")).default;
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet((title || "Sheet1").slice(0, 31));
+  const ws = wb.addWorksheet(safeWorksheetName(title));
   for (const row of parseCsv(content)) {
     ws.addRow(row);
   }
@@ -253,23 +442,45 @@ async function buildXlsx(title: string | undefined, content: string): Promise<Bu
   return Buffer.from(buf as ArrayBuffer);
 }
 
+/**
+ * PPTX from markdown (#1898): a title per slide plus real bullet points.
+ *
+ * Slide breaks come from `markdownToSlides`, which treats a heading and a `---`
+ * thematic break as the same boundary — so the `---` convention this tool has
+ * always advertised still works, and a model that simply writes `## Slide title`
+ * gets the deck it meant. Bullets are passed as separate text objects with
+ * `bullet: true` rather than one newline-joined block, which is what made every
+ * previous deck a wall of text.
+ */
 async function buildPptx(title: string | undefined, content: string): Promise<Buffer> {
   const pptxgen = (await import("pptxgenjs")).default;
+  const { markdownToSlides } = await import("@/lib/ai/markdown-blocks");
   const pptx = new pptxgen();
-  // Slides separated by a line containing only '---'.
-  const slides = content.split(/\n-{3,}\n/).map((s) => s.trim());
+  const slides = markdownToSlides(content);
   if (title) {
     const cover = pptx.addSlide();
     cover.addText(title, { x: 0.5, y: 1.5, w: 9, h: 1.5, fontSize: 32, bold: true });
   }
-  for (const slideText of slides) {
-    if (!slideText) continue;
+  for (const spec of slides) {
     const slide = pptx.addSlide();
-    const [head, ...rest] = slideText.split(/\n/);
-    slide.addText(head || "", { x: 0.5, y: 0.4, w: 9, h: 0.8, fontSize: 24, bold: true });
-    if (rest.length > 0) {
-      slide.addText(rest.join("\n"), { x: 0.5, y: 1.4, w: 9, h: 4.5, fontSize: 16 });
+    slide.addText(spec.title, {
+      x: 0.5,
+      y: 0.4,
+      w: 9,
+      h: 0.8,
+      fontSize: 24,
+      bold: true,
+    });
+    if (spec.bullets.length > 0) {
+      slide.addText(
+        spec.bullets.map((text) => ({ text, options: { bullet: true } })),
+        { x: 0.5, y: 1.4, w: 9, h: 4.5, fontSize: 16 }
+      );
     }
+  }
+  // A deck with no slides at all is not a valid pptx.
+  if (!title && slides.length === 0) {
+    pptx.addSlide().addText("(empty)", { x: 0.5, y: 0.4, w: 9, h: 0.8, fontSize: 24 });
   }
   // 'nodebuffer' yields a Node Buffer.
   const out = await pptx.write({ outputType: "nodebuffer" });
@@ -352,8 +563,18 @@ export async function generateDocument(
 
   const base = safeBaseName(request.filename || request.title);
   const filename = `${base}.${request.format}`;
+  const conversationId = request.conversationId;
+  if (conversationId !== undefined && !UUID_PATTERN.test(conversationId)) {
+    throw new Error("conversationId must be a UUID");
+  }
   // Deterministic-ish, traceable key; the requestId disambiguates concurrent runs.
-  const s3Key = `v2/generated-documents/${request.userId}/${requestId}-${filename}`;
+  // A conversation-scoped document lives under the conversation so the download
+  // route can re-derive and re-authorize the owner from the key alone, and the
+  // request id is its own segment so the basename is the advertised filename
+  // (see REQUEST_SEGMENT_PATTERN).
+  const s3Key = conversationId
+    ? `${NEXUS_DOCUMENT_PREFIX}${conversationId}/${requestId}/${filename}`
+    : `v2/generated-documents/${request.userId}/${requestId}-${filename}`;
 
   const s3 = await getS3Client();
   const bucket = getDocumentsBucket();
@@ -371,18 +592,31 @@ export async function generateDocument(
     })
   );
 
-  const url = await getSignedUrl(
-    s3,
-    new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
-    { expiresIn: 3600 }
-  );
+  // Conversation-scoped documents are never presigned: the authenticated route
+  // re-checks ownership on every download, which a presigned URL cannot do.
+  const delivery = conversationId
+    ? { downloadPath: `${NEXUS_DOCUMENT_DOWNLOAD_PREFIX}${s3Key}` }
+    : {
+        url: await getSignedUrl(
+          s3,
+          new GetObjectCommand({ Bucket: bucket, Key: s3Key }),
+          { expiresIn: 3600 }
+        ),
+      };
 
   log.info("Document generated", {
     requestId,
     format: request.format,
     bytes: body.length,
     s3Key,
+    conversationScoped: Boolean(conversationId),
   });
 
-  return { url, s3Key, format: request.format, filename, bytes: body.length };
+  return {
+    ...delivery,
+    s3Key,
+    format: request.format,
+    filename,
+    bytes: body.length,
+  };
 }

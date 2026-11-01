@@ -1,13 +1,13 @@
 ---
 name: psd-image-gen
-summary: Generate images with OpenAI gpt-image-2 — shared API key, district-funded.
-description: Generate an image from a text prompt (OpenAI gpt-image-2) and return a shareable HTTPS URL. Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
+summary: Generate images with OpenAI gpt-image-2.5-flare — shared API key, district-funded.
+description: Generate an image from a text prompt (OpenAI gpt-image-2.5-flare) and return a shareable HTTPS URL. Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
 allowed-tools: Bash(node:*)
 ---
 
 # psd-image-gen
 
-Generate an image from a prompt using OpenAI `gpt-image-2`. The image is uploaded to the workspace S3 bucket under the `public-images/` prefix (granted public `s3:GetObject` by the bucket policy) and returned as an unsigned HTTPS URL — anyone who receives the URL can fetch the image. The UUID in the path makes the link unguessable; the security model matches Google Drive "anyone with the link" sharing. Surface the URL to the user — Google Chat will render it as a download link today (inline rendering is a planned follow-up).
+Generate an image from a prompt using OpenAI `gpt-image-2.5-flare`. The image is uploaded to the workspace S3 bucket under the `public-images/` prefix (granted public `s3:GetObject` by the bucket policy) and returned as an unsigned HTTPS URL — anyone who receives the URL can fetch the image. The UUID in the path makes the link unguessable; the security model matches Google Drive "anyone with the link" sharing. Surface the URL to the user — Google Chat will render it as a download link today (inline rendering is a planned follow-up).
 
 **Identity.** All commands require `--user <caller-email>`. Pass the email verbatim from the `[caller: Name <email>]` header of the user turn.
 
@@ -23,7 +23,7 @@ node /opt/psd-skills/psd-image-gen/generate.js \
   [--background opaque | transparent | auto]
 ```
 
-Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2", "prompt": "...", "size": "...", "mode": "generate"|"edit", "sharing": "public-by-link" }`.
+Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2.5-flare", "prompt": "...", "size": "...", "mode": "generate"|"edit", "sharing": "public-by-link" }`.
 
 ### With a reference image (logo, brand asset, layout)
 
@@ -56,13 +56,13 @@ You may add one short sentence of context above or below the URL line ("Here's t
 ## Prompting Guidance
 
 - Be specific about subject, composition, lighting, style.
-- gpt-image-2 has strong text rendering — request labels, titles, captions where useful.
+- gpt-image-2.5-flare has strong text rendering — request labels, titles, captions where useful.
 - Default `size` is `auto` (model chooses). Specify a size only when aspect ratio matters.
 - Default `quality` is `auto`. Use `high` for hero imagery; `low` for thumbnails / iterative drafts to save spend.
 
 ## Cost Note
 
-gpt-image-2 is priced per output token. The shared key bills the district. Prefer fewer high-quality generations over many drafts. If the user iterates rapidly, suggest finalizing the prompt before re-generating.
+gpt-image-2.5-flare is priced per output token. The shared key bills the district. Prefer fewer high-quality generations over many drafts. If the user iterates rapidly, suggest finalizing the prompt before re-generating.
 
 ## Permission Model
 

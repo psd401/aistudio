@@ -22,6 +22,7 @@ type LoadedObj = {
   id: string;
   ownerUserId: number;
   visibilityLevel: string;
+  collectionId?: string | null;
 } | null;
 
 const loadByIdOrSlugMock = jest.fn(async (..._a: unknown[]): Promise<LoadedObj> => null);
@@ -30,6 +31,7 @@ const grantsForMock = jest.fn(async (..._a: unknown[]) => [
   { kind: "role", value: "staff" },
 ]);
 const canEditMock = jest.fn((..._a: unknown[]) => true);
+const isInPrivateCollectionMock = jest.fn(async (..._a: unknown[]) => false);
 
 jest.mock("@/lib/content/content-service", () => ({
   contentService: {
@@ -41,6 +43,7 @@ jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: {
     canView: (...a: unknown[]) => canViewMock(...a),
     grantsFor: (...a: unknown[]) => grantsForMock(...a),
+    isInPrivateCollection: (...a: unknown[]) => isInPrivateCollectionMock(...a),
   },
 }));
 
@@ -164,6 +167,26 @@ const defineGetVisibilityActionSuccessShapeSuite2 = () => {
     expect(result.data.visibilityLevel).toBe("group");
     expect(result.data.grants).toEqual([{ kind: "role", value: "staff" }]);
     expect(result.data.canEdit).toBe(true);
+  });
+
+  it("reports inPrivateCollection for an editor of content filed in a private collection", async () => {
+    loadByIdOrSlugMock.mockResolvedValueOnce({ ...OBJ, collectionId: "col-private" });
+    isInPrivateCollectionMock.mockResolvedValueOnce(true);
+    const result = await getVisibilityAction("uuid-1");
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data.inPrivateCollection).toBe(true);
+    expect(isInPrivateCollectionMock).toHaveBeenCalledWith("col-private");
+  });
+
+  it("reports inPrivateCollection=false and skips the lookup for a non-editor", async () => {
+    canEditMock.mockReturnValueOnce(false);
+    isInPrivateCollectionMock.mockClear();
+    const result = await getVisibilityAction("uuid-1");
+    expect(result.isSuccess).toBe(true);
+    if (!result.isSuccess) return;
+    expect(result.data.inPrivateCollection).toBe(false);
+    expect(isInPrivateCollectionMock).not.toHaveBeenCalled();
   });
 
   it("returns canEdit=false for an owner WITHOUT the atrium-content capability", async () => {

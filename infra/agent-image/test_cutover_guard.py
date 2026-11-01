@@ -116,5 +116,78 @@ class DeployedCommitResolvesEitherPinning(unittest.TestCase):
         self.assertNotEqual(rc, 0)
 
 
+def _extract_cutover_decision() -> str:
+    """The real cutover decision block: `CUTOVER_REASON=""` through the `fi`
+    that closes the CUTOVER REQUIRED / Ordinary deploy branch."""
+    lines = SCRIPT.read_text().splitlines()
+    start = lines.index('CUTOVER_REASON=""')
+    after = next(
+        i for i in range(start, len(lines))
+        if lines[i].startswith('echo "After deploy')
+    )
+    end = max(i for i in range(start, after) if lines[i] == "fi")
+    return "\n".join(lines[start:end + 1])
+
+
+class CutoverDecisionSurvivesErrexit(unittest.TestCase):
+    """build-and-push.sh runs under `set -euo pipefail`. workspace_contract.py
+    exits 1 when the contract changed and 2 when it cannot compare — exactly
+    the cases the notice exists for. On 2026-10-26 the status-1 path killed
+    the script before it printed anything (dev and prod builds both ended
+    `exit=1` straight after "=== Done ===", no CUTOVER REQUIRED line)."""
+
+    def _run(self, contract_status):
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work)
+        binaries = pathlib.Path(work, "bin")
+        binaries.mkdir()
+        (binaries / "python3").write_text(textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            echo "contract CHANGED"
+            echo "  + lib/agent-workspace/storage-broker.ts: const X = 1"
+            exit {contract_status}
+        """))
+        (binaries / "git").write_text("#!/usr/bin/env bash\nexit 0\n")
+        for stub in ("python3", "git"):
+            (binaries / stub).chmod(0o755)
+
+        script = "\n".join([
+            "set -euo pipefail",
+            "REGION=us-east-1",
+            "REPO_ROOT=/tmp",
+            "SCRIPT_DIR=/tmp",
+            "SOURCE_COMMIT=d6874a087a55",
+            "ENVIRONMENT=dev",
+            "CUTOVER_PATHS=(lib/agent-workspace/storage-broker.ts)",
+            "deployed_commit() { printf '%s' 04d4c6d65ad4; }",
+            _extract_cutover_decision(),
+            'echo "REACHED-END"',
+        ])
+        env = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}")
+        done = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, env=env
+        )
+        return done.returncode, done.stdout
+
+    def test_a_changed_contract_prints_the_cutover_notice(self):
+        rc, out = self._run(1)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("WORKSPACE CUTOVER REQUIRED", out)
+        self.assertIn("storage-broker.ts: const X = 1", out)
+        self.assertIn("REACHED-END", out)
+
+    def test_an_uncomparable_contract_fails_closed_and_still_prints(self):
+        rc, out = self._run(2)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("WORKSPACE CUTOVER REQUIRED", out)
+        self.assertIn("could NOT be compared", out)
+
+    def test_an_unchanged_contract_is_an_ordinary_deploy(self):
+        rc, out = self._run(0)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Ordinary deploy", out)
+        self.assertNotIn("WORKSPACE CUTOVER REQUIRED", out)
+
+
 if __name__ == "__main__":
     unittest.main()

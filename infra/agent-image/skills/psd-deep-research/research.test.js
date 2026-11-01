@@ -156,6 +156,106 @@ describe("psd-deep-research CLI", () => {
   });
 });
 
+describe("psd-deep-research CLI after a cut-off turn", () => {
+  it("reports the interaction id as soon as the run starts, before waiting", async () => {
+    const notices = [];
+    const events = [];
+    const broker = async (_route, body) => {
+      events.push(body.operation);
+      return body.operation === "deep-research-start"
+        ? { interactionId: "interaction-early", status: "in_progress" }
+        : {
+            interactionId: "interaction-early",
+            status: "completed",
+            elapsedSec: 1,
+            report: "Report",
+            citations: [],
+          };
+    };
+
+    await runResearch(
+      { user: "owner@psd401.net", prompt: "Research a test topic" },
+      {
+        broker: async (route, body, options) => {
+          const result = await broker(route, body, options);
+          if (body.operation === "deep-research-start") events.push("started");
+          return result;
+        },
+        now: () => 0,
+        notice: (message) => {
+          events.push("notice");
+          notices.push(message);
+        },
+      },
+    );
+
+    assert.deepEqual(events, [
+      "deep-research-start",
+      "started",
+      "notice",
+      "deep-research-status",
+    ]);
+    assert.match(notices[0], /interactionId interaction-early/);
+    assert.match(notices[0], /--check 'interaction-early'/);
+  });
+
+  it("resumes the caller's active run when a start is refused with user_concurrency", async () => {
+    const operations = [];
+    const notices = [];
+    const broker = async (_route, body) => {
+      operations.push(body);
+      if (body.operation === "deep-research-start") {
+        const error = new Error("Agent broker returned HTTP 429");
+        error.responseBody = {
+          error: "You already have a Deep Research run in progress.",
+          code: "user_concurrency",
+          activeInteractionId: "interaction-active",
+        };
+        throw error;
+      }
+      return {
+        interactionId: "interaction-active",
+        status: "completed",
+        elapsedSec: 600,
+        report: "Report from the earlier run",
+        citations: [{ url: "https://example.org/source" }],
+      };
+    };
+
+    const result = await runResearch(
+      { user: "owner@psd401.net", prompt: "Research a test topic" },
+      { broker, now: () => 0, notice: (message) => notices.push(message) },
+    );
+
+    assert.deepEqual(
+      operations.map((body) => [body.operation, body.interactionId]),
+      [
+        ["deep-research-start", undefined],
+        ["deep-research-status", "interaction-active"],
+      ],
+    );
+    assert.equal(result.report, "Report from the earlier run");
+    assert.equal(result.interactionId, "interaction-active");
+    assert.match(notices[0], /resuming interactionId interaction-active/);
+  });
+
+  it("still fails a user_concurrency refusal that names no run", async () => {
+    const broker = async () => {
+      const error = new Error("Agent broker returned HTTP 429");
+      error.responseBody = { error: "Busy", code: "user_concurrency" };
+      throw error;
+    };
+
+    await assert.rejects(
+      runResearch(
+        { user: "owner@psd401.net", prompt: "Research a test topic" },
+        { broker, now: () => 0, notice: () => {} },
+      ),
+      (error) => error.responseBody.code === "user_concurrency",
+    );
+  });
+});
+
 async function expectResearch(actual, expected) {
   assert.deepEqual(await actual, expected);
 }

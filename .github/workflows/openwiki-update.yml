@@ -14,7 +14,7 @@ jobs:
       # them even though repository writes use a down-scoped App token.
       contents: write
       pull-requests: write
-    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@main
+    uses: PSD401/.github/.github/workflows/reusable-openwiki.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       base_branch: dev
     secrets:

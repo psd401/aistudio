@@ -111,9 +111,13 @@ export const AGENT_TOOL_DESCRIPTORS: AgentToolDescriptor[] = [
     name: "generate_document",
     description:
       "Generate a downloadable document from text content and return a URL. " +
-      "Supported formats: pdf, docx (Word), xlsx (Excel — content is CSV rows), " +
-      "pptx (PowerPoint — slides separated by a line containing only '---'), and " +
-      "md/html/txt/csv. Use to deliver reports, spreadsheets, or slide decks.",
+      "Supported formats: pdf (plain text), docx (Word — content is markdown: " +
+      "headings, bold/italic, bullet and numbered lists and pipe tables all " +
+      "render as real Word formatting), xlsx (Excel — content is CSV rows), " +
+      "pptx (PowerPoint — content is markdown: each '##' heading starts a slide " +
+      "and becomes its title, the lines under it become that slide's bullets; a " +
+      "line containing only '---' also starts a slide), and md/html/txt/csv. " +
+      "Use to deliver reports, spreadsheets, or slide decks.",
     requiredScopes: ["chat:write"],
     inputSchema: {
       type: "object",

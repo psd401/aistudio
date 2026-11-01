@@ -3,35 +3,34 @@
  *
  * Entry point for the hourly EventBridge schedule AND the admin "Sync now"
  * async invoke (payload `{ trigger: 'manual' }`). Resolves config from the
- * settings table, loads the Google service-account key from Secrets Manager,
- * builds the directory client (Cloud Identity or Admin SDK), and drives the
+ * settings table, builds the Cloud Identity directory client on keyless
+ * workload identity auth (directory-auth.ts, #1989), and drives the
  * reconciler (runGroupSync). Emits per-run CloudWatch metrics.
  *
  * Gating:
- *   - Scheduled runs execute only when GROUP_SYNC_ENABLED = 'true' AND an SA
- *     secret ARN is configured.
- *   - Manual runs execute whenever an SA secret ARN is configured (so an admin
+ *   - Scheduled runs execute only when GROUP_SYNC_ENABLED = 'true' AND a
+ *     customer id is configured.
+ *   - Manual runs execute whenever a customer id is configured (so an admin
  *     can sync even while the hourly schedule is paused).
  *
  * This bundle is isolated from the Next.js app (it cannot import @/lib/*), so it
  * uses console logging (allowed for standalone Lambda code — see root CLAUDE.md).
  */
 
-import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
   type MetricDatum,
 } from "@aws-sdk/client-cloudwatch";
 import { getSql, closeSql, listActiveRules, upsertGroup, replaceMembers, markSynced, markError, deactivateGroupsNotIn, reconcileManagedRoles, type RoleReconcileResult } from "./db";
-import { resolveConfig, parseServiceAccountKey } from "./config";
+import { resolveConfig } from "./config";
+import { createDirectoryAuth } from "./directory-auth";
 import { createDirectoryClient } from "./directory-client";
 import { runGroupSync, type GroupSyncPorts, type GroupSyncResult } from "./sync";
 
 const METRIC_NAMESPACE = "AIStudio/GroupSync";
 const ENVIRONMENT = process.env.ENVIRONMENT ?? "dev";
 
-const secretsClient = new SecretsManagerClient({});
 const cloudwatch = new CloudWatchClient({});
 
 
@@ -68,8 +67,8 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
   try {
     const config = await resolveConfig(sql);
 
-    if (!config.saSecretArn) {
-      log.warn("Group sync not configured (no SA secret ARN) — skipping");
+    if (!config.customerId) {
+      log.warn("Group sync not configured (no GOOGLE_DIRECTORY_CUSTOMER_ID) — skipping");
       return { status: "skipped", reason: "not-configured" };
     }
     if (!isManual && !config.enabled) {
@@ -77,8 +76,7 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
       return { status: "skipped", reason: "disabled" };
     }
 
-    const key = parseServiceAccountKey(await loadSecret(config.saSecretArn));
-    const directory = createDirectoryClient(key, config);
+    const directory = createDirectoryClient(createDirectoryAuth(), config);
 
     const ports: GroupSyncPorts = {
       listActiveRules: () => listActiveRules(sql),
@@ -126,13 +124,6 @@ export async function handler(event: GroupSyncEvent = {}): Promise<HandlerResult
   }
 }
 
-async function loadSecret(secretArn: string): Promise<string> {
-  const res = await secretsClient.send(new GetSecretValueCommand({ SecretId: secretArn }));
-  if (!res.SecretString) {
-    throw new Error(`Service-account secret has no SecretString: ${secretArn}`);
-  }
-  return res.SecretString;
-}
 
 /**
  * Publish per-run metrics. A null result records a run-level failure. Role

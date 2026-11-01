@@ -8,7 +8,7 @@
  *                    [--quality low|medium|high|auto]
  *                    [--background opaque|transparent|auto]
  *
- * Calls OpenAI v1/images/generations with model gpt-image-2-2026-04-21,
+ * Calls OpenAI v1/images/generations with model gpt-image-2.5-flare,
  * uploads the result to the agent workspace S3 bucket, and returns a
  * presigned URL valid for 1 hour. The shared OpenAI key is read from
  * Secrets Manager via the psd-credentials skill — never from env vars
@@ -41,7 +41,12 @@ const { requestAgentBroker } = require('../_shared/agent-broker');
 // reproducibility for actually working; if a future OpenAI release
 // changes output meaningfully, we'll re-pin to the new dated version.
 // Also update SKILL.md when changing this value.
-const MODEL_ID = 'gpt-image-2';
+//
+// 2026-10-26: OpenAI stopped serving `gpt-image-2` to the district project
+// (403 model_not_found), so the alias no longer resolves. The broker
+// (AGENT_IMAGE_MODEL_ID in lib/agent-credentials/owner-operation-broker.ts)
+// picks the model; this value is only reported back and must match it.
+const MODEL_ID = 'gpt-image-2.5-flare';
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024', 'auto']);
 const ALLOWED_QUALITIES = new Set(['low', 'medium', 'high', 'auto']);
 const ALLOWED_BACKGROUNDS = new Set(['opaque', 'transparent', 'auto']);

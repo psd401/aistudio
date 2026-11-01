@@ -383,3 +383,118 @@ describe("pruneStaleWorkspaceToolPayloads — parts that name no object", () => 
     expect(out).toBe(messages);
   });
 });
+
+describe("pruneStaleWorkspaceToolPayloads — generated documents (#1898)", () => {
+  const bigBody = (marker: string) => `# Report\n\n${marker.repeat(5_000)}`;
+  const generated = (callId: string, content: string) => ({
+    type: "tool-generate_document",
+    toolCallId: callId,
+    state: "output-available",
+    input: { format: "docx", content, title: "Q4 report" },
+    output: {
+      ok: true,
+      filename: `${callId}.docx`,
+      format: "docx",
+      bytes: 12_345,
+      downloadUrl: `/api/nexus/documents/7/conv/${callId}.docx`,
+    },
+  });
+  const part = (out: UIMessage[], i: number) =>
+    out[i].parts[0] as unknown as Record<string, Record<string, unknown>>;
+
+  it("keeps a single generated document verbatim (by reference)", () => {
+    const messages = [message("m1", [generated("d1", bigBody("a"))])];
+    expect(pruneStaleWorkspaceToolPayloads(messages)).toBe(messages);
+  });
+
+  it("stubs every earlier body and keeps only the newest — the one a follow-up needs", () => {
+    const first = bigBody("a");
+    const second = bigBody("b");
+    const newest = bigBody("c");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [generated("d1", first)]),
+      message("m2", [{ type: "text", text: "Now as slides please" }]),
+      message("m3", [generated("d2", second)]),
+      message("m4", [generated("d3", newest)]),
+    ]);
+    expect(String(part(out, 0).input.content)).toMatch(/^\[omitted from history/);
+    expect(String(part(out, 2).input.content)).toMatch(/^\[omitted from history/);
+    expect(part(out, 3).input.content).toBe(newest);
+  });
+
+  it("the stub says the file was delivered and never points at read_workspace_content", () => {
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [generated("d1", bigBody("a"))]),
+      message("m2", [generated("d2", bigBody("b"))]),
+    ]);
+    const stubbed = String(part(out, 0).input.content);
+    expect(stubbed).toContain("generated document");
+    expect(stubbed).toContain("delivered");
+    expect(stubbed).not.toContain("read_workspace_content");
+  });
+
+  it("keeps the part shape, the short fields and the result intact", () => {
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [generated("d1", bigBody("a"))]),
+      message("m2", [generated("d2", bigBody("b"))]),
+    ]);
+    const stubbed = part(out, 0);
+    expect(stubbed.type).toBe("tool-generate_document");
+    expect(stubbed.toolCallId).toBe("d1");
+    expect(stubbed.state).toBe("output-available");
+    expect(Object.keys(stubbed.input).sort()).toEqual(["content", "format", "title"]);
+    expect(stubbed.input.format).toBe("docx");
+    expect(stubbed.input.title).toBe("Q4 report");
+    // The download card and the model's "here is your file" both read this.
+    expect(stubbed.output).toEqual({
+      ok: true,
+      filename: "d1.docx",
+      format: "docx",
+      bytes: 12_345,
+      downloadUrl: "/api/nexus/documents/7/conv/d1.docx",
+    });
+  });
+
+  it("handles the persisted toolName/args representation too", () => {
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [
+        {
+          type: "tool-call",
+          toolName: "generate_document",
+          toolCallId: "d1",
+          args: { format: "pptx", content: bigBody("a") },
+          result: { ok: true, filename: "deck.pptx", format: "pptx", bytes: 9 },
+        },
+      ]),
+      message("m2", [generated("d2", bigBody("b"))]),
+    ]);
+    expect(String(part(out, 0).args.content)).toMatch(/^\[omitted from history/);
+    expect(part(out, 0).result).toEqual({
+      ok: true,
+      filename: "deck.pptx",
+      format: "pptx",
+      bytes: 9,
+    });
+  });
+
+  it("leaves a short body alone — the 2 KB floor applies here too", () => {
+    const messages = [
+      message("m1", [generated("d1", "# Memo\n\nShort.")]),
+      message("m2", [generated("d2", "# Memo\n\nAlso short.")]),
+    ];
+    const out = pruneStaleWorkspaceToolPayloads(messages);
+    expect(out).toEqual(messages);
+    expect(part(out, 0).input.content).toBe("# Memo\n\nShort.");
+  });
+
+  it("a generated document and a workspace source never supersede each other", () => {
+    const code = bigCode("a");
+    const body = bigBody("b");
+    const out = pruneStaleWorkspaceToolPayloads([
+      message("m1", [updatePart("c1", code)]),
+      message("m2", [generated("d1", body)]),
+    ]);
+    expect(part(out, 0).input.code).toBe(code);
+    expect(part(out, 1).input.content).toBe(body);
+  });
+});

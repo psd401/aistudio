@@ -18,7 +18,7 @@ const log = createLogger({ module: 'openai-responses-api' });
 export interface ResponsesAPIConfig {
   apiKey: string;
   modelId: string;
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  reasoningEffort?: 'none' | 'minimal' | 'low' | 'medium' | 'high';
   backgroundMode?: boolean;
   streamReasoningSummaries?: boolean;
   preserveReasoningItems?: boolean;

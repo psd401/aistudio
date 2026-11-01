@@ -39,17 +39,36 @@ describe("gmail users settings filters", () => {
     }
   );
 
-  it("covers the whole resource because the operation truncates at four tokens", () => {
-    // Not a hidden assumption — the reason one entry grants create AND delete.
-    // `operationTokens` caps at four positionals, so the fifth (the real
-    // action) never reaches the operation string. Recorded here so a future
-    // reader does not try to narrow the entry by action and quietly fail.
+  it("covers only the four actions it names, not the whole resource", () => {
+    // Until #1893 `operationTokens` capped at four positionals, so the fifth
+    // (the real action) never reached the operation string and the single
+    // entry `gmail users settings filters` granted EVERY action beneath the
+    // resource — including any action Google might add later and any token the
+    // model invented. The grant is now `create` and `delete` by name, with
+    // `get`/`list` reaching the read branch, so a made-up fifth token is
+    // refused.
     expect(() =>
       check(
         ["gmail", "users", "settings", "filters", "totally-made-up"],
         "user"
       )
-    ).not.toThrow();
+    ).toThrow(/not allowed/i);
+  });
+
+  it("still asks for the settings scope on an action it refuses", () => {
+    // The scope gap is keyed on the four-token resource prefix, not the whole
+    // operation, so it survived the truncation being removed. Pinned because
+    // an equality check here would have gone silently dead: every real call
+    // now carries a fifth token.
+    expect(
+      requiredWorkspaceScopeGap(
+        ["gmail", "users", "settings", "filters", "create"],
+        GMAIL_MODIFY
+      )
+    ).toEqual({
+      scopes: [GMAIL_SETTINGS_BASIC],
+      capability: "manage the filters in your Gmail inbox",
+    });
   });
 
   it("does NOT reach the sibling settings resources", () => {

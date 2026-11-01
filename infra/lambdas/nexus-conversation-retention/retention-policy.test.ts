@@ -782,10 +782,25 @@ describe("extractOutOfPrefixKeys — ownership, not just syntax", () => {
   test("keys inside the conversation prefixes are skipped (the prefix sweep covers them)", () => {
     expect(
       extractOutOfPrefixKeys(
-        rowsWith(`conversations/${CONV}/attachments/1-0-a.png`, `v2/generated-images/${CONV}/x.png`),
+        rowsWith(
+          `conversations/${CONV}/attachments/1-0-a.png`,
+          `v2/generated-images/${CONV}/x.png`,
+          // #1898: generated Word/Excel/PowerPoint/PDF files. This prefix MUST
+          // be swept — the conversation row is deleted by `claimConversation`,
+          // so nothing can ever find the id again, and the file may contain
+          // whatever the user pasted into the chat.
+          `v2/nexus-documents/${CONV}/req-report.docx`
+        ),
         CONV,
         OWNER
       )
+    ).toEqual([]);
+  });
+
+  test("a generated document under ANOTHER conversation is not swept by this one", () => {
+    const other = "22222222-2222-4222-8222-222222222222";
+    expect(
+      extractOutOfPrefixKeys(rowsWith(`v2/nexus-documents/${other}/x.docx`), CONV, OWNER)
     ).toEqual([]);
   });
 

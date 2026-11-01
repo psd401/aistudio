@@ -7,9 +7,7 @@ permissions:
   contents: read
 jobs:
   psd-ci:
-    # @main is deliberate: org-owned reusable; central bumps must propagate
-    # (psd-dev-standards standards/06). zizmor: ignore[unpinned-uses]
-    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@main # zizmor: ignore[unpinned-uses]
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
     with:
       # Mirrors ci.yml "Test, Lint, and Type Check": the agent-router and
       # agent-cron Lambdas resolve AWS SDK deps from their own package.json;

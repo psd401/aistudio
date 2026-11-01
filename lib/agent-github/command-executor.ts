@@ -248,6 +248,54 @@ export function validateGitHubCommand(argv: readonly string[]): void {
   }
 }
 
+/**
+ * The read-only subset of COMMAND_POLICIES. A scheduled run executes as its
+ * owner with no human approving each call, and it may read outside content
+ * (email, documents) that tries to steer it, so it gets views, lists and
+ * searches only — no issue/PR writes and no `pr review --approve`.
+ *
+ * An explicit allowlist, not "everything minus writes": a write command added
+ * to COMMAND_POLICIES later stays blocked for schedules until it is listed
+ * here on purpose.
+ */
+const READ_ONLY_GITHUB_COMMANDS = new Set([
+  "auth status",
+  "issue list",
+  "issue status",
+  "issue view",
+  "pr checks",
+  "pr diff",
+  "pr list",
+  "pr status",
+  "pr view",
+  "release list",
+  "release view",
+  "repo list",
+  "repo view",
+  "run list",
+  "run view",
+  "run watch",
+  "search code",
+  "search commits",
+  "search issues",
+  "search prs",
+  "search repos",
+  "workflow list",
+  "workflow view",
+])
+
+export function validateScheduledGitHubCommand(
+  argv: readonly string[],
+): void {
+  validateGitHubCommand(argv)
+  const command = `${argv[0].toLowerCase()} ${argv[1].toLowerCase()}`
+  if (!READ_ONLY_GITHUB_COMMANDS.has(command)) {
+    throw new Error(
+      `Scheduled runs may only read from GitHub; ${command} is a write`,
+    )
+  }
+}
+
 const EMAIL_TASK_GITHUB_FLAGS = new Set([
   "-R",
   "--repo",

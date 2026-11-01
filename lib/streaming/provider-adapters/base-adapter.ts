@@ -10,6 +10,13 @@ import {
 import { createLogger } from '@/lib/logger';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import { withSseKeepAliveResponse } from '../sse-keep-alive';
+import {
+  classifyChunkVisibility,
+  classifyEmptyTurn,
+  emptyTurnNotice,
+} from '../empty-turn-notice';
+import { classifyStreamError, sanitizeStreamErrorMessage } from '../stream-error-message';
+import { isDirectRenderTool } from '@/lib/tools/direct-render-tools';
 import type {
   ProviderAdapter,
   ProviderCapabilities,
@@ -486,13 +493,15 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Handle streaming chunks for progress tracking
       this.handleStreamProgress(result, callbacks);
       
-      const buildResponse = (options?: { headers?: Record<string, string> }) =>
-        this.buildAbortAwareResponse(
-          result,
-          () => streamAborted || deadline.timedOut(),
-          () => deadline.timedOut(),
-          options
-        );
+      const buildResponse = this.buildResponseFactory(
+        result,
+        // The ORIGINAL config, not the enhanced one: `enhanceStreamConfig` has
+        // to opt every field in by hand, and a field dropped there fails open
+        // (the notice simply never fires). Read the policy from the source.
+        { source: config.source, maxSteps: enhancedConfig.maxSteps },
+        deadline,
+        () => streamAborted
+      );
 
       return {
         toDataStreamResponse: buildResponse,
@@ -527,6 +536,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       system: config.system,
       maxTokens: config.maxTokens,
       maxSteps: config.maxSteps,
+      // Preserve the calling surface (#1899): the answer-less-turn policy is
+      // Nexus-only, and dropping `source` here silently reverted every Nexus
+      // run to the non-Nexus rule, making the whole fix inert. (Codex review.)
+      source: config.source,
       // Preserve the cost-cap inputs (#926) so the agentic loop's stop condition
       // survives provider-specific config enhancement.
       costCapCents: config.costCapCents,
@@ -613,39 +626,38 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
-   * Does this UI chunk type put something in front of the user?
+   * The response builder every adapter returns, with the empty-turn policy for
+   * this run already resolved.
    *
-   * Used only to decide whether a cleanly-finished run was genuinely blank, so it
-   * errs towards "visible": a false positive merely withholds the empty-response
-   * notice, while a false negative tells someone their rendered answer was empty.
-   * Beyond text and reasoning it covers every part type the thread renders on its
-   * own — tool activity (`tool-input-start`, `tool-output-available`, … — MCP
-   * tools stream through these same types with a `dynamic` flag), generated
-   * files, retrieved sources, and custom `data-*` parts. (PR #1686 review.)
-   *
-   * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`),
-   * which decides whether the turn is persisted from text and step history
-   * alone. The two answer different questions and are allowed to disagree, but
-   * a turn this method calls visible while that one calls `no_content` renders
-   * and then vanishes on reload with nothing said. No such turn is reachable
-   * today (Nexus streams generated images through `image-generation-handler`,
-   * not this path, and no `data-*` part is emitted through an adapter), so if a
-   * chunk type is ever added on one side, check the other.
+   * Shared so the base and OpenAI Responses-API paths cannot drift: only a
+   * `source: 'nexus'` run requires a text part (its Thread draws nothing for
+   * reasoning or file parts),
+   * and the step budget lets the notice distinguish "spent every tool step
+   * without answering" from "stopped after one call". (#1899)
    */
-  protected static isVisibleChunkType(type: string): boolean {
-    return (
-      type === 'text-delta' ||
-      type === 'reasoning-delta' ||
-      type === 'file' ||
-      type.startsWith('tool-') ||
-      type.startsWith('source-') ||
-      type.startsWith('data-')
-    );
+  protected buildResponseFactory(
+    result: Parameters<BaseProviderAdapter['buildAbortAwareResponse']>[0],
+    config: Pick<StreamConfig, 'source' | 'maxSteps'>,
+    deadline: StreamDeadline,
+    wasAborted: () => boolean
+  ): (options?: { headers?: Record<string, string> }) => Response {
+    const emptyTurn = {
+      requireTextPart: config.source === 'nexus',
+      maxSteps: config.maxSteps,
+    };
+    return options =>
+      this.buildAbortAwareResponse(
+        result,
+        () => wasAborted() || deadline.timedOut(),
+        () => deadline.timedOut(),
+        options,
+        emptyTurn
+      );
   }
 
   /**
    * Build the HTTP response, appending a terminal `error` chunk when the run was
-   * cut short.
+   * cut short or ended with nothing for the user to read.
    *
    * Verified against ai@6.0.208: an abort enqueues an `abort` UI chunk and sets an
    * internal flag, but raises NO client-side error — the browser simply sees the
@@ -657,16 +669,42 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    *
    * The chunk is appended at end-of-stream, so it neither reorders nor rewrites
    * any content the model already produced.
+   *
+   * #1899: for Nexus, the "is this turn blank?" test is anchored on a TEXT part,
+   * not on "some chunk arrived". `reasoning-delta` and `file` chunks used to
+   * count as visible, but the Nexus Thread registers no Reasoning and no File
+   * renderer, so a think-then-say-nothing turn rendered an empty bubble with no
+   * notice. Tool-only turns are covered too: `resolveMaxSteps` gives an ordinary
+   * turn three steps, so a turn can spend them all on `web_fetch` and end with
+   * tool cards and no answer. `classifyEmptyTurn` decides which happened and
+   * `emptyTurnNotice` says so.
+   *
+   * Two guards keep that from firing on a turn that DID answer:
+   *  - a direct-render tool (`lib/tools/direct-render-tools.ts`) means the chart
+   *    or generated document IS the answer, so nothing is said; and
+   *  - `emptyTurn.requireTextPart` is set only for `source: 'nexus'`. The same
+   *    method serves Assistant Architect execution and the programmatic
+   *    `/api/v1/assistants` path, where a run ending on a structured tool call
+   *    is an ordinary success — and an injected `error` chunk makes an AI SDK
+   *    client throw. Those keep the narrower pre-#1899 rule.
+   *
+   * Paired with `incompleteTurnReason` (`app/api/nexus/chat/chat-helpers.ts`):
+   * a turn this method calls blank is also the turn that route persists as a
+   * notice row, so the notice survives a reload instead of vanishing.
    */
   protected buildAbortAwareResponse(
     result: {
-      toUIMessageStream?: () => ReadableStream<UIMessageChunk>;
+      toUIMessageStream?: (options?: { onError?: (error: unknown) => string }) => ReadableStream<UIMessageChunk>;
       toUIMessageStreamResponse?: (options?: { headers?: Record<string, string> }) => Response;
       toTextStreamResponse: (options?: { headers?: Record<string, string> }) => Response;
     },
     wasAborted: () => boolean,
     didTimeOut: () => boolean,
-    options?: { headers?: Record<string, string> }
+    /** Transport only — passed straight to the Response. */
+    options?: { headers?: Record<string, string> },
+    /** How to judge an answer-less turn (#1899). Kept out of `options` so no
+     *  business input can ride along into the HTTP response. */
+    emptyTurn?: { requireTextPart: boolean; maxSteps?: number }
   ): Response {
     // Providers without the UI-message stream (plain text responses) keep the
     // previous behaviour — there is no chunk protocol to append to.
@@ -676,42 +714,98 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         : result.toTextStreamResponse(options);
     }
 
-    // Track whether the turn produced anything the user can actually see. A
-    // tool-only turn still renders (the thread shows tool output), so only a
-    // stream with neither text nor tool activity is genuinely blank.
-    let producedVisibleOutput = false;
+    // What the turn actually put in front of the user, by part kind (#1899).
+    const seen = {
+      sawText: false,
+      sawReasoning: false,
+      sawFile: false,
+      sawToolActivity: false,
+      sawDeliverableTool: false,
+      sawOtherRendered: false,
+      completedSteps: 0,
+    };
+    const requireTextPart = emptyTurn?.requireTextPart ?? false;
+    const maxSteps = emptyTurn?.maxSteps;
 
-    const stream = result.toUIMessageStream().pipeThrough(
-      new TransformStream<UIMessageChunk, UIMessageChunk>({
-        transform(chunk, controller) {
-          const type = (chunk as { type?: string }).type ?? '';
-          if (BaseProviderAdapter.isVisibleChunkType(type)) {
-            producedVisibleOutput = true;
-          }
-          controller.enqueue(chunk);
-        },
-        flush(controller) {
-          if (wasAborted()) {
-            controller.enqueue({
-              type: 'error',
-              errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
-            });
-            return;
-          }
-          // A run that ended cleanly having emitted nothing at all is still a
-          // dead end for the user: the route now refuses to persist it, so
-          // without this the stream would simply stop and reload as if the turn
-          // never happened. Say so instead. (PR #1686 review.)
-          if (!producedVisibleOutput) {
-            controller.enqueue({
-              type: 'error',
-              errorText:
-                'The model returned an empty response. Please try again, or rephrase your request.',
-            });
-          }
+    const stream = result
+      .toUIMessageStream({
+        // Without this the AI SDK default (`() => 'An error occurred.'`) is what
+        // the user sees for every mid-stream failure (#1899, case 3). The raw
+        // provider message is never passed through — it can carry request ids
+        // and prompt fragments — only an allow-listed explanation.
+        onError: (error: unknown) => {
+          // Keep the failure observable: the browser only ever sees the
+          // sanitized text, so without this the kind is recorded nowhere.
+          log.warn('Stream error surfaced to the client', {
+            kind: classifyStreamError(error),
+          });
+          return sanitizeStreamErrorMessage(error);
         },
       })
-    );
+      .pipeThrough(
+        new TransformStream<UIMessageChunk, UIMessageChunk>({
+          transform(chunk, controller) {
+            const type = (chunk as { type?: string }).type ?? '';
+            if (type === 'finish-step') {
+              seen.completedSteps += 1;
+            }
+            switch (classifyChunkVisibility(type)) {
+              case 'text': {
+                // Trimmed, to match `incompleteTurnReason`: a whitespace-only
+                // answer renders as a blank bubble, so it must not suppress the
+                // notice that the persisted row will carry. (Review nit 2.)
+                const delta = (chunk as { delta?: unknown }).delta;
+                if (typeof delta !== 'string' || delta.trim().length > 0) {
+                  seen.sawText = true;
+                }
+                break;
+              }
+              case 'reasoning':
+                seen.sawReasoning = true;
+                break;
+              case 'file':
+                seen.sawFile = true;
+                break;
+              case 'tool': {
+                seen.sawToolActivity = true;
+                // `tool-input-start` / `tool-input-available` carry the name;
+                // later chunks for the same call do not, which is why the flag
+                // is sticky rather than recomputed at the end.
+                const toolName = (chunk as { toolName?: unknown }).toolName;
+                if (typeof toolName === 'string' && isDirectRenderTool(toolName)) {
+                  seen.sawDeliverableTool = true;
+                }
+                break;
+              }
+              case 'other':
+                seen.sawOtherRendered = true;
+                break;
+              default:
+                break;
+            }
+            controller.enqueue(chunk);
+          },
+          flush(controller) {
+            if (wasAborted()) {
+              controller.enqueue({
+                type: 'error',
+                errorText: BaseProviderAdapter.abortNotice(didTimeOut()),
+              });
+              return;
+            }
+            // A run that ended cleanly with no answer is still a dead end for
+            // the user: without a notice the stream would simply stop, and the
+            // turn would reload as if it had never happened. Say what happened.
+            const emptyKind = classifyEmptyTurn({ ...seen, requireTextPart, maxSteps });
+            if (emptyKind) {
+              controller.enqueue({
+                type: 'error',
+                errorText: emptyTurnNotice(emptyKind),
+              });
+            }
+          },
+        })
+      );
 
     // Keep the socket warm through a silent reasoning/tool stretch. Without
     // this the ALB's 300s idle timeout drops the connection at or before the

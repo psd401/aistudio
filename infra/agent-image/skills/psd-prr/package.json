@@ -1,0 +1,10 @@
+{
+  "name": "psd-prr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Owner-bound PSD Public Records (PRR) via the AI Studio credential broker and PRR's hosted MCP server.",
+  "main": "run.js",
+  "scripts": {
+    "test": "bun test run.test.js"
+  }
+}

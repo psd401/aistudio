@@ -127,7 +127,9 @@ jest.mock("@/components/ui/label", () => {
 // SelectItem children into <option>s and reads `value`/`onValueChange` off Select.
 jest.mock("@/components/ui/select", () => {
   const React = require("react");
-  type Node = { props?: { value?: string; children?: React.ReactNode } };
+  type Node = {
+    props?: { value?: string; disabled?: boolean; children?: React.ReactNode };
+  };
   const collectItems = (children: React.ReactNode): Node[] => {
     const out: Node[] = [];
     React.Children.forEach(children, (child: Node) => {
@@ -163,7 +165,11 @@ jest.mock("@/components/ui/select", () => {
       items.map((it) =>
         React.createElement(
           "option",
-          { key: it.props?.value, value: it.props?.value },
+          {
+            key: it.props?.value,
+            value: it.props?.value,
+            disabled: it.props?.disabled,
+          },
           it.props?.children
         )
       )
@@ -256,6 +262,7 @@ function getState(
     visibilityLevel: string;
     grants: { kind: string; value: string }[];
     canEdit: boolean;
+    inPrivateCollection: boolean;
   }> = {}
 ) {
   return {
@@ -265,6 +272,7 @@ function getState(
       visibilityLevel: "internal",
       grants: [],
       canEdit: true,
+      inPrivateCollection: false,
       ...overrides,
     },
   };
@@ -582,8 +590,50 @@ function defineVisibilityChipSuite1Part3() {it("surfaces an error when listGrant
   });
 }
 
+function defineVisibilityChipPrivateCollectionSuite() {
+  it("offers only Private, with a reason, for content in a private collection", async () => {
+    // The service rejects every non-private level here ("Content in a private
+    // collection must remain private"); the picker must not offer them.
+    mockGet.mockResolvedValue(
+      getState({ visibilityLevel: "private", inPrivateCollection: true }) as Awaited<
+        ReturnType<typeof getVisibilityAction>
+      >
+    );
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const select = screen.getByTestId("select") as HTMLSelectElement;
+    const disabled = Array.from(select.options)
+      .filter((o) => o.disabled)
+      .map((o) => o.value);
+    expect(disabled).toEqual(["group", "internal", "public"]);
+    expect(
+      screen.getByTestId("visibility-private-collection-note")
+    ).toBeTruthy();
+  });
+
+  it("offers every level when the content is not in a private collection", async () => {
+    mockGet.mockResolvedValue(
+      getState({ visibilityLevel: "private" }) as Awaited<
+        ReturnType<typeof getVisibilityAction>
+      >
+    );
+    await act(async () => {
+      render(<VisibilityChip idOrSlug="obj-1" />);
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const select = screen.getByTestId("select") as HTMLSelectElement;
+    expect(Array.from(select.options).some((o) => o.disabled)).toBe(false);
+    expect(screen.queryByTestId("visibility-private-collection-note")).toBeNull();
+  });
+}
+
 const defineVisibilityChipSuite1 = () => {
   defineVisibilityChipSuite1Part1()
+  defineVisibilityChipPrivateCollectionSuite()
   defineVisibilityChipSuite1Part2()
   defineVisibilityChipSuite1Part3()
 };

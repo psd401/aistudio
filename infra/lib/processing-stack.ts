@@ -22,6 +22,15 @@ import { VPCProvider } from "./constructs/network/vpc-provider";
 import { UnifiedContentProcessing } from "./constructs/processing/unified-content-processing";
 import { GoogleContentSync } from "./constructs/processing/google-content-sync";
 
+// The district's shared, keyless Google groups reader (#1989), defined in
+// psd401/psd-gcp-infra (bootstrap/directory-reader.tf, directory-reader.tf).
+// One account for every environment: there is one Workspace directory.
+const GOOGLE_DIRECTORY_WIF_AUDIENCE =
+  "//iam.googleapis.com/projects/1022506104054/locations/global/" +
+  "workloadIdentityPools/aws-agent-broker/providers/directory-reader";
+const GOOGLE_DIRECTORY_SERVICE_ACCOUNT_EMAIL =
+  "directory-groups-reader@psd-org-tooling.iam.gserviceaccount.com";
+
 type BundledProcessorName =
   | "file-processor"
   | "url-processor"
@@ -369,17 +378,18 @@ export class ProcessingStack extends cdk.Stack {
     // =====================================================================
     // Hourly Google Directory sync: resolves the admin selection (picks ∪ prefix
     // rules), fetches each group's transitive membership, and full-replaces
-    // group_members per group with last-known-good fail-safety. Reads all config
-    // (SA secret ARN, customer id, optional DWD subject, enabled flag) from the
-    // settings table at runtime — so no redeploy is needed to (re)configure it.
-    // In VPC (PRIVATE_WITH_EGRESS) for postgres.js → Aurora AND NAT egress to the
-    // Google Directory / Cloud Identity APIs. Same role/VPC pattern as
-    // embedding-generator and AgentHealthDaily.
+    // group_members per group with last-known-good fail-safety. Reads its
+    // runtime config (customer id, enabled flag) from the settings table — so
+    // no redeploy is needed to (re)configure it. In VPC (PRIVATE_WITH_EGRESS)
+    // for postgres.js → Aurora AND NAT egress to the Cloud Identity API. Same
+    // role/VPC pattern as embedding-generator and AgentHealthDaily.
     //
-    // The SA JSON key secret is admin-chosen at runtime, so the read grant is
-    // scoped by NAME PATTERN (aistudio-<env>-google-directory-*) rather than a
-    // single ARN — least-privilege to the directory-sync secret family only.
-    const groupSyncSaSecretArnPattern = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-google-directory-*`;
+    // Google auth is keyless (#1989): the role below federates to the
+    // `directory-reader` WIF provider and impersonates the district's shared
+    // groups reader. psd401/psd-gcp-infra directory-reader.tf trusts this
+    // role's EXACT name (psd-group-sync-<env>-execution-role-<env>, the env
+    // appears twice); renaming it needs a change there first or the sync
+    // fails closed. No AWS grant is needed for WIF (sts:GetCallerIdentity).
 
     // functionName MUST match the Lambda's physical name below — the factory
     // scopes the CloudWatch Logs grant to /aws/lambda/<functionName>, and a
@@ -405,14 +415,6 @@ export class ProcessingStack extends cdk.Stack {
                 effect: iam.Effect.ALLOW,
                 actions: ["secretsmanager:GetSecretValue"],
                 resources: [databaseSecretArn],
-              }),
-              // Google service-account JSON key — scoped to the directory-sync
-              // secret name family.
-              new iam.PolicyStatement({
-                sid: "GoogleDirectorySaSecretAccess",
-                effect: iam.Effect.ALLOW,
-                actions: ["secretsmanager:GetSecretValue"],
-                resources: [groupSyncSaSecretArnPattern],
               }),
               // Sync-run metrics (namespace-scoped).
               new iam.PolicyStatement({
@@ -519,6 +521,8 @@ export class ProcessingStack extends cdk.Stack {
         DATABASE_NAME: "aistudio",
         DATABASE_PORT: "5432",
         ENVIRONMENT: props.environment,
+        GOOGLE_DIRECTORY_WIF_AUDIENCE: GOOGLE_DIRECTORY_WIF_AUDIENCE,
+        GOOGLE_DIRECTORY_SERVICE_ACCOUNT_EMAIL: GOOGLE_DIRECTORY_SERVICE_ACCOUNT_EMAIL,
       },
       role: groupSyncRole,
     });

@@ -48,31 +48,21 @@ export const nexusRouterConfigSchema = z.object({
   auto: tierCandidatesSchema.default({ light: [], medium: [], high: [] }),
   specialists: z.object({
     imageModels: z.array(z.string().min(1)).max(10).default([
-      "gemini-3.1-flash-image-preview",
-      "gemini-3.1-flash-image",
+      "gemini-nano-banana-2.1",
     ]),
     instructionModels: z.array(z.string().min(1)).max(10).default([
-      "gemini-3.5-flash",
-      "gemini-3-flash-preview",
-      "gemini-2.5-flash",
+      "gemini-3.8-flash",
     ]),
     webSearchModels: z.array(z.string().min(1)).max(10).default([
-      "gemini-3.5-flash",
-      "gemini-3.1-pro-preview",
-      "gemini-3-flash-preview",
-      "gemini-2.5-flash",
+      "gemini-3.8-flash",
+      "gemini-4-argon",
     ]),
     psdDataConnectorId: z.string().uuid().optional(),
     psdDataConnectorName: z.string().min(1).max(255).default("psd-data"),
   }).default({
-    imageModels: ["gemini-3.1-flash-image-preview", "gemini-3.1-flash-image"],
-    instructionModels: ["gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash"],
-    webSearchModels: [
-      "gemini-3.5-flash",
-      "gemini-3.1-pro-preview",
-      "gemini-3-flash-preview",
-      "gemini-2.5-flash",
-    ],
+    imageModels: ["gemini-nano-banana-2.1"],
+    instructionModels: ["gemini-3.8-flash"],
+    webSearchModels: ["gemini-3.8-flash", "gemini-4-argon"],
     psdDataConnectorName: "psd-data",
   }),
   confidenceFloor: z.number().min(0).max(1).default(0.55),

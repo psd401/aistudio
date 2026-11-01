@@ -5,6 +5,7 @@ import {
   executeGitHubCommand,
   validateEmailTaskGitHubCommand,
   validateGitHubCommand,
+  validateScheduledGitHubCommand,
 } from "@/lib/agent-github/command-executor";
 import {
   createLogger,
@@ -26,8 +27,11 @@ function parseGitHubArgv(raw: unknown): string[] | null {
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
+  // "scheduled" is admitted so schedules can read GitHub (e.g. the morning
+  // brief's Life OS tasks and ready PRs, which failed here with a bare 403),
+  // but only read: validateScheduledGitHubCommand below refuses writes.
   const context = await verifyAgentInvocationContext(request, {
-    allowedModes: ["owner", "email-task"],
+    allowedModes: ["owner", "scheduled", "email-task"],
   });
   if (!context)
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -47,6 +51,8 @@ export async function POST(request: NextRequest) {
   try {
     if (context.mode === "email-task") {
       validateEmailTaskGitHubCommand(argv);
+    } else if (context.mode === "scheduled") {
+      validateScheduledGitHubCommand(argv);
     } else {
       validateGitHubCommand(argv);
     }
