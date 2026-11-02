@@ -35,7 +35,7 @@ import {
 const OWNER = { ownerEmail: "owner@psd401.net", sessionId: "sess-1" }
 const TOKEN = "prr_pat_abc123_s3cr3tvalue"
 
-const ELEVEN_TOOLS = [
+const PRR_TOOLS = [
   "psd_prr_requests_list",
   "psd_prr_request_get",
   "psd_prr_overdue_requests_list",
@@ -44,6 +44,7 @@ const ELEVEN_TOOLS = [
   "psd_prr_exemptions_list",
   "psd_prr_audit_log_search",
   "psd_prr_capabilities_list",
+  "psd_prr_acknowledgment_draft",
   "psd_prr_clarification_letter_draft",
   "psd_prr_collection_task_notes_propose",
   "psd_prr_exemption_citations_suggest",
@@ -121,14 +122,14 @@ beforeEach(() => {
   })
   global.fetch = prrServer((message) =>
     message.method === "tools/list"
-      ? { tools: ELEVEN_TOOLS.map((name) => ({ name })) }
+      ? { tools: PRR_TOOLS.map((name) => ({ name })) }
       : { content: [{ type: "text", text: '{"total":3,"scan_complete":true}' }] }
   ) as unknown as typeof fetch
 })
 
 describe("PRR broker allowlist", () => {
-  it("allows exactly the eleven psd_prr_* tools", () => {
-    expect([...PRR_ALLOWED_TOOLS].sort()).toEqual([...ELEVEN_TOOLS].sort())
+  it("allows exactly the twelve psd_prr_* tools", () => {
+    expect([...PRR_ALLOWED_TOOLS].sort()).toEqual([...PRR_TOOLS].sort())
   })
 
   it.each([
@@ -237,7 +238,7 @@ describe("PRR Streamable HTTP session", () => {
 
     expect(result).toEqual({
       status: "ok",
-      result: { tools: ELEVEN_TOOLS.map((name) => ({ name })) },
+      result: { tools: PRR_TOOLS.map((name) => ({ name })) },
     })
     expect(calls.map((call) => call.message.method)).toEqual([
       "initialize",
@@ -255,7 +256,7 @@ describe("PRR Streamable HTTP session", () => {
     expect(header(calls[2].init, "Mcp-Session-Id")).toBe("prr-session-1")
   })
 
-  it.each(ELEVEN_TOOLS)("calls %s with the model's arguments", async (toolName) => {
+  it.each(PRR_TOOLS)("calls %s with the model's arguments", async (toolName) => {
     const result = await executePrrOperation({
       ...OWNER,
       method: "tools/call",
@@ -269,6 +270,23 @@ describe("PRR Streamable HTTP session", () => {
     expect(calls[2].message).toMatchObject({
       method: "tools/call",
       params: { name: toolName, arguments: { limit: 5 } },
+    })
+  })
+
+  it("passes an acknowledgment draft request through as a tools/call", async () => {
+    const result = await executePrrOperation({
+      ...OWNER,
+      method: "tools/call",
+      toolName: "psd_prr_acknowledgment_draft",
+      toolArgs: { request_number: "PRR-2026-0095", estimated_completion: "2026-11-20" },
+    })
+    expect(result).toMatchObject({ status: "ok" })
+    expect(calls[2].message).toMatchObject({
+      method: "tools/call",
+      params: {
+        name: "psd_prr_acknowledgment_draft",
+        arguments: { request_number: "PRR-2026-0095", estimated_completion: "2026-11-20" },
+      },
     })
   })
 
