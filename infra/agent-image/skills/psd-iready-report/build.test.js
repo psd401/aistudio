@@ -124,7 +124,9 @@ describe('renderReport', () => {
 });
 
 describe('CLI', () => {
-  const run = (...args) => spawnSync(process.execPath, [BUILD, ...args], { encoding: 'utf8', cwd: REPO_ROOT });
+  // The agent runs build.js under node, whose JSON.parse errors quote the input
+  // (Bun's do not), so the CLI must be exercised with node for the FERPA test.
+  const run = (...args) => spawnSync('node', [BUILD, ...args], { encoding: 'utf8', cwd: REPO_ROOT });
 
   test('writes the HTML with the bundled logo embedded', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iready-'));
@@ -146,6 +148,26 @@ describe('CLI', () => {
     expect(result.stdout).toContain('bad_args');
   });
 
+  test('never echoes the data file contents on malformed JSON (FERPA)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iready-'));
+    const data = path.join(dir, 'data.json');
+    // An unquoted name: V8 quotes the ~10 characters around the bad token,
+    // i.e. `..."lastName":Pupil}" is not valid JSON`.
+    validatedFs.writeFileSync(data, '{"student":{"lastName":Pupil}}');
+    const result = run('--data', data, '--out', path.join(dir, 'out.html'));
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).not.toContain('Pupil');
+  });
+
+  test('refuses a JSON null data file with the intended message', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iready-'));
+    const data = path.join(dir, 'data.json');
+    validatedFs.writeFileSync(data, 'null');
+    const result = run('--data', data, '--out', path.join(dir, 'out.html'));
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain('neither a math nor a reading');
+  });
+
   test('rejects a flag without a value', () => {
     expect(run('--data').status).toBe(1);
   });
@@ -161,14 +183,14 @@ describe('SKILL.md registration', () => {
     expect(fields.summary).not.toContain(': ');
   });
 
-  test('is discoverable for i-Ready report requests', () => {
+  test('summary carries the i-Ready report search terms', () => {
     const summary = frontmatter().summary.toLowerCase();
     for (const phrase of ['i-ready', 'fall', 'pdf', 'student']) expect(summary).toContain(phrase);
   });
 
   test('delivers privately and never publicly', () => {
     const body = fs.readFileSync(path.join(__dirname, 'SKILL.md'), 'utf8');
-    expect(body).toContain('Never use\n`--to public`');
+    expect(body).toMatch(/Never use\s+`--to public`/);
     expect(body).not.toMatch(/publish\.js[^\n]*--to public/);
   });
 });

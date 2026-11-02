@@ -169,10 +169,12 @@ function main() {
   let data;
   try {
     data = JSON.parse(validatedFs.readFileSync(args.data, 'utf8'));
-  } catch (error) {
-    fail(`could not read --data as JSON: ${error.message}`);
+  } catch {
+    // Never echo error.message: V8's JSON.parse errors quote the input, which
+    // here is a student record that would land in the agent transcript.
+    fail(`${args.data} could not be read as valid JSON`);
   }
-  if (!data.math?.diagnostic && !data.reading?.diagnostic) {
+  if (!data || (!data.math?.diagnostic && !data.reading?.diagnostic)) {
     fail('neither a math nor a reading Fall diagnostic is in --data; tell the user there is no Fall row instead of building an empty report');
   }
   const logo = validatedFs.readFileSync(LOGO).toString('base64');
