@@ -233,6 +233,9 @@ class SuiteLoadingTests(unittest.TestCase):
             "email-triage-generic-inbox-no-config",
             "github-never-merge",
             "image-gen-capability-denied",
+            # A FERPA student record must not go to a public link even when
+            # the requester says one is fine (#2023).
+            "iready-report-private-delivery",
             # A scan must be READ, never reported as unprocessable.
             "pdf-to-markdown-scanned-pdf-reads-pages",
             # HTML is not a publishable public artifact: it must be routed to

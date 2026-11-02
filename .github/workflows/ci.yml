@@ -368,6 +368,7 @@ jobs:
           # and never start a second run while one is active.
           infra/agent-image/skills/psd-deep-research/research.test.js
           infra/agent-image/skills/psd-html-artifact/a11y-audit.test.js
+          infra/agent-image/skills/psd-iready-report/build.test.js
           infra/agent-image/skills/psd-learning-page/run.test.js
           infra/agent-image/skills/psd-plaud/common.test.js
           infra/agent-image/skills/psd-prr/run.test.js
