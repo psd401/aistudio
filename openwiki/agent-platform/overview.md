@@ -141,6 +141,7 @@ infra/agent-image/skills/{skill-name}/
 
 **Analysis & Reporting**
 - `psd-deep-research` — Gemini Deep Research for cited multi-source reports, one active run per user, and resume of the active run after a cut-off turn (see [Deep Research](#deep-research-psd-deep-research))
+- `psd-iready-report` — One student's Fall i-Ready math and reading diagnostic as a branded one-page PDF, rendered by `build.js` and delivered only to the requester's private Drive because it is a FERPA student record (see [Fall i-Ready Student Report](iready-student-report.md))
 - `psd-workflows` — Dynamic PSD gateway workflows (evaluations, requests, timesheets) with caller binding
 - `quartile-growth-report` — Growth-by-quartile spreadsheet generator for elementary school principals (one tab per grade, data-only output)
 - `psd-failure-report` — Failure analysis and reporting
