@@ -496,9 +496,11 @@ sequenceDiagram
 
 *Caption: the route dispatches `prr-mcp` in `executeOwnerIntegrationOperation`, which runs before the shared-credential switch. The skill only receives the MCP result or a status.*
 
-**Mechanics**: `app/api/agent/credentials/route.ts` dispatches `prr-mcp` to `executePrrOperation` in `lib/agent-credentials/owner-operation-broker.ts`. That function validates the method (`tools/list` or `tools/call`), checks the tool name against `PRR_ALLOWED_TOOLS` (eleven `psd_prr_*` tools), and reads the caller's own `prr_pat` slot with `AgentCredentialBroker.getUserOnly`. The token must start `prr_pat_` and be header-safe, or the call is reported as `prr_token_rejected` without contacting PRR. The request goes to `PRR_MCP_URL`, defaulting to `https://prr.psd401.net/mcp`, using the Streamable HTTP session helpers shared with the Plaud operation (`runStreamableMcpOperation`).
+**Mechanics**: `app/api/agent/credentials/route.ts` dispatches `prr-mcp` to `executePrrOperation` in `lib/agent-credentials/owner-operation-broker.ts`. That function validates the method (`tools/list` or `tools/call`), checks the tool name against `PRR_ALLOWED_TOOLS` (twelve `psd_prr_*` tools), and reads the caller's own `prr_pat` slot with `AgentCredentialBroker.getUserOnly`. The token must start `prr_pat_` and be header-safe, or the call is reported as `prr_token_rejected` without contacting PRR. The request goes to `PRR_MCP_URL`, defaulting to `https://prr.psd401.net/mcp`, using the Streamable HTTP session helpers shared with the Plaud operation (`runStreamableMcpOperation`).
 
-**Authorization model**: PRR's own roles and human-only hand-offs decide what each person may do. The allowlist only bounds which tools the agent can name. Allowed in owner and scheduled mode alike, because a daily overdue check is a schedule. The three tools that write (`psd_prr_clarification_letter_draft`, `psd_prr_collection_task_notes_propose`, `psd_prr_exemption_citations_suggest`) create drafts or proposals inside PRR. A person approves them in PRR's staff UI, so nothing reaches a requester.
+**Authorization model**: PRR's own roles and human-only hand-offs decide what each person may do. The allowlist only bounds which tools the agent can name. Allowed in owner and scheduled mode alike, because a daily overdue check is a schedule. The four tools that write (`psd_prr_acknowledgment_draft`, `psd_prr_clarification_letter_draft`, `psd_prr_collection_task_notes_propose`, `psd_prr_exemption_citations_suggest`) create drafts or proposals inside PRR. A person approves them in PRR's staff UI, so nothing reaches a requester, and none changes request status.
+
+**Acknowledgment drafts**: `psd_prr_acknowledgment_draft` takes a required `request_number` and an optional `estimated_completion` in `YYYY-MM-DD` form. Omitting the date uses the request's own estimate or the district default. PRR refuses a date that conflicts with an estimate already published on the request, and that revision is a human step in PRR, so the agent must not retry with another date. The tool is one call per request with no batch form, and each successful call stores another draft. The result is a confirmation projection (draft status, that nothing is approved, queued, or sent, and the stated estimate), not the letter text. Drafting does not mark the request acknowledged and does not satisfy the five-business-day response.
 
 **Token handling**: Like Freshservice, the caller's own token is the authorization. A missing token returns `prr_token_missing`, and a 401 from PRR returns `prr_token_rejected`. The skill turns either into a one-time credential-entry link for `prr_pat`. The `psd-prr` skill never receives the token. The slot's shape rule is enforced in `lib/agent-workspace/credential-entry.ts` (`SLOT_PREFIXES`), see [Credential Entry](credential-entry.md).
 
@@ -509,7 +511,7 @@ sequenceDiagram
 **Scheduled failure notice**: a scheduled run that fails with `prr_token_missing` or `prr_token_rejected` earns an owner DM on the first failure, with a `prr_pat` credential-entry link. The detection and link selection are in [Schedule Failure Streaks and Owner Notices](schedule-failure-notices.md#prr-token-failures).
 
 **Invariants**
-- The allowlist holds exactly the eleven PRR tools in `psd-prr/SKILL.md`. Adding a tool needs both the allowlist and the skill table.
+- The allowlist holds exactly the twelve PRR tools in `psd-prr/SKILL.md`. Adding a tool needs both the allowlist and the skill table.
 - The stored value is never echoed in a result or log line. `executePrrOperation` returns only the MCP payload.
 - PRR's hosted MCP is reachable only from the web tier. `infra/policies/mcp-allowlist.json` records the endpoint as enabled for that reason, and `infra/test/agent-skill-cdn-allowlist.test.ts` lists `prr.psd401.net` as a permitted reference host.
 
@@ -519,7 +521,7 @@ sequenceDiagram
 - A new PRR error code must also be handled by `isPrrCredentialFailure` in `infra/lambdas/agent-cron/schedule-failure-notice.ts` if it should reach the owner.
 
 **Focused tests**:
-- `tests/unit/lib/agent-credentials/prr-broker.test.ts`: `PRR broker allowlist`, `PRR token handling` (missing token, whitespace trimming, 403 and 429 mapping), and `PRR Streamable HTTP session`.
+- `tests/unit/lib/agent-credentials/prr-broker.test.ts`: `PRR broker allowlist`, `PRR token handling` (missing token, whitespace trimming, 403 and 429 mapping), and `PRR Streamable HTTP session`, including the `passes an acknowledgment draft request through as a tools/call` case that checks `request_number` and `estimated_completion` pass through unchanged.
 - `tests/unit/agent-credentials-route.test.ts`: the `prr-mcp` dispatch.
 - `infra/agent-image/skills/psd-prr/run.test.js`: CLI exit codes and the `needs-auth` link path.
 - `infra/lambdas/agent-cron/schedule-failure-notice.test.ts`: `isPrrCredentialFailure` and the `prr-credential` notice.
@@ -1898,6 +1900,19 @@ Skills are published and managed through:
 | `/lib/mcp/tool-handlers.ts` | MCP tool routing |
 | `/lib/agent-workspace/` | Workspace integration logic |
 | `/infra/lambdas/agent-router/` | Agent request routing |
+
+---
+
+## Related Concepts
+
+- **[app-features/overview.md](../app-features/overview.md)** — Features agents interact with
+- **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+**[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+ernal API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+nt request routing |
 
 ---
 
