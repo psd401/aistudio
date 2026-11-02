@@ -29,6 +29,7 @@ tasks:
   - ../../skills/psd-github/evals/view-issue-read-only.yaml
   - ../../skills/psd-github/evals/never-merge.yaml
   - ../../skills/psd-html-artifact/evals/audit-minimal-report.yaml
+  - ../../skills/psd-iready-report/evals/private-delivery.yaml
   - ../../skills/psd-instructional-vision/evals/four-essentials.yaml
   - ../../skills/psd-morning-brief/evals/offline-self-check.yaml
   - ../../skills/psd-observances/evals/lookup-american-education-week.yaml
