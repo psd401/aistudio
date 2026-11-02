@@ -34,7 +34,7 @@ const EXIT = Object.freeze({
 const CREDENTIAL_NAME = 'prr_pat';
 const TOKEN_PAGE = 'https://prr.psd401.net/agent-access';
 // Shape check only, for a fast usage error. The web tier's allowlist of the
-// eleven PRR tools is the boundary; this just keeps an obvious typo or a tool
+// twelve PRR tools is the boundary; this just keeps an obvious typo or a tool
 // from another server from costing a broker round trip.
 const TOOL_NAME_RE = /^psd_prr_[a-z0-9_]{1,64}$/;
 const AUTHORITY_FLAGS = ['user', 'owner_email', 'user_email', 'user_id'];

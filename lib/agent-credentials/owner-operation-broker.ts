@@ -630,9 +630,10 @@ export async function executePlaudOperation(input: {
  * hand-offs server-side, so the allowlist below only bounds WHICH tools the
  * agent can name; it is not the authorization.
  *
- * All eleven tools are allowed in owner AND scheduled mode (a daily PRR check
- * is a schedule). The three write tools only create drafts or proposals that
- * a human approves in PRR's staff UI — none reaches a requester.
+ * All twelve tools are allowed in owner AND scheduled mode (a daily PRR check
+ * is a schedule). The four write tools only create drafts or proposals that
+ * a human approves in PRR's staff UI — none sends, changes request status, or
+ * reaches a requester.
  */
 export const PRR_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "psd_prr_requests_list",
@@ -643,6 +644,7 @@ export const PRR_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   "psd_prr_exemptions_list",
   "psd_prr_audit_log_search",
   "psd_prr_capabilities_list",
+  "psd_prr_acknowledgment_draft",
   "psd_prr_clarification_letter_draft",
   "psd_prr_collection_task_notes_propose",
   "psd_prr_exemption_citations_suggest",

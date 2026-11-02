@@ -1,7 +1,7 @@
 ---
 name: psd-prr
-summary: Track the caller's PSD Public Records (PRR) work — requests, overdue items, collection tasks, exemptions, audit log — and draft clarification letters, task notes, and exemption citations, via PRR's MCP server with the caller's own personal token.
-description: Read and track PSD Public Records requests (PRR) — list/get requests, overdue requests, collection tasks, record systems, exemptions, audit log, capabilities — and create drafts/proposals (clarification letter, collection-task notes, exemption citations) that a human approves in PRR. Use for public records, PRR, records requests, overdue records requests, daily PRR check.
+summary: Track the caller's PSD Public Records (PRR) work — requests, overdue items, collection tasks, exemptions, audit log — and draft acknowledgment letters, clarification letters, task notes, and exemption citations, via PRR's MCP server with the caller's own personal token.
+description: Read and track PSD Public Records requests (PRR) — list/get requests, overdue requests, collection tasks, record systems, exemptions, audit log, capabilities — and create drafts/proposals (acknowledgment letter, clarification letter, collection-task notes, exemption citations) that a human approves in PRR. Use for public records, PRR, records requests, overdue records requests, daily PRR check.
 allowed-tools: Bash(node:*)
 ---
 
@@ -31,6 +31,7 @@ read its `inputSchema`; do not guess argument names.
 | `psd_prr_exemptions_list` | read | Exemptions |
 | `psd_prr_audit_log_search` | read | Audit log search |
 | `psd_prr_capabilities_list` | read | What this user's PRR role can do |
+| `psd_prr_acknowledgment_draft` | draft | Draft the RCW 42.56.520 acknowledgment letter for one request |
 | `psd_prr_clarification_letter_draft` | draft | Draft a clarification letter |
 | `psd_prr_collection_task_notes_propose` | proposal | Propose collection-task notes |
 | `psd_prr_exemption_citations_suggest` | proposal | Suggest exemption citations |
@@ -41,10 +42,23 @@ read its `inputSchema`; do not guess argument names.
   `count`. `count` is only the rows on this page.
 - **`scan_complete: false`** means PRR stopped before scanning everything, so
   `total` is a floor. Say "at least N overdue", never "N overdue".
-- **Drafts are not sent.** The three draft/proposal tools only create a draft
+- **Drafts are not sent.** The four draft/proposal tools only create a draft
   or proposal inside PRR. Nothing reaches a requester. A human reviews and
   approves it in the PRR staff UI. Never tell the user a letter was sent or a
   citation was applied.
+- **Acknowledgment drafts.** `psd_prr_acknowledgment_draft` takes
+  `request_number` (required, e.g. `PRR-2026-0095`) and an optional
+  `estimated_completion` (`YYYY-MM-DD` only). Omit the date to use the
+  request's own estimate or the district default. PRR refuses a date that
+  disagrees with an estimate already published on the request; do not retry
+  with another date, tell the user revising it is a human step in PRR. One
+  call per request (no batch form), and each call stores another draft, so do
+  not retry a call that succeeded. The result is a confirmation projection
+  (draft status, that nothing is approved, queued or sent, and the stated
+  estimate), **not the letter text**. Report the draft as created and tell the
+  officer to review and approve the letter in the request's **Messages** tab
+  in PRR; never claim to have read it. Drafting does not mark the request
+  acknowledged and does not satisfy the five-business-day response.
 - PRR enforces roles and human-only hand-offs. If a call returns `forbidden`,
   report that their PRR role does not allow it; do not retry another way.
 
