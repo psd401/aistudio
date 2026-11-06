@@ -111,6 +111,11 @@ export const POST = withApiAuth(
       );
     } catch (error) {
       if (error instanceof RepositoryUploadQuotaExceededError) {
+        log.warn("Repository upload quota exceeded via API", {
+          userId: auth.userId,
+          repositoryId,
+          quota: error.quota,
+        });
         return createErrorResponse(
           requestId,
           error.httpStatus,

@@ -49,6 +49,9 @@ jest.mock("@/lib/repositories/content-platform", () => ({
   RepositoryUploadQuotaExceededError: class extends Error {
     readonly code = "REPOSITORY_UPLOAD_QUOTA_EXCEEDED";
     readonly httpStatus = 429;
+    constructor(readonly quota: string) {
+      super("Repository upload quota exceeded");
+    }
   },
   getCanonicalRepositoryItemStatuses: (...args: unknown[]) =>
     mockGetCanonicalRepositoryItemStatuses(...args),
@@ -71,11 +74,12 @@ jest.mock("@/lib/nexus/ephemeral-repository-service", () => ({
   promoteNexusRepository: (...args: unknown[]) =>
     mockPromoteRepository(...args),
 }));
+const mockLogError = jest.fn();
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
     info: jest.fn(),
     warn: jest.fn(),
-    error: jest.fn(),
+    error: mockLogError,
   }),
   generateRequestId: () => "request-1",
   startTimer: () => jest.fn(),
@@ -341,6 +345,12 @@ function defineTemporaryRepositoryAttachmentRoutesSuite1Part3() {it("returns 429
       error: "Temporary attachment upload quota exceeded",
       code: "REPOSITORY_UPLOAD_QUOTA_EXCEEDED",
     });
+    // Which quota tripped, and for whom, must reach the logs; the response
+    // stays non-disclosing.
+    expect(mockLogError).toHaveBeenCalledWith(
+      "Temporary attachment upload failed",
+      expect.objectContaining({ userId: 7, quota: "ephemeral-storage-bytes" }),
+    );
     expect(mockDiscardRepository).toHaveBeenCalledWith({
       ownerId: 7,
       bindingId,
