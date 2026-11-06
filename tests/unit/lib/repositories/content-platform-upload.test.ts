@@ -13,6 +13,7 @@ import {
   completeRepositoryUpload,
   initiateRepositoryUpload,
   MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER,
+  MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER,
   RepositoryUploadCompletionError,
   RepositoryUploadQuotaExceededError,
   type RepositoryUploadStorage,
@@ -416,12 +417,33 @@ it("serializes concurrent ephemeral reservations and counts completed current st
   expect(storage.createSingleUpload).toHaveBeenCalledTimes(1);
 });
 
-it("rejects an owner with more than 100 active ephemeral repositories, including empty bindings", async () => {
+it("allows an owner past the former 100-repository cap (one Nexus repository per attached file)", async () => {
   const storage = createStorage();
   installReservation({
     repositoryKind: "ephemeral",
     usage: {
-      ephemeral_storage_repository_count: 101,
+      ephemeral_storage_repository_count: 150,
+      target_has_ephemeral_storage: true,
+    },
+  });
+
+  await expect(
+    initiateRepositoryUpload(
+      baseInput,
+      DEFAULT_CONTENT_PLATFORM_CONFIG,
+      storage
+    )
+  ).resolves.toMatchObject({ uploadMethod: "single" });
+  expect(storage.createSingleUpload).toHaveBeenCalledTimes(1);
+});
+
+it("rejects an owner over the active ephemeral repository cap, including empty bindings", async () => {
+  const storage = createStorage();
+  installReservation({
+    repositoryKind: "ephemeral",
+    usage: {
+      ephemeral_storage_repository_count:
+        MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER + 1,
       target_has_ephemeral_storage: true,
     },
   });

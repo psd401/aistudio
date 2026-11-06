@@ -40,6 +40,12 @@ async function ownsTemporaryAttachmentConversation(
   return nexusConversationBelongsToOwner({ ownerId, conversationId });
 }
 
+function exceededUploadQuota(error: unknown): string | undefined {
+  return error instanceof RepositoryUploadQuotaExceededError
+    ? error.quota
+    : undefined;
+}
+
 async function initiateTemporaryAttachment(
   request: Request,
 ): Promise<Response> {
@@ -51,6 +57,7 @@ async function initiateTemporaryAttachment(
   });
   let compensation:
     { ownerId: number; bindingId: string; repositoryId: number } | undefined;
+  let ownerId: number | undefined;
 
   try {
     const session = await getServerSession();
@@ -82,7 +89,7 @@ async function initiateTemporaryAttachment(
       return NextResponse.json({ mode: "legacy", requestId });
     }
 
-    const ownerId = await getUserIdFromSession(session.sub);
+    ownerId = await getUserIdFromSession(session.sub);
     validateRepositoryUploadFile(
       {
         itemName: parsed.data.fileName,
@@ -157,6 +164,8 @@ async function initiateTemporaryAttachment(
     timer({ status: "error" });
     log.error("Temporary attachment upload failed", {
       error: error instanceof Error ? error.message : "Unknown error",
+      userId: ownerId,
+      quota: exceededUploadQuota(error),
     });
     if (compensation) {
       try {

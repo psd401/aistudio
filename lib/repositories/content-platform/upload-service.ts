@@ -122,7 +122,11 @@ const MAX_MULTIPART_PARTS = 100;
 const UPLOAD_EXPIRY_SECONDS = 60 * 60;
 export const MAX_ACTIVE_UPLOAD_SESSIONS_PER_USER = 10;
 export const MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER = 5 * 1024 ** 3;
-export const MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER = 100;
+// Nexus creates one ephemeral repository per attached file, each living for
+// the attachment retention window (30 days by default). A cap of 100 locked
+// out ordinary staff who attach a few files a day; the byte cap above is the
+// real storage bound, so this only needs to stop runaway repository creation.
+export const MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER = 1000;
 
 export type RepositoryUploadQuota =
   | "active-session-count"

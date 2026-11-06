@@ -127,7 +127,9 @@ repository has a management surface.
 Upload reservation serializes quota decisions per uploader and Nexus owner.
 At most ten active uploads may be in flight per uploader, while active
 Nexus-managed storage (including promoted repositories that originated in
-Nexus) is limited to 5 GiB and 100 repositories per owner. A quota denial is a
+Nexus) is limited to 5 GiB and 1,000 repositories per owner (Nexus creates
+one repository per attached file, so the count cap stays well above normal
+use; quota denials log the tripped `quota` and `userId`). A quota denial is a
 non-disclosing `429`; concurrent reservations cannot both pass a stale count.
 
 The scheduled unified-content worker first marks expired repositories inactive

@@ -33,6 +33,7 @@ export async function POST(
     requestId,
     route: "api.repositories.uploads.initiate",
   });
+  let userId: number | undefined;
 
   try {
     const session = await getServerSession();
@@ -63,7 +64,7 @@ export async function POST(
       );
     }
 
-    const userId = await getUserIdFromSession(session.sub);
+    userId = await getUserIdFromSession(session.sub);
     // Repository kind/lifecycle and caller ownership form one non-disclosing
     // boundary. Do not let status codes or guard exception text distinguish a
     // foreign active repository from an absent, ephemeral, system, or inactive
@@ -106,6 +107,11 @@ export async function POST(
     timer({ status: "error" });
     log.error("Failed to initiate canonical repository upload", {
       error: error instanceof Error ? error.message : "Unknown error",
+      userId,
+      quota:
+        error instanceof RepositoryUploadQuotaExceededError
+          ? error.quota
+          : undefined,
     });
     if (error instanceof RepositoryUploadQuotaExceededError) {
       return NextResponse.json(
