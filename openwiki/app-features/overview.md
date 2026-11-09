@@ -2171,6 +2171,25 @@ Upload → S3 → Lambda (Textract) → Chunk → Embed → pgvector
 - **Nexus attachments**: 500MB per file
 - **Document processing**: 25MB per file (configurable)
 
+### Upload Quotas
+
+Upload reservation runs in `lib/repositories/content-platform/upload-service.ts` (`initiateRepositoryUpload`, `reserveUploadSession`) and checks four limits inside one transaction, so concurrent reservations cannot both pass a stale count:
+
+| Quota (`RepositoryUploadQuota`) | Limit | Scope |
+|---|---|---|
+| `active-session-count` | 10 active upload sessions (`MAX_ACTIVE_UPLOAD_SESSIONS_PER_USER`) | per uploader |
+| `active-session-bytes` | in-flight bytes must stay within `config.maxFileSizeGb` GiB | per uploader |
+| `ephemeral-storage-bytes` | 5 GiB of active Nexus-managed storage (`MAX_ACTIVE_EPHEMERAL_BYTES_PER_OWNER`) | per owner |
+| `ephemeral-repository-count` | 1,000 active Nexus-managed repositories (`MAX_ACTIVE_EPHEMERAL_REPOSITORIES_PER_OWNER`) | per owner |
+
+The two ephemeral limits apply to ephemeral repositories and to promoted repositories that originated in Nexus. Nexus creates one ephemeral repository per attached file, so the count cap was raised from 100 to 1,000 after ordinary staff hit it. The byte cap is the real storage bound. The count cap only stops runaway creation.
+
+A denial throws `RepositoryUploadQuotaExceededError` (`code` `REPOSITORY_UPLOAD_QUOTA_EXCEEDED`, `httpStatus` 429). The HTTP body is the same non-disclosing "Repository upload quota exceeded" text for every quota kind. The route handlers log the tripped `quota` and the `userId`, so operators can see which limit fired without exposing it to the caller. Those handlers are `app/api/repositories/[repositoryId]/uploads/route.ts`, `app/api/repositories/temporary-attachments/route.ts` (which also discards the reserved repository on denial), and `app/api/v1/repositories/[id]/items/uploads/route.ts`.
+
+**Focused tests**: `tests/unit/lib/repositories/content-platform-upload.test.ts` covers the concurrent reservation serialization, the former 100-repository cap now passing (`allows an owner past the former 100-repository cap`), and the 1,000-repository refusal (`rejects an owner over the active ephemeral repository cap, including empty bindings`). `tests/unit/api/temporary-attachments-route.test.ts` checks that a 429 logs `userId` and `quota` (`ephemeral-storage-bytes`) while the response stays generic (`returns 429 and compensates when the owner storage quota is full`).
+
+**Validation**: `bunx jest --silent tests/unit/lib/repositories/content-platform-upload.test.ts tests/unit/api/temporary-attachments-route.test.ts`. Product rationale for the quota design is in `docs/features/unified-repository-product-integration.md`.
+
 ### Repository MCP Tools (#1266, #1907)
 
 Repositories are reachable from MCP through two groups of tools. Both are handled in `lib/mcp/repository-tool-handlers.ts` (`REPOSITORY_TOOL_HANDLERS`), which `lib/mcp/tool-handlers.ts` spreads into `TOOL_HANDLERS`. Descriptors live in `lib/mcp/tool-registry.ts`, and catalog bindings (`requiredScope`, `destructive`) live in `lib/tools/catalog/manifest.ts`.
