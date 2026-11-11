@@ -1279,6 +1279,18 @@ curl -N -X POST \
   "https://your-domain/api/v1/assistants/17/execute"
 ```
 
+**Async request** (`Accept: application/json`; poll `pollUrl` with
+`GET /api/v1/jobs/{jobId}` for the result):
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"inputs":{"question":"Summarize the rollout risks"}}' \
+  "https://your-domain/api/v1/assistants/17/execute"
+```
+
 **Async response `202`:**
 
 ```json
@@ -1320,7 +1332,9 @@ the documented `4xx`/`5xx` JSON errors. This applies to
 or a missing, foreign, expired, or otherwise unavailable temporary source.
 Every unavailable-source variant returns the same
 `VALIDATION_ERROR: Temporary repository input is unavailable`; the conversation
-and async job are not created.
+and async job are not created. An assistant whose final prompt has no model
+returns `CONFIGURATION_ERROR: Assistant has no model configured` in both stream
+and async mode; the async polling job records that final prompt's model.
 
 **Response `401`** — Missing or invalid authentication.
 
