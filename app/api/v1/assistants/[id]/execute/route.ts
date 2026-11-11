@@ -121,7 +121,7 @@ async function requireExecuteScope(
 }
 
 type ExecutionAuthorization =
-  | { ok: true; assistantId: number }
+  | { ok: true; assistantId: number; finalPromptModelId: number }
   | { ok: false; response: NextResponse }
 
 // eslint-disable-next-line complexity -- Execution admission combines catalog, scope, grants, repository ACL, and readiness checks.
@@ -174,7 +174,8 @@ async function authorizeExecution(
   const prompts = (architect.prompts || []).sort(
     (a, b) => a.position - b.position
   )
-  if (!prompts[prompts.length - 1]?.modelId) {
+  const finalPromptModelId = prompts[prompts.length - 1]?.modelId
+  if (!finalPromptModelId) {
     return {
       ok: false,
       response: createErrorResponse(
@@ -226,7 +227,7 @@ async function authorizeExecution(
       ),
     }
   }
-  return { ok: true, assistantId }
+  return { ok: true, assistantId, finalPromptModelId }
 }
 
 function assistantExecutionErrorResponse(
@@ -302,7 +303,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const log = createLogger({ requestId, route: "api.v1.assistants.execute" })
   const authorization = await authorizeExecution(request, auth, requestId, log)
   if (!authorization.ok) return authorization.response
-  const { assistantId } = authorization
+  const { assistantId, finalPromptModelId } = authorization
 
   // 4. Parse and validate request body
   const result = await parseRequestBody(
@@ -346,7 +347,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     if (wantsJson) {
       // Async mode: return 202 with job ID, execute in background
       return await handleAsyncExecution(
-        assistantId,
+        { assistantId, finalPromptModelId },
         preparedInputs,
         auth,
         requestId,
@@ -389,7 +390,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 // ============================================
 
 async function handleAsyncExecution(
-  assistantId: number,
+  {
+    assistantId,
+    finalPromptModelId,
+  }: { assistantId: number; finalPromptModelId: number },
   preparedInputs: PreparedAssistantExecutionInputs,
   auth: {
     userId: number
@@ -403,7 +407,9 @@ async function handleAsyncExecution(
   const jobId = await jobManagementService.createJob({
     conversationId: `assistant-exec-${assistantId}-${Date.now()}`,
     userId: auth.userId,
-    modelId: 0, // Will be determined during execution
+    // ai_streaming_jobs.model_id is a NOT NULL foreign key and createJob rejects
+    // 0, so record the final prompt's model; the run itself routes per prompt.
+    modelId: finalPromptModelId,
     modelIdString: "pending",
     messages: [],
     provider: "assistant-architect",
