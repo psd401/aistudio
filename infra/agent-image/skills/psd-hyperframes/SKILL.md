@@ -1,24 +1,27 @@
 ---
 name: psd-hyperframes
-summary: Compose a short video by writing HTML/CSS/JS and render it to a shareable MP4 (HyperFrames + headless render Lambda).
-description: Turn a described scene into a short MP4 video. Write an HTML/CSS/JS composition (title cards, motion graphics, animated text/shapes) and get back a shareable HTTPS link. Use when asked to make/create/generate a short video, motion graphic, animated title card, or video clip.
+summary: Compose a short video by writing HTML/CSS/JS and render it to an MP4 delivered privately to the requester's Drive (HyperFrames + headless render Lambda).
+description: Turn a described scene into a short MP4 video. Write an HTML/CSS/JS composition (title cards, motion graphics, animated text/shapes) and deliver it privately (a Drive file shared with the requester only). Use when asked to make/create/generate a short video, motion graphic, animated title card, or video clip.
 allowed-tools: Bash(node:*)
 ---
 
 # psd-hyperframes
 
 Compose a **short video** by writing a self-contained HTML/CSS/JS scene, then render it
-to an **MP4** and get back a shareable HTTPS URL. Built on
+to an **MP4** delivered privately to the requester. Built on
 [HyperFrames](https://hyperframes.heygen.com/) (Apache-2.0): the renderer seeks each frame
 in headless Chromium and encodes with FFmpeg, so the same composition always produces the
 same video.
 
 The render itself runs in a dedicated **`hyperframes-render` Lambda** (Chromium + FFmpeg live
 there, not in this agent image). This skill only helps you compose the scene, invokes that
-Lambda synchronously, and returns the MP4 URL — same delivery + reply contract as
-`psd-image-gen` and `psd-tts`. The MP4 is uploaded to the workspace bucket's public
-`public-images/<email>/` prefix and returned as an unsigned, public-by-link HTTPS URL (the
-UUID in the path makes it unguessable — same model as Google Drive "anyone with the link").
+Lambda synchronously, and delivers the MP4 — same delivery + reply contract as
+`psd-image-gen` and `psd-tts`. The Lambda stages the MP4 under the bucket's **private**
+`agent-renders/` prefix; this skill fetches it and creates it in your agent account's Drive,
+shared with the requester alone.
+
+**Private by default, whatever the video shows (#2034).** A public link is an explicit,
+user-confirmed exception: see **Public links** below.
 
 **Identity.** Do not pass an email or owner selector. The root relay resolves
 the owner from the installed signed invocation context through the trusted web
@@ -126,19 +129,33 @@ node /opt/psd-skills/psd-hyperframes/render.js \
   --file scene.html \
   --duration 3 \
   [--css-file extra.css] [--js-file extra.js] \
-  [--audio-url <https-mp3-url>] \
-  [--fps 30] [--width 1920] [--height 1080]
+  [--audio-file <narration.mp3>] \
+  [--fps 30] [--width 1920] [--height 1080] \
+  [--name "<Drive file name>"] [--to drive | public] [--public-confirmed]
 ```
 
 - `--file <path>` — the composition HTML (or `--html "<inline html>"`).
 - `--css-file` / `--js-file` — optional extra CSS/JS injected into the composition
   (`<style>` before `</head>`, `<script>` before `</body>`). Prefer inlining directly in the
   HTML; these exist for convenience.
-- `--audio-url <https-url>` — optional narration/music track (see **Audio** below).
+- `--audio-file <path.mp3>` — optional narration made with `psd-tts --to file` (see **Audio** below).
+  `--audio-url <https-url>` still works for a track that is already hosted.
+- `--name` — the Drive file name (default `Video <date time>`).
+- `--to drive` (default) — private Drive file. `--to public --public-confirmed` — see **Public links**.
 - `--duration <seconds>` — **required**; must match the composition's `data-duration`, be ≤ 180,
   and keep `fps × duration ≤ 3600` (lower `--fps` for a long scene).
 
-Returns JSON: `{ "url": "…", "s3Key": "public-images/<email>/<uuid>.mp4", "bytes": N, "fps": 30, "durationSeconds": 3, "width": 1920, "height": 1080, "sharing": "public-by-link" }`.
+Returns JSON (default): `{ "url": "<Drive link>", "driveFileId": "…", "fileName": "Video 2026-11-11 0605.mp4", "sharing": "private-shared-with-caller", "sharedWith": "<caller>", "expires": "never", "bytes": N, "fps": 30, "durationSeconds": 3, "width": 1920, "height": 1080 }`.
+
+## Public links (opt-in, user-confirmed)
+
+Only make a public video when the user asks for one **and** confirms after you tell them, in
+plain words, that **anyone who gets the link can play it without signing in, for 30 days**.
+Then pass `--to public --public-confirmed`. `--to public` alone returns
+`public_needs_confirmation` before anything is rendered. Never add `--public-confirmed` on your
+own judgment — it asserts the user said yes in this conversation. "Share it with the team" is
+**not** a request for a public link: deliver privately and share the Drive file with the named
+people (psd-workspace).
 
 ## Required Reply Format
 
@@ -148,36 +165,37 @@ clickable/playable link. If the HTTPS `url` is not in your reply, the user got n
 
 - ✅ Correct:
   ```
-  Here's your video:
-  https://psd-agents-dev-…​.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.mp4
+  Here's your video (a private file in your Drive):
+  https://drive.google.com/file/d/<id>/view
   ```
-- ❌ Wrong: telling the user where it's saved (an `s3://…` path, "it's in S3", the container path)
+- ❌ Wrong: telling the user where it's saved ("it's in your Drive", the container path)
   instead of pasting the HTTPS `url` — that is NOT a clickable link, and the user cannot see the
   tool result. Paste the `url`, don't describe it.
 - ❌ Wrong: wrapping the URL in `[label](url)` or `**bold**` — Google Chat corrupts these for
-  long S3 URLs. Bare URL only.
-- ❌ Wrong: re-rendering or presigning the returned URL. It is already public-by-link with
-  HTTP 200; do not touch it.
+  long URLs. Bare URL only.
+- ❌ Wrong: re-rendering, presigning, or re-publishing the returned URL to make it public.
 
 ## Audio (narration / music)
 
 hyperframes has **no separate audio input** — audio comes from an `<audio>` element in the
 composition, which hyperframes muxes into the MP4. Easiest path:
 
-1. Write the narration script, then call **psd-tts** to synthesize it — it returns a public HTTPS
-   MP3 `url`. Pick a voice/engine that fits the piece:
+1. Write the narration script, then call **psd-tts** with `--to file --out <path.mp3>` — it
+   writes the MP3 locally and uploads nothing. Pick a voice/engine that fits the piece:
    - `--engine long-form` (en-US: Danielle, Gregory, Patrick, Ruth) — best for narrating a script.
    - `--engine generative` (default; **Ruth** = warm female, **Matthew** = clear male; also
      Danielle, Joanna, Salli, Stephen, Tiffany, en-GB Amy/Brian) — most natural/expressive.
    - `--engine neural` for the widest voice/language coverage.
    - Full list: psd-tts `references/voices.md`.
-2. Pass that MP3 URL here as `--audio-url <url>`. The skill injects
-   `<audio src="…" data-start="0" data-duration="<your --duration>" data-track-index="0"
-   data-volume="1">` into the composition root; hyperframes pads/trims the clip to the video length.
+2. Pass that file here as `--audio-file <path.mp3>`. The skill inlines it as a `data:audio/mpeg`
+   URI and injects `<audio src="…" data-start="0" data-duration="<your --duration>"
+   data-track-index="0" data-volume="1">` into the composition root; hyperframes pads/trims the
+   clip to the video length. The inline limit is 2 MiB (several minutes of speech).
 
 Notes:
 - `--audio-url` must be an `https://` URL (or a `data:audio/…` URI); the render Lambda fetches it.
-- For music instead of narration, pass any hosted MP3/WAV URL the same way.
+  Use it only for a track that is already hosted (licensed music). Do not make narration public
+  just to get a URL — use `--audio-file`.
 - Advanced: you can hand-author the `<audio>` element in the composition yourself instead of
   `--audio-url` — the element contract is identical (`data-start`/`data-duration`/`data-track-index`/`data-volume`).
 
@@ -194,15 +212,23 @@ Notes:
   persists, report it.
 - **`render_failed`** — the render Lambda ran but produced no video (composition error, Chromium
   crash, or a scene too heavy for the timeout). Simplify the scene or lower `--fps`, then retry.
+- **`public_needs_confirmation`** — `--to public` without `--public-confirmed`. Nothing was
+  rendered. Deliver privately (omit `--to public`), or ask the user and only on their yes re-run
+  with both flags.
+- **`download_failed` / `share_failed` / `create_failed` / `delivery_failed`** — the video rendered
+  but could not be delivered to Drive. Nothing became public. Retry once; never fall back to a
+  public link.
 
 ## Operational Notes
 
 - Renders synchronously through a root-owned, fixed-operation loopback relay. The relay's
   AWS SDK has `lambda:InvokeFunction` on the configured render function ARN only; the
   model-facing subprocess receives neither reusable AgentCore credentials nor an API key.
-- The trusted render function publishes the MP4 under the signed caller's
-  public artifact prefix. The model role has no S3 authority.
-- The returned URL is unsigned and does not expire — anyone with the link can fetch until the
-  object is deleted.
-- `--dry-run` is a diagnostic flag (renders without uploading, returns a local path + byte
+- The trusted render function writes the MP4 under the signed caller's PRIVATE
+  `agent-renders/` prefix (deleted after 1 day by the `expire-agent-renders` lifecycle rule)
+  and returns a 15-minute presigned GET that this skill consumes immediately; it is never
+  shown to the user. The model role has no S3 authority.
+- The delivered Drive file does not expire. A public link (`--to public --public-confirmed`)
+  is deleted by the `expire-public-artifacts` lifecycle rule 30 days after it is written.
+- `--dry-run` is a diagnostic flag (renders without uploading or delivering, returns a local path + byte
   count) used by the standalone render smoke; users don't need it.

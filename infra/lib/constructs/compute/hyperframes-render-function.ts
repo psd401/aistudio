@@ -11,9 +11,11 @@ import { Environment } from "../security/types"
 
 /**
  * hyperframes-render — a container-image Lambda that renders a HyperFrames
- * HTML/CSS/JS composition to MP4 (headless Chromium + FFmpeg) and uploads the
- * result to the workspace S3 bucket's public `public-images/` prefix. Render
- * half of the psd-hyperframes agent skill (issue #1175).
+ * HTML/CSS/JS composition to MP4 (headless Chromium + FFmpeg) and stages the
+ * result under the workspace S3 bucket's PRIVATE `agent-renders/` prefix with a
+ * short-lived presigned GET, which the agent skill uses to move the MP4 into
+ * the requester's Drive (#2034). Render half of the psd-hyperframes agent
+ * skill (issue #1175).
  *
  * Container image (not a zip): the Chromium + FFmpeg + hyperframes stack blows
  * the 250 MB zip ceiling but sits comfortably under the 10 GB image limit. The
@@ -31,7 +33,7 @@ export interface HyperframesRenderFunctionProps {
   environment: Environment
   /** Physical Lambda function name (e.g. `psd-hyperframes-render-dev`). */
   functionName: string
-  /** Workspace bucket the rendered MP4 is written to (public-images/ prefix). */
+  /** Workspace bucket the rendered MP4 is staged in (private agent-renders/ prefix). */
   workspaceBucket: s3.IBucket
   region: string
   account: string
@@ -69,9 +71,12 @@ export class HyperframesRenderFunction extends Construct {
       reservedConcurrency = 5,
     } = props
 
-    // Least-privilege S3 write, scoped to the public-images/ prefix only — the
-    // render service never reads, lists, or deletes, and never touches other
-    // prefixes. The specific bucket ARN + prefix IS the boundary (a dev function
+    // Least-privilege S3 access, scoped to the PRIVATE agent-renders/ staging
+    // prefix only (#2034). PutObject writes the MP4; GetObject exists solely so
+    // the presigned GET this role mints for the agent skill is valid — the
+    // function itself never reads. No list or delete (the
+    // `expire-agent-renders` lifecycle rule cleans up), and no other prefix,
+    // public-images/ included. The specific bucket ARN + prefix IS the boundary (a dev function
     // is handed the dev bucket), so a dev role cannot reach a prod bucket.
     //
     // Deliberately NO aws:ResourceTag/Environment|ManagedBy condition: an
@@ -86,10 +91,10 @@ export class HyperframesRenderFunction extends Construct {
     const s3WritePolicy = new iam.PolicyDocument({
       statements: [
         new iam.PolicyStatement({
-          sid: "WriteRenderedVideoToPublicImages",
+          sid: "StageRenderedVideoInAgentRenders",
           effect: iam.Effect.ALLOW,
-          actions: ["s3:PutObject"],
-          resources: [`${workspaceBucket.bucketArn}/public-images/*`],
+          actions: ["s3:PutObject", "s3:GetObject"],
+          resources: [`${workspaceBucket.bucketArn}/agent-renders/*`],
         }),
       ],
     })

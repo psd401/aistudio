@@ -132,5 +132,78 @@ class ArtifactPublisherBoundsTests(unittest.TestCase):
         })
 
 
+class DriveDeliveryTests(unittest.TestCase):
+    """#2034: the private default. Same staged upload, Drive ending."""
+
+    CHECKSUM = "MV1Cm3cUzttq0ErDEkAUUldpJjBFfzyIJTxb7OrHYCc="
+
+    def _broker(self, calls, delivered):
+        def broker(payload, timeout=20):
+            calls.append((payload, timeout))
+            if payload["operation"] == "drive-upload":
+                return {
+                    "uploadUrl": "https://upload.invalid/x",
+                    "reservationId": "reservation",
+                    "requiredHeaders": {
+                        "Content-Length": "4",
+                        "Content-Type": "audio/mpeg",
+                        "x-amz-checksum-sha256": self.CHECKSUM,
+                    },
+                }
+            return delivered
+        return broker
+
+    def test_stages_as_drive_upload_and_delivers_with_the_long_timeout(self):
+        calls = []
+        delivered = {
+            "fileId": "file-1",
+            "webViewLink": "https://drive.invalid/file-1",
+            "sharedWith": "owner@psd401.net",
+            "fileName": "Brief.mp3",
+        }
+        with mock.patch.object(
+            artifact_publisher, "_broker", side_effect=self._broker(calls, delivered)
+        ), mock.patch.object(
+            artifact_publisher.urllib.request, "urlopen", return_value=_Response()
+        ):
+            result = artifact_publisher.deliver_to_drive(
+                b"%PDF", "Brief.mp3", "audio/mpeg"
+            )
+        self.assertEqual(result["webViewLink"], "https://drive.invalid/file-1")
+        self.assertEqual(calls[0][0]["operation"], "drive-upload")
+        self.assertEqual(calls[0][0]["path"], "Brief.mp3")
+        self.assertEqual(
+            calls[1],
+            (
+                {"operation": "deliver-to-drive", "reservationId": "reservation"},
+                artifact_publisher.DRIVE_DELIVER_TIMEOUT_SECONDS,
+            ),
+        )
+        # Never the public path.
+        self.assertNotIn("publish", [c[0]["operation"] for c in calls])
+
+    def test_an_unverified_delivery_raises(self):
+        with mock.patch.object(
+            artifact_publisher,
+            "_broker",
+            side_effect=self._broker([], {"fileId": "file-1"}),
+        ), mock.patch.object(
+            artifact_publisher.urllib.request, "urlopen", return_value=_Response()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "verification"):
+                artifact_publisher.deliver_to_drive(
+                    b"%PDF", "Brief.mp3", "audio/mpeg"
+                )
+
+    def test_a_path_is_not_a_file_name(self):
+        with self.assertRaises(ValueError):
+            artifact_publisher.deliver_to_drive(b"x", "a/b.mp3", "audio/mpeg")
+
+    def test_public_needs_the_confirmation_flag(self):
+        self.assertTrue(artifact_publisher.public_needs_confirmation("public", False))
+        self.assertFalse(artifact_publisher.public_needs_confirmation("public", True))
+        self.assertFalse(artifact_publisher.public_needs_confirmation("drive", False))
+
+
 if __name__ == "__main__":
     unittest.main()

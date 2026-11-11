@@ -19,7 +19,7 @@ const zlib = require('node:zlib');
 const { createHash } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 
-const { chooseEngine, buildChartJsConfig } = require('./run.js');
+const { chooseEngine, buildChartJsConfig, privateDeliveryReason } = require('./run.js');
 const {
   renderChartPng,
   categoryLabelPlan,
@@ -250,7 +250,7 @@ async function withStubBrokerExclusive(run, { failPublish = false } = {}) {
       const payload = JSON.parse(body.toString('utf8'));
       brokerCalls.push({ url: req.url, payload });
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (payload.operation === 'publish') {
+      if (payload.operation === 'publish' || payload.operation === 'drive-upload') {
         // Echo the contract publishArtifact insists on seeing back; any
         // drift here and it throws "incomplete upload" instead of uploading.
         res.end(JSON.stringify({
@@ -261,6 +261,15 @@ async function withStubBrokerExclusive(run, { failPublish = false } = {}) {
             'Content-Type': payload.contentType,
             'x-amz-checksum-sha256': payload.checksumSha256,
           },
+        }));
+        return;
+      }
+      if (payload.operation === 'deliver-to-drive') {
+        res.end(JSON.stringify({
+          fileId: 'drive-file-1',
+          webViewLink: 'https://drive.example.invalid/file/d/drive-file-1/view',
+          fileName: 'Chart.png',
+          sharedWith: 'owner@example.invalid',
         }));
         return;
       }
@@ -357,10 +366,11 @@ test('the default engine renders, uploads and emits a card without naming an eng
   assert.strictEqual(brokerCalls.at(-1).payload.operation, 'complete-upload');
 });
 
-test('issue #1596: --sensitive student data charts instead of exiting 3', async () => {
-  // The exact scenario from the issue — an achievement gap by race/ethnicity,
-  // flagged sensitive. This used to exit 3 with no chart at all.
-  const { result, uploads } = await withStubBroker(async ctx => ({
+test('issue #1596 + #2034: --sensitive data still charts, delivered privately to Drive', async () => {
+  // The exact scenario from #1596 — an achievement gap by race/ethnicity,
+  // flagged sensitive. It used to exit 3 with no chart; then it charted onto a
+  // public link. Now it charts, privately: a Drive file, no public card.
+  const { result, uploads, brokerCalls } = await withStubBroker(async ctx => ({
     result: await runCliAsync([
       '--sensitive',
       '--type', 'bar',
@@ -379,10 +389,43 @@ test('issue #1596: --sensitive student data charts instead of exiting 3', async 
 
   assert.strictEqual(result.status, 0, result.stderr);
   assert.match(result.stderr, /engine=local/);
+  assert.match(result.stderr, /delivered privately to Drive \(--sensitive\)/);
   assert.doesNotMatch(result.stdout, /quickchart/);
-  assert.doesNotMatch(result.stderr, /quickchart/);
+  assert.strictEqual(
+    result.stdout.split('\n')[0],
+    'https://drive.example.invalid/file/d/drive-file-1/view',
+  );
+  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/, 'a private chart must not become a card');
+  assert.doesNotMatch(result.stdout, /workspace\.example\.invalid/);
   assert.strictEqual(uploads.length, 1, 'the chart was never uploaded');
   assert.deepStrictEqual(uploads[0].bytes.subarray(0, 8), PNG_SIGNATURE);
+  const operations = brokerCalls.map(c => c.payload.operation);
+  assert.deepStrictEqual(operations, ['drive-upload', 'deliver-to-drive']);
+  assert.ok(!operations.includes('publish'), 'never the public path');
+  assert.strictEqual(brokerCalls[0].payload.path, 'SBA ELA proficiency by race ethnicity.png');
+});
+
+test('#2034: a chart whose data matches a personal-data pattern goes private without --sensitive', async () => {
+  const { result, brokerCalls } = await withStubBroker(async ctx => ({
+    result: await runCliAsync([
+      '--type', 'bar',
+      '--data-json', '[{"label":"Student 1000123","value":3}]',
+    ]),
+    ...ctx,
+  }));
+  assert.strictEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /delivered privately to Drive \(data matched the psd-student-id pattern\)/);
+  assert.doesNotMatch(result.stdout, /PSD_AGENT_RICH_V1/);
+  assert.deepStrictEqual(
+    brokerCalls.map(c => c.payload.operation),
+    ['drive-upload', 'deliver-to-drive'],
+  );
+});
+
+test('#2034: privateDeliveryReason names --sensitive, a pattern, or nothing', () => {
+  assert.strictEqual(privateDeliveryReason({ '--sensitive': true }, 'apples 5'), '--sensitive');
+  assert.match(String(privateDeliveryReason({}, 'student 2123456 enrolled')), /psd-student-id/);
+  assert.strictEqual(privateDeliveryReason({}, 'Asian 71.4, White 66.3'), null);
 });
 
 // ---------------------------------------------------------------------------

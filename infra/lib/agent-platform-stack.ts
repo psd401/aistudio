@@ -432,13 +432,18 @@ export class AgentPlatformStack extends cdk.Stack {
       // BlockPublicAcls + IgnorePublicAcls keep ACL-driven public access
       // forbidden. BlockPublicPolicy and RestrictPublicBuckets are FALSE so
       // the resource policy below can grant unauthenticated GetObject on
-      // the single `public-images/*` prefix used by the psd-image-gen
-      // skill. Without this carve-out the skill returns presigned URLs
-      // signed with AgentCore's STS session credentials; those URLs embed
-      // an `X-Amz-Security-Token` query parameter that intermittently
-      // fails with `InvalidToken` when fetched through chat clients
-      // (observed in PR #934 dev rollout 2026-05-03). Switching to a
-      // public-by-link prefix eliminates the failure mode entirely.
+      // the single `public-images/*` prefix.
+      //
+      // Since #2034 that prefix is OPT-IN ONLY: every agent output (audio,
+      // images, video, files, morning-brief podcasts) is delivered privately
+      // to the requester's Drive by default, and a skill writes here only on
+      // `--to public --public-confirmed`, after the user said yes to a link
+      // anyone can open. No default path writes to it. The carve-out itself
+      // dates from #934, where presigned URLs signed with AgentCore's STS
+      // session credentials failed with `InvalidToken` in chat clients — a
+      // transport workaround, never a privacy decision. Closing the prefix
+      // entirely (BlockPublicPolicy/RestrictPublicBuckets = true and no
+      // statement) is the next step once no opt-in public use remains.
       blockPublicAccess: new s3.BlockPublicAccess({
         blockPublicAcls: true,
         ignorePublicAcls: true,
@@ -468,6 +473,17 @@ export class AgentPlatformStack extends cdk.Stack {
           prefix: 'public-images/',
           expiration: cdk.Duration.days(30),
           noncurrentVersionExpiration: cdk.Duration.days(7),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
+        {
+          // PRIVATE staging for rendered HyperFrames MP4s (#2034). The render
+          // Lambda writes here and returns a 15-minute presigned GET; the
+          // agent skill moves the bytes to Drive straight away. Nothing needs
+          // to outlive the turn, so a day is generous.
+          id: 'expire-agent-renders',
+          prefix: 'agent-renders/',
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
         },
         {
@@ -518,13 +534,15 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(resources.workspaceBucket).add('Environment', environment);
     cdk.Tags.of(resources.workspaceBucket).add('ManagedBy', 'cdk');
 
-    // Public-read carve-out for psd-image-gen output. Skill writes generated
-    // PNGs to `public-images/<email>/<uuid>.png` and returns an unsigned
-    // HTTPS URL. The UUID makes the path unguessable; anyone who receives
-    // the URL can fetch — same security model as Google Drive "anyone with
-    // the link" sharing. The skill, IAM grants, and this policy must all
-    // agree on the `public-images/` prefix. Other prefixes in the bucket
-    // remain private (no other allow-public statements exist).
+    // Public-read carve-out for EXPLICIT, user-confirmed public links only
+    // (#2034). The storage broker's `publish` operation is the one writer, and
+    // the skills reach it only with `--to public --public-confirmed`; every
+    // default delivery path is private (Drive, or a private Atrium artifact).
+    // Anyone holding a URL here can fetch it with no sign-in, and the
+    // `expire-public-artifacts` rule deletes it after 30 days. Other prefixes
+    // in the bucket remain private (no other allow-public statements exist).
+    // The chat-chart skill still publishes Chat-card chart PNGs here by
+    // default because Google Chat fetches card images anonymously — see #2034.
     resources.workspaceBucket.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'PublicReadOnPublicImagesPrefix',
       effect: iam.Effect.ALLOW,
@@ -538,8 +556,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     // Container-image Lambda bundling headless Chromium + FFmpeg + the upstream
     // `hyperframes` CLI. The psd-hyperframes agent skill invokes it synchronously
-    // to turn an HTML/CSS/JS composition into an MP4, delivered via the same
-    // public-images/ prefix as psd-image-gen / psd-tts. The native render stack
+    // to turn an HTML/CSS/JS composition into an MP4, staged under the PRIVATE
+    // `agent-renders/` prefix and moved to the requester's Drive by the skill
+    // (#2034). The native render stack
     // lives here, NEVER in the agent image (AgentCore's overlay-mount
     // snapshotter cannot carry Chromium/FFmpeg). The InvokeFunction grant +
     // HYPERFRAMES_RENDER_FUNCTION runtime env var are wired into the AgentCore
@@ -554,9 +573,9 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // agent-media (#1738): HTML-to-PDF, ffmpeg transcode/probe and Transcribe.
     // A SEPARATE function from the renderer above even though both carry
-    // Chromium and FFmpeg — the renderer's role may write only to
-    // public-images/, while this one reads and writes owners' PRIVATE workspace
-    // prefixes and is explicitly denied public-images/. Merging them would
+    // Chromium and FFmpeg — the renderer's role may touch only the
+    // `agent-renders/` staging prefix, while this one reads and writes owners'
+    // PRIVATE workspace prefixes and is explicitly denied public-images/. Merging them would
     // widen a production role to save an image.
     resources.agentMediaFunction = new AgentMediaFunction(this, 'AgentMedia', {
       environment,

@@ -24,14 +24,23 @@
  * obvious cases (emails, US phone numbers, SSNs, PSD-format student IDs)
  * and fail safe by refusing to hand the data to QuickChart. The agent's
  * `--sensitive` flag is the load-bearing knob; the regex is backup, not
- * policy enforcement. Neither is needed for the default path: `auto`
- * renders locally regardless of what the data contains.
+ * policy enforcement.
+ *
+ * WHERE THE PNG GOES (#2034). An inline Chat card needs an image URL Google
+ * can fetch anonymously, so a card chart has to sit on the public 30-day
+ * `public-images/` prefix. That is the one accepted public-by-default
+ * exception, and ONLY for non-sensitive aggregate charts. A chart flagged
+ * `--sensitive`, or whose chart text matches a student-ID / contact / SSN
+ * pattern, is delivered PRIVATELY instead: a Drive file shared with the
+ * requester alone, returned as a link, with no card.
  */
 
 'use strict';
 
 const { randomUUID } = require('node:crypto');
 const { publishArtifact } = require('../_shared/artifact-publisher');
+const { deliverFileToDrive } = require('../_shared/drive-deliverer');
+const { driveFileName } = require('../_shared/delivery-choice');
 const { firstPersonalDataKind } = require('../_shared/personal-data');
 const { renderChartPng } = require('./render_local');
 
@@ -313,21 +322,47 @@ function renderQuickChart(config) {
   return `https://quickchart.io/chart?c=${encoded}&format=png&backgroundColor=white`;
 }
 
-async function renderLocal(config) {
-  // `--user` is accepted for call-site compatibility and provenance only
-  // (main() validates it): the broker derives the storage path from the
-  // calling agent's identity, so the email is not used to build a key.
+/**
+ * Why this chart must be delivered privately, or null when it may render
+ * inline (#2034): `--sensitive`, or a personal-data pattern in the chart text
+ * (title, labels, series names — the same serialised config the QuickChart
+ * gate reads).
+ */
+function privateDeliveryReason(args, configText) {
+  if (args['--sensitive']) return '--sensitive';
+  const hit = detectPII(configText);
+  return hit ? `data matched the ${hit} pattern` : null;
+}
+
+function renderLocalPng(config) {
   // Rasterised in-process — no subprocess, no temp file, no dependency.
-  let bytes;
   try {
-    bytes = renderChartPng(config);
+    return renderChartPng(config);
   } catch (err) {
     // Thrown, not `fail()`ed: this is the failure the reporting path below was
     // added for, and exiting here would skip it.
     throw new ChartFailure(`local renderer failed: ${err && err.message ? err.message : err}`);
   }
+}
+
+async function renderLocal(config) {
+  // `--user` is accepted for call-site compatibility and provenance only
+  // (main() validates it): the broker derives the storage path from the
+  // calling agent's identity, so the email is not used to build a key.
+  const bytes = renderLocalPng(config);
   const published = await publishArtifact(bytes, '.png', 'image/png');
   return published.url;
+}
+
+/** Sensitive chart: a private Drive file shared with the requester only. */
+async function deliverLocalPrivately(config, title) {
+  const bytes = renderLocalPng(config);
+  const delivered = await deliverFileToDrive(
+    bytes,
+    driveFileName(title, '.png', 'Chart'),
+    'image/png',
+  );
+  return delivered.webViewLink;
 }
 
 function emitEnvelope(imageUrl, title, textFallback, type) {
@@ -398,6 +433,23 @@ async function main() {
     refuse(reason);
   }
   process.stderr.write(`chat-chart: engine=${engine} (${reason})\n`);
+
+  // QuickChart already refused anything sensitive above, so only the local
+  // engine can reach the private branch.
+  const privateReason =
+    engine === 'quickchart' ? null : privateDeliveryReason(args, JSON.stringify(config));
+  if (privateReason) {
+    const driveUrl = await deliverLocalPrivately(config, args['--title']);
+    process.stderr.write(`chat-chart: delivered privately to Drive (${privateReason})\n`);
+    // No card: an inline card image must be publicly fetchable, and this one
+    // must not be. The agent pastes the bare Drive link instead.
+    process.stdout.write(`${driveUrl}\n`);
+    process.stdout.write(
+      'PRIVATE CHART: this chart is a Drive file shared with the requester only. ' +
+        'Paste the link above bare on its own line; no inline card was made.\n',
+    );
+    return;
+  }
 
   let imageUrl;
   if (engine === 'quickchart') {
@@ -486,4 +538,10 @@ if (require.main === module) {
 
 // Exported for unit tests (run.test.js). Requiring this module does not run
 // main() thanks to the require.main guard above.
-module.exports = { chooseEngine, detectPII, buildChartJsConfig, renderQuickChart };
+module.exports = {
+  chooseEngine,
+  detectPII,
+  buildChartJsConfig,
+  renderQuickChart,
+  privateDeliveryReason,
+};

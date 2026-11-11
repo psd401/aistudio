@@ -27,6 +27,7 @@ const SKILLS_DIR = join(process.cwd(), "infra/agent-image/skills")
 const PUBLISH_JS_PATH = join(SKILLS_DIR, "psd-publish-file/publish.js")
 const PUBLISH_SKILL_PATH = join(SKILLS_DIR, "psd-publish-file/SKILL.md")
 const DELIVERER_PATH = join(SKILLS_DIR, "_shared/drive-deliverer.js")
+const DELIVERY_CHOICE_PATH = join(SKILLS_DIR, "_shared/delivery-choice.js")
 const PRINT_PDF_SKILL_PATH = join(SKILLS_DIR, "psd-print-pdf/SKILL.md")
 const HTML_ARTIFACT_SKILL_PATH = join(SKILLS_DIR, "psd-html-artifact/SKILL.md")
 const WORKSPACE_SKILL_PATH = join(SKILLS_DIR, "psd-workspace/SKILL.md")
@@ -40,6 +41,13 @@ const pointerSkills: Array<[string, string]> = [
   ["psd-workspace", readFileSync(WORKSPACE_SKILL_PATH, "utf8")],
   ["psd-image-gen", readFileSync(IMAGE_GEN_SKILL_PATH, "utf8")],
 ]
+
+const { resolveDelivery } = require(DELIVERY_CHOICE_PATH) as {
+  resolveDelivery: (
+    args: Record<string, string | boolean | undefined>,
+    options?: { allowed?: string[] },
+  ) => string
+}
 
 const { DRIVE_DELIVERABLE_TYPES, MAX_DRIVE_DELIVERY_BYTES } = require(
   DELIVERER_PATH,
@@ -68,8 +76,18 @@ describe("psd-publish-file Drive delivery", () => {
   it("offers a Drive delivery mode and defaults to it", () => {
     expect(publishJs).toContain("--to drive")
     // Drive when `--to` is absent: the private path is the default delivery
-    // path, not an opt-in.
-    expect(publishJs).toMatch(/if \(requested === undefined\) return 'drive'/)
+    // path, not an opt-in. The default now lives in the shared
+    // delivery-choice.js every media skill uses (#2034), with drive first.
+    expect(publishJs).toContain("allowed: ['drive', 'public']")
+    expect(resolveDelivery({}, { allowed: ["drive", "public"] })).toBe("drive")
+  })
+
+  it("will not make a public link without the user-confirmation flag (#2034)", () => {
+    expect(() => resolveDelivery({ to: "public" })).toThrow(/user's explicit yes/)
+    expect(resolveDelivery({ to: "public", public_confirmed: true })).toBe(
+      "public",
+    )
+    expect(publishSkill).toContain("--to public --public-confirmed")
   })
 
   it("no longer tells the agent to attach the file to the reply", () => {

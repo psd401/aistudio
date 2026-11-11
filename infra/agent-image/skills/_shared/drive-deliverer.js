@@ -36,6 +36,8 @@ const DRIVE_DELIVERABLE_TYPES = new Map([
   ['.jpeg', 'image/jpeg'],
   ['.jpg', 'image/jpeg'],
   ['.md', 'text/markdown'],
+  ['.mp3', 'audio/mpeg'],
+  ['.mp4', 'video/mp4'],
   ['.pdf', 'application/pdf'],
   ['.png', 'image/png'],
   ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],

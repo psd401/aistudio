@@ -355,6 +355,10 @@ jobs:
           # the same bytes — so a drift here is a privacy regression, not a
           # test-only one.
           infra/agent-image/skills/_shared/personal-data.test.js
+          # #2034: every agent output is private by default; a public link
+          # needs --to public AND --public-confirmed. Shared by psd-publish-file,
+          # psd-image-gen and psd-hyperframes.
+          infra/agent-image/skills/_shared/delivery-choice.test.js
           infra/agent-image/skills/chat-chart/run.test.js
           infra/agent-image/skills/psd-aistudio/common.test.js
           infra/agent-image/skills/psd-aistudio/run.test.js

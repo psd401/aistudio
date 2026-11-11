@@ -3,7 +3,10 @@ skill: psd-hyperframes
 level: L2
 workspace: mutating
 suite: capability
-prompt: "Create a one-second synthetic motion title card reading \"EVAL 1426\" with a plain dark background and no external assets. Render it with psd-hyperframes and return the bare MP4 URL. This is clearly marked test data."
+prompt: "Create a one-second synthetic motion title card reading \"EVAL 1426\" with a plain dark background and no external assets. Render it with psd-hyperframes and return the bare link. This is clearly marked test data."
 trials: 3
 graders:
-  - {"type":"output_match","pattern":"https://[^\\s]+\\.mp4(?:\\?[^\\s]+)?"}
+  # #2034: private by default, so the link is a Drive file shared with the
+  # requester, never an S3 object.
+  - {"type":"output_match","pattern":"https://drive\\.google\\.com/file/d/[^\\s`)\\]/]+/view"}
+  - {"type":"output_match","pattern":"(?i)^(?![\\s\\S]*public-images)[\\s\\S]*$"}

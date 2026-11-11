@@ -14,34 +14,59 @@ from pathlib import Path
 from typing import Tuple
 
 
-def _broker(payload: dict) -> dict:
+def _broker(payload: dict, timeout: int = 20) -> dict:
     request = urllib.request.Request(
         "http://127.0.0.1:18791/agent-broker/api/agent/workspace-storage",
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         result = json.loads(response.read())
     if not isinstance(result, dict):
         raise RuntimeError("artifact broker returned invalid JSON")
     return result
 
 
-def publish_artifact(
-    body: bytes,
-    extension: str,
-    content_type: str,
-) -> Tuple[str, str]:
-    if not re.fullmatch(r"\.[a-z0-9]{1,8}", extension):
-        raise ValueError("invalid artifact extension")
+# A Drive delivery does two Google round trips (resumable upload + share)
+# behind the broker call. Mirrors DELIVER_TIMEOUT_MS in
+# skills/_shared/drive-deliverer.js.
+DRIVE_DELIVER_TIMEOUT_SECONDS = 240
+
+# Mirrors skills/_shared/delivery-choice.js (#2034): every agent output is
+# private to the requester by default; a public link needs `--to public` AND
+# this flag, which records that the user was asked and said yes.
+PUBLIC_CONFIRMED_FLAG = "--public-confirmed"
+PUBLIC_NEEDS_CONFIRMATION_MESSAGE = (
+    "Public links are opt-in and need the user's explicit yes. Nothing was "
+    "uploaded. Deliver privately instead (omit --to public: the file goes to "
+    "your Drive, shared with the requester only). Use a public link ONLY if the "
+    "user asked for one: ask them first, in plain words, \"This will be a public "
+    "link — anyone who gets it can open it without signing in, for 30 days. "
+    "OK?\" If, and only if, they say yes, run the same command again with "
+    "--to public " + PUBLIC_CONFIRMED_FLAG + "."
+)
+
+
+def public_needs_confirmation(to: str, public_confirmed: bool) -> bool:
+    """True when a public link was asked for without the confirmation flag."""
+    return to == "public" and not public_confirmed
+
+
+def _stage_upload(operation: str, path: str, body: bytes, content_type: str) -> str:
+    """Stage bytes under a fresh broker reservation and return its id.
+
+    The Python twin of skills/_shared/staged-upload.js: ask the broker for a
+    signed PUT, prove the signed contract came back intact, send the bytes
+    straight to S3.
+    """
     checksum_sha256 = base64.b64encode(
         hashlib.sha256(body).digest()
     ).decode("ascii")
     prepared = _broker(
         {
-            "operation": "publish",
-            "path": f"{uuid.uuid4()}{extension}",
+            "operation": operation,
+            "path": path,
             "contentType": content_type,
             "contentLength": len(body),
             "idempotencyKey": str(uuid.uuid4()),
@@ -73,6 +98,25 @@ def publish_artifact(
     )
     with urllib.request.urlopen(request, timeout=120):
         pass
+    return reservation_id
+
+
+def publish_artifact(
+    body: bytes,
+    extension: str,
+    content_type: str,
+) -> Tuple[str, str]:
+    """Publish bytes as an unsigned, PUBLIC-BY-LINK object (opt-in only).
+
+    Callers must only reach this after the user confirmed a public link
+    (`--to public --public-confirmed`, #2034). The default for every agent
+    output is `deliver_to_drive`.
+    """
+    if not re.fullmatch(r"\.[a-z0-9]{1,8}", extension):
+        raise ValueError("invalid artifact extension")
+    reservation_id = _stage_upload(
+        "publish", f"{uuid.uuid4()}{extension}", body, content_type
+    )
     completed = _broker({
         "operation": "complete-upload",
         "reservationId": reservation_id,
@@ -82,6 +126,30 @@ def publish_artifact(
     if not isinstance(public_url, str) or not isinstance(key, str):
         raise RuntimeError("artifact broker did not verify the upload")
     return public_url, key
+
+
+def deliver_to_drive(body: bytes, file_name: str, content_type: str) -> dict:
+    """Deliver bytes PRIVATELY: a file in the agent account's Drive, shared
+    with the caller alone as a writer (#1885, #2034).
+
+    The Python twin of skills/_shared/drive-deliverer.js. Nothing becomes
+    public-by-link and Drive files do not expire. Returns the broker's
+    verified result: `fileId`, `webViewLink`, `sharedWith`, `fileName`.
+    """
+    if not isinstance(file_name, str) or "/" in file_name or not file_name.strip():
+        raise ValueError("invalid Drive file name")
+    reservation_id = _stage_upload("drive-upload", file_name, body, content_type)
+    delivered = _broker(
+        {"operation": "deliver-to-drive", "reservationId": reservation_id},
+        timeout=DRIVE_DELIVER_TIMEOUT_SECONDS,
+    )
+    if (
+        not isinstance(delivered.get("fileId"), str)
+        or not isinstance(delivered.get("webViewLink"), str)
+        or not isinstance(delivered.get("sharedWith"), str)
+    ):
+        raise RuntimeError("Drive delivery verification failed")
+    return delivered
 
 
 def download_public_artifact(

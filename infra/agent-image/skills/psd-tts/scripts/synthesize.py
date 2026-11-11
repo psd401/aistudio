@@ -2,9 +2,18 @@
 """
 synthesize.py — psd-tts.synthesize
 
-Convert text to a shareable MP3 with Amazon Polly, upload it to the workspace S3
-bucket under the public `public-images/` prefix, and return an unsigned HTTPS
-URL (same delivery model as psd-image-gen / psd-html-artifact).
+Convert text to an MP3 with Amazon Polly and deliver it PRIVATELY: the file is
+created in the agent account's Drive and shared with the requester alone
+(#2034). Nothing is public by default, whatever the narration says.
+
+Three destinations (`--to`):
+    drive   (default) private Drive file, shared with the caller only.
+    file    write the MP3 to a local path (`--out`) and upload nothing — for a
+            soundtrack another skill consumes (psd-hyperframes --audio-file).
+    public  unsigned public-by-link URL, deleted after 30 days. Opt-in only:
+            refused unless `--public-confirmed` is also passed, which records
+            that the user was asked and said yes. The narration personal-data
+            check (#1886) still runs on this path as a backstop.
 
 The root-owned loopback relay calls Polly with the AgentCore execution role's
 SigV4 credential chain. OpenClaw intentionally strips credential variables from
@@ -14,6 +23,9 @@ workspace broker; the model role has no S3 or Secrets Manager access.
 
 Usage (text from --text, --file, or stdin):
     python3 synthesize.py --user name@psd401.net --text "Hello there."
+    python3 synthesize.py --user name@psd401.net --name "Board recap" --text "..."
+    python3 synthesize.py --user name@psd401.net --to file \
+        --out /home/node/.openclaw/work/voiceover.mp3 --text "..."
     python3 synthesize.py --user name@psd401.net --file /home/node/.openclaw/work/briefing.txt \
         --voice Matthew
     printf '%s' "$LONG_TEXT" | python3 synthesize.py --user name@psd401.net
@@ -24,6 +36,7 @@ the MP3 chunks are concatenated.
 """
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -43,6 +56,10 @@ POLLY_RELAY_URL = "http://127.0.0.1:18791/aws-skill/polly/synthesize"
 MAX_RELAY_AUDIO_BYTES = 16 * 1024 * 1024
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+# The broker's SAFE_PUBLIC_ARTIFACT_NAME rule for a Drive delivery file name.
+_UNSAFE_NAME_CHARS_RE = re.compile(r"[^A-Za-z0-9._@+= -]+")
+MAX_NAME_CHARS = 120
+DESTINATIONS = ("drive", "file", "public")
 
 
 def _fail(message, code="error"):
@@ -145,18 +162,63 @@ def _add_image_modules_to_path():
 
 
 def upload_mp3(audio, user_email, region):
+    """Publish the MP3 PUBLIC-BY-LINK. Opt-in only (`--to public --public-confirmed`)."""
     _add_image_modules_to_path()
     from artifact_publisher import publish_artifact
     _ = (user_email, region)
     return publish_artifact(audio, ".mp3", "audio/mpeg")
 
 
+def deliver_mp3_to_drive(audio, file_name):
+    """The default: a private Drive file shared with the caller alone (#2034)."""
+    _add_image_modules_to_path()
+    from artifact_publisher import deliver_to_drive
+    return deliver_to_drive(audio, file_name, "audio/mpeg")
+
+
+def drive_file_name(name, now=None):
+    """
+    The Drive file name: `--name` made safe for the broker, or a dated default.
+
+    The broker accepts letters, digits, space and `._@+=-` only, so anything
+    else is collapsed to a space rather than refused — a title like
+    "Board recap: Nov 11" should still deliver.
+    """
+    base = _UNSAFE_NAME_CHARS_RE.sub(" ", name or "").strip(" .")
+    base = re.sub(r"\s+", " ", base)[:MAX_NAME_CHARS].strip(" .")
+    if base.lower().endswith(".mp3"):
+        base = base[:-4].strip(" .")
+    if not base:
+        stamp = (now or dt.datetime.now()).strftime("%Y-%m-%d %H%M")
+        base = f"Narration {stamp}"
+    return f"{base}.mp3"
+
+
+def write_mp3_file(audio, out_path):
+    """`--to file`: write the MP3 locally and upload nothing."""
+    path = os.path.abspath(os.path.expanduser(out_path))
+    if not path.lower().endswith(".mp3"):
+        raise ValueError("--out must end in .mp3")
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        raise ValueError(f"--out directory does not exist: {parent}")
+    with open(path, "wb") as fh:
+        fh.write(audio)
+    return path
+
+
 def narration_personal_data(text):
     """
     The kinds of personal data in the narration, or [] — the #1886 gate.
 
-    WHY THIS IS STRICTER THAN THE PUBLIC-FILE GATE. Every MP3 this skill
-    produces is uploaded public-by-link (deleted after 30 days by the
+    ONLY ON THE PUBLIC PATH (#2034). Private delivery (the default) is not
+    content-checked: a private recording may say anything its requester could
+    read, and visibility is never decided from a content scan. This check is a
+    backstop for the one case where a user deliberately widens a recording to
+    a public link.
+
+    WHY THIS IS STRICTER THAN THE PUBLIC-FILE GATE. A public MP3 is
+    unsigned (deleted after 30 days by the
     `expire-public-artifacts` lifecycle rule), and once synthesised the bytes
     are opaque audio that no later text check can read — the broker's
     public-link scan does not read audio. Seven morning-brief podcasts were
@@ -215,18 +277,44 @@ def resolve_text(args):
     return ""
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Text to speech via Amazon Polly, delivered as a shareable MP3 URL.")
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Text to speech via Amazon Polly, delivered privately to your Drive by default."
+    )
     parser.add_argument("--user", required=True, help="Caller email (from the [caller: ...] header)")
     parser.add_argument("--text", help="Text to synthesize")
     parser.add_argument("--file", help="Path to a text file to synthesize")
     parser.add_argument("--voice", default=DEFAULT_VOICE, help=f"Polly voice id (default: {DEFAULT_VOICE})")
     parser.add_argument("--engine", default=DEFAULT_ENGINE, choices=sorted(VALID_ENGINES),
                         help=f"Polly engine (default: {DEFAULT_ENGINE})")
-    args = parser.parse_args()
+    parser.add_argument("--to", default="drive", choices=DESTINATIONS,
+                        help="drive (default, private to you) | file (local --out path) | public (opt-in)")
+    parser.add_argument("--public-confirmed", action="store_true",
+                        help="Required with --to public: the user was asked and said yes")
+    parser.add_argument("--name", help="Drive file name (default: 'Narration <date time>')")
+    parser.add_argument("--out", help="Local .mp3 path, required with --to file")
+    return parser.parse_args(argv)
+
+
+def main():
+    args = _parse_args()
 
     if not valid_email(args.user):
         _fail("--user is required and must be a valid email", "bad_args")
+
+    # Before any text is read or any Polly call is paid for: a public link is
+    # never the result of a default or a single flag (#2034).
+    _add_image_modules_to_path()
+    from artifact_publisher import (
+        PUBLIC_NEEDS_CONFIRMATION_MESSAGE,
+        public_needs_confirmation,
+    )
+    if public_needs_confirmation(args.to, args.public_confirmed):
+        _fail(PUBLIC_NEEDS_CONFIRMATION_MESSAGE, "public_needs_confirmation")
+    if args.to == "file" and not args.out:
+        _fail("--to file needs --out <path.mp3>", "bad_args")
+    if args.to != "file" and args.out:
+        _fail("--out is only used with --to file", "bad_args")
 
     text = resolve_text(args)
     if not text or not text.strip():
@@ -234,25 +322,26 @@ def main():
     if len(text) > MAX_TEXT_CHARS:
         _fail(f"text is {len(text)} chars; maximum is {MAX_TEXT_CHARS}", "too_large")
 
-    # The #1886 gate, BEFORE synthesis: nothing is sent to Polly and nothing is
-    # uploaded. The audio would be public by link, and unreadable to any check.
-    try:
-        refused_kinds = narration_personal_data(text)
-    except Exception as exc:  # noqa: BLE001 - fails closed, see the docstring
-        _fail(f"personal-data check unavailable: {exc}", "gate_unavailable")
-    if refused_kinds:
-        _record_narration_refusal(args.user, refused_kinds)
-        _fail(
-            "the narration contains personal data ("
-            + ", ".join(refused_kinds)
-            + "). Audio is uploaded public-by-link and cannot be re-checked once "
-            "it is sound, so this is refused rather than "
-            "published. Rewrite the narration without it — say \"call the front "
-            "office\" rather than the number, and refer to people by first name "
-            "or role rather than reading out contact details — then run this "
-            "again. Do not retry the same text.",
-            "personal_data_detected",
-        )
+    # The #1886 gate, PUBLIC PATH ONLY, BEFORE synthesis: nothing is sent to
+    # Polly and nothing is uploaded. A public recording is unreadable to any
+    # later check. Private delivery is not content-gated (#2034).
+    if args.to == "public":
+        try:
+            refused_kinds = narration_personal_data(text)
+        except Exception as exc:  # noqa: BLE001 - fails closed, see the docstring
+            _fail(f"personal-data check unavailable: {exc}", "gate_unavailable")
+        if refused_kinds:
+            _record_narration_refusal(args.user, refused_kinds)
+            _fail(
+                "the narration contains personal data ("
+                + ", ".join(refused_kinds)
+                + ") and was asked for as a PUBLIC link. Nothing was recorded. "
+                "Deliver it privately instead: run the same command without "
+                "--to public (the default puts it in your Drive, shared with "
+                "the requester only). Only if it must be public, rewrite the "
+                "narration without the contact details and student numbers.",
+                "personal_data_detected",
+            )
 
     region = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -264,20 +353,49 @@ def main():
     if not audio:
         _fail("no audio was produced", "upstream_error")
 
-    try:
-        url, key = upload_mp3(audio, args.user, region)
-    except Exception as exc:  # botocore ClientError, network failure, etc.
-        _fail(f"failed to upload audio to S3: {exc}", "upstream_error")
-    _emit({
+    common = {
         "status": "ok",
-        "url": url,
-        "s3Key": key,
         "voice": args.voice,
         "engine": args.engine,
         "characters": len(text),
         "chunks": chunk_count,
         "bytes": len(audio),
-        "sharing": "public-by-link",
+    }
+
+    if args.to == "file":
+        try:
+            path = write_mp3_file(audio, args.out)
+        except (OSError, ValueError) as exc:
+            _fail(f"could not write --out: {exc}", "bad_args")
+        _emit({**common, "path": path, "sharing": "local-file"})
+        return
+
+    if args.to == "public":
+        try:
+            url, key = upload_mp3(audio, args.user, region)
+        except Exception as exc:  # botocore ClientError, network failure, etc.
+            _fail(f"failed to upload audio to S3: {exc}", "upstream_error")
+        _emit({
+            **common,
+            "url": url,
+            "s3Key": key,
+            "sharing": "public-by-link",
+            "expires": "30 days after publication",
+        })
+        return
+
+    try:
+        delivered = deliver_mp3_to_drive(audio, drive_file_name(args.name))
+    except Exception as exc:  # noqa: BLE001 - broker / Drive failure
+        _fail(f"failed to deliver audio to Drive: {exc}", "upstream_error")
+    _emit({
+        **common,
+        "url": delivered["webViewLink"],
+        "driveFileId": delivered["fileId"],
+        "fileName": delivered.get("fileName"),
+        "sharing": "private-shared-with-caller",
+        "sharedWith": delivered["sharedWith"],
+        "expires": "never",
     })
 
 
