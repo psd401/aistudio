@@ -2337,12 +2337,13 @@ paths:
         supplied, an initial version (v1) is snapshotted. Mirrors the MCP
         `create_document` / `create_artifact` tools. Requires `content:create`.
         Collection placement is re-authorized under collection locks in the
-        object write transaction, which also resolves the current default and
-        inherited grants.
+        object write transaction. New content is `private` with no grants in
+        every collection unless `visibility` is passed explicitly: a
+        collection's `defaultVisibilityLevel` and view grants govern who may
+        open the collection, never the content created in it (#2034).
 
         **Public create-as-private (§26.4, issue #1118):** creating directly at
-        `visibility.level: "public"` (explicitly, or via a collection whose default
-        visibility is `public`) without `content:publish_public` is NOT blocked and
+        an explicit `visibility.level: "public"` without `content:publish_public` is NOT blocked and
         does NOT error. The object is created at `visibility.level: "private"`
         (returned in the `201` body) and a durable `visibility_widen` approval
         request is queued for it — an admin approves it at /admin/atrium to make it

@@ -166,8 +166,13 @@ node /opt/psd-skills/psd-html-artifact/deliver.js --user <email> --file /home/no
 ```
 
 Returns JSON: `{ "url": "https://psd401.ai/c/<slug>", "artifactId": N, "slug": "...",
-"title": "...", "bytes": N, "destination": "atrium-intranet", "visibility": "internal",
-"sharing": "psd-internal" }`.
+"title": "...", "bytes": N, "destination": "atrium-intranet", "visibility": "private",
+"sharing": "private-to-requester", "shareInstruction": "..." }`.
+
+**The page is private to the person who asked for it.** The reader URL opens for them
+alone. Never widen it on your own: if they want others to see it, ask exactly who, then
+`psd-atrium set-visibility --id <artifactId> --level group|internal` (with `--grants`
+for a group) and tell them who can now open it.
 
 `--title` is optional — it defaults to the page's `<title>`.
 
@@ -179,10 +184,9 @@ file type (`.png`, `.pdf`, `.csv`, `.docx`, …) goes through `psd-publish-file`
 default delivers it into the agent's Drive shared with the caller alone — use that, not
 `--to public`, for anything carrying personal data.
 
-The command does both Atrium steps for you: `create-artifact --body-format html
---visibility internal`, then `publish --destination intranet`. It never reports a URL for
-a draft that failed to publish, and it refuses outright if the widen to `internal` is
-pending admin approval (the page would be invisible to its audience). Both failures print
+The command does both Atrium steps for you: `create-artifact --body-format html` (private),
+then `publish --destination intranet`. It never reports a URL for a draft that failed to
+publish, and it refuses outright if the create came back pending approval. Both failures print
 the artifact id and the exact retry command — retry the publish step, do not re-run the
 whole skill, or you leave duplicate drafts behind.
 

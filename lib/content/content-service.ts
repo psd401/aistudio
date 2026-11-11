@@ -339,7 +339,7 @@ async function uniqueSlug(
 }
 
 /**
- * Resolve a collection's default visibility level, or null if no collection.
+ * Resolve and authorize a create's collection placement, or null if no collection.
  * Runs OUTSIDE the create transaction so `create()` can run its §26.4
  * public-publish gate check before opening the transaction — mirroring
  * `publishService.publish`, which resolves + gates entirely outside its
@@ -358,10 +358,14 @@ async function collectionDefaultOutsideTx(
   );
 }
 
+/**
+ * The collection facts a create or move needs. Deliberately NOT the collection's
+ * `defaultVisibilityLevel` or view grants: new content is private to its owner in
+ * every collection, and only an explicit visibility change widens it (#2034). A
+ * collection's level governs who may open the collection, never what is saved in it.
+ */
 interface CollectionDefault {
-  level: VisibilityLevel;
   ownerUserId: number | null;
-  grants: VisibilityGrant[];
 }
 
 function collectionDefaultFromAccess(
@@ -382,13 +386,7 @@ function collectionDefaultFromAccess(
       { collectionId }
     );
   }
-  return {
-    level: collection.defaultVisibilityLevel,
-    ownerUserId: collection.ownerUserId,
-    grants: access
-      .effectiveGrants(collectionId, "view")
-      .map(({ kind, value }) => ({ kind, value })),
-  };
+  return { ownerUserId: collection.ownerUserId };
 }
 
 async function collectionDefaultInTx(
@@ -404,15 +402,10 @@ async function collectionDefaultInTx(
   );
 }
 
-function createVisibilityGrants(
-  input: CreateObjectInput,
-  collection: CollectionDefault | null
-): VisibilityGrant[] {
-  if (input.visibility?.grants) return input.visibility.grants;
-  if (input.visibility?.level == null && collection?.level === "group") {
-    return collection.grants;
-  }
-  return [];
+// Only grants the caller passed explicitly; a collection's grants are never
+// copied onto new content (#2034).
+function createVisibilityGrants(input: CreateObjectInput): VisibilityGrant[] {
+  return input.visibility?.grants ?? [];
 }
 
 function assertPrivateCollectionVisibility(
@@ -574,22 +567,22 @@ function resolveCreateVisibilityForCollection(
   publicWidenRequested: boolean;
 } {
   const explicitLevel = input.visibility?.level;
-  const grants = createVisibilityGrants(input, collection);
+  const grants = createVisibilityGrants(input);
 
   // A group object with no grants is invisible to everyone but the owner/admin
   // (equivalent to private without the semantics) — almost always a mistake.
   // The authoritative enforcement is `applyGrantsForLevel` in the create
-  // transaction (against the RESOLVED level, so a collection-defaulted `group`
-  // is covered too); this is a cheap pre-transaction fast-fail for the common
-  // explicit-group case.
+  // transaction; this is a cheap pre-transaction fast-fail.
   if (explicitLevel === "group" && grants.length === 0) {
     throw new ValidationError(
       "group visibility requires at least one grant"
     );
   }
 
-  const visibilityLevel: VisibilityLevel =
-    explicitLevel ?? collection?.level ?? "private";
+  // Private by default in every collection (#2034). The collection's
+  // `defaultVisibilityLevel` is not consulted: content becomes group, internal
+  // or public only when the caller asks for that level explicitly.
+  const visibilityLevel: VisibilityLevel = explicitLevel ?? "private";
 
   assertPrivateCollectionVisibility(collection, visibilityLevel, grants);
 
@@ -599,14 +592,10 @@ function resolveCreateVisibilityForCollection(
   // above only catches the explicit-`group` case.
   visibilityService.assertWritableLevel(visibilityLevel, grants);
 
-  // §26.4 create-as-private (issue #1118 item 2): creating directly at `public`
-  // (explicitly, or via a collection whose admin-set default is `public`)
-  // without authority is NOT blocked. Downgrade to `private` — always the safe
+  // §26.4 create-as-private (issue #1118 item 2): creating directly at an
+  // explicit `public` without authority is NOT blocked. Downgrade to `private` — always the safe
   // direction (no exposure) — and signal the caller to queue a `visibility_widen`
   // once the object exists. `grants` are dropped: a public object carries none.
-  // Covers BOTH an explicit `public` input and a public collection default (e.g.
-  // the seeded `public-site` collection, default_visibility_level = 'public'),
-  // since `visibilityLevel` here is the RESOLVED level.
   if (visibilityLevel === "public" && !mayPublishPublic) {
     return { visibilityLevel: "private", grants: [], publicWidenRequested: true };
   }

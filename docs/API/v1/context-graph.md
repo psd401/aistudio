@@ -1716,15 +1716,16 @@ initial version (v1) is snapshotted. Requires `content:create`.
 | `body` | string | no | markdown (document) or code (artifact). Omit to create no v1. base64 when `codeEncoding: "base64"` |
 | `bodyFormat` | `markdown` \| `html` \| `jsx` | no | — |
 | `codeEncoding` | `base64` | no | Transit encoding for `body` (see below) |
-| `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to the collection default, else `private` |
+| `visibility` | object | no | `{ level, grants? }` (see Visibility below). Defaults to `private` with no grants in every collection (#2034); the collection's default is not applied |
 | `tags` | string[] | no | — |
 | `sourceRef` | object | no | Create-only typed provenance; see Capture provenance below |
 | `dataAccess` | `records` \| `query` \| `none` | no | Artifact sandbox data bridge mode (#1705). Defaults to `records`. Ignored for `kind: "document"` |
 
 Collection placement is re-authorized inside the object write transaction under
-collection locks. The persisted default visibility and inherited grants are the
-locked current values; a concurrent archive or grant revocation cannot commit a
-stale create.
+collection locks; a concurrent archive or grant revocation cannot commit a stale
+create. A collection's `defaultVisibilityLevel` and view grants decide who may
+open the collection. They are never copied onto content created or moved into
+it: new content is private until someone widens it explicitly (#2034).
 
 **Artifact data access (#1705):** `dataAccess` decides which
 `window.AtriumData` operation a sandboxed artifact may use — `records` (the
