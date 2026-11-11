@@ -48,7 +48,7 @@ describe("Atrium private-by-default migration (#2034)", () => {
     expect(body).toMatch(/INSERT INTO content_audit_logs/)
     expect(body).toMatch(/'previousLevel', 'internal'/)
     expect(body).toMatch(/WHERE id IN \(SELECT object_id FROM logged\)/)
-    expect(migration).toContain("-- Rollback:")
+    expect(migration).toContain("-- Rollback (restores only objects that are still `private`")
   })
 
   it("is a single statement the migration runner executes atomically", () => {
