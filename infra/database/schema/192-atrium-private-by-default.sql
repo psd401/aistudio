@@ -23,13 +23,17 @@
 -- `migration` and details.previousLevel, so it is reversible and a re-run is a
 -- no-op (the new audit rows exclude the objects on a second pass).
 --
--- Rollback:
+-- Rollback (restores only objects that are still `private`; an owner's later
+-- change is kept. A later Share-dialog change below `public` leaves no audit
+-- row, so the `visibility_level = 'private'` check is what protects it: an
+-- object an owner re-shared is no longer private and is skipped):
 -- UPDATE content_objects SET visibility_level = 'internal'
--- WHERE id IN (
---   SELECT object_id FROM content_audit_logs
---   WHERE surface = 'migration'
---     AND details->>'migration' = '192-atrium-private-by-default'
--- );
+-- WHERE visibility_level = 'private'
+--   AND id IN (
+--     SELECT object_id FROM content_audit_logs
+--     WHERE surface = 'migration'
+--       AND details->>'migration' = '192-atrium-private-by-default'
+--   );
 -- DELETE FROM content_audit_logs
 -- WHERE surface = 'migration'
 --   AND details->>'migration' = '192-atrium-private-by-default';
