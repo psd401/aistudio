@@ -122,8 +122,9 @@ describe("agent skill scratch directory", () => {
     )
     expect(rules).toContain("is not showing it to the user")
     expect(rules).toContain("is not delivering it")
-    // Urgency must not override the FERPA routing in psd-publish-file.
-    expect(rules).toContain("never switch to\n`--to public` for anything with student or staff data")
+    // Urgency must not override the private default in psd-publish-file:
+    // a public link needs the user's own yes (#2034).
+    expect(rules).toContain("Never switch to\n`--to public` on your own")
     expect(rules).toContain("Do not attach a file with a `MEDIA:` line")
     expect(rules).toMatch(/not viewed by you, not offered, not a `MEDIA:` line/)
   })

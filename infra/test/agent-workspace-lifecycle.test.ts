@@ -79,6 +79,12 @@ describe('Agent workspace lifecycle admission invariants', () => {
             NoncurrentVersionExpiration: { NoncurrentDays: 7 },
           }),
           Match.objectLike({
+            Id: 'expire-agent-renders',
+            Prefix: 'agent-renders/',
+            ExpirationInDays: 1,
+            NoncurrentVersionExpiration: { NoncurrentDays: 1 },
+          }),
+          Match.objectLike({
             Id: 'cleanup-private-workspace-versions',
             TagFilters: [{ Key: 'Scope', Value: 'private' }],
             NoncurrentVersionExpiration: { NoncurrentDays: 30 },

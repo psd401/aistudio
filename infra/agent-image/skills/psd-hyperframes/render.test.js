@@ -256,14 +256,14 @@ function fakeRelay(responder) {
 function okResult(extra = {}) {
   return {
     status: 'ok',
-    url: 'https://psd-agents-dev.s3.us-east-1.amazonaws.com/public-images/p@psd401.net/uuid.mp4',
-    s3Key: 'public-images/p@psd401.net/uuid.mp4',
+    downloadUrl: 'https://signed.invalid/agent-renders/p@psd401.net/uuid.mp4?X-Amz-Signature=x',
+    s3Key: 'agent-renders/p@psd401.net/uuid.mp4',
     bytes: 12345,
     fps: 30,
     durationSeconds: 3,
     width: 1920,
     height: 1080,
-    sharing: 'public-by-link',
+    sharing: 'private-staging',
     ...extra,
   };
 }
@@ -273,7 +273,7 @@ test('invokeRender sends the validated payload through the fixed-operation relay
   const payload = { html: HTML, durationSeconds: 3 };
   const result = await invokeRender(payload, { relay });
   expect(result.status).toBe('ok');
-  expect(result.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');
+  expect(result.s3Key).toBe('agent-renders/p@psd401.net/uuid.mp4');
   expect(relay.calls).toEqual([payload]);
 });
 
@@ -321,15 +321,123 @@ test('invokeRender needs no AWS credential variables in the exec subprocess', as
 
 // ── main end-to-end (mocked relay) ───────────────────────────────────────────
 
-test('main emits the bare result JSON with the url on relay success', async () => {
+// #2034: every output is private to the requester by default.
+function fakeDelivery() {
+  const calls = { download: [], deliver: [], publish: [] };
+  return {
+    calls,
+    download: async (url) => {
+      calls.download.push(url);
+      return Buffer.from('MP4BYTES');
+    },
+    deliver: async (bytes, fileName, contentType) => {
+      calls.deliver.push({ bytes: bytes.toString(), fileName, contentType });
+      return {
+        fileId: 'file-1',
+        webViewLink: 'https://drive.invalid/file-1/view',
+        fileName,
+        sharedWith: 'p@psd401.net',
+      };
+    },
+    publish: async (bytes, extension, contentType) => {
+      calls.publish.push({ extension, contentType });
+      return { url: 'https://public.invalid/x.mp4', key: 'public-images/h/x.mp4' };
+    },
+  };
+}
+
+test('main delivers the render to Drive by default and never publishes', async () => {
   const relay = fakeRelay(() => okResult());
-  await main(argv('--html', HTML, '--duration', '3'), { relay });
+  const delivery = fakeDelivery();
+  await main(argv('--html', HTML, '--duration', '3', '--name', 'Welcome: fall'), {
+    relay,
+    ...delivery,
+  });
   const out = lastJson();
-  expect(out.url).toContain('/public-images/');
-  expect(out.s3Key).toBe('public-images/p@psd401.net/uuid.mp4');
-  expect(out.sharing).toBe('public-by-link');
+  expect(out.url).toBe('https://drive.invalid/file-1/view');
+  expect(out.sharing).toBe('private-shared-with-caller');
+  expect(out.bytes).toBe(8);
+  expect(delivery.calls.download).toEqual([okResult().downloadUrl]);
+  expect(delivery.calls.deliver).toEqual([
+    { bytes: 'MP4BYTES', fileName: 'Welcome fall.mp4', contentType: 'video/mp4' },
+  ]);
+  expect(delivery.calls.publish).toEqual([]);
+  // The staging URL is consumed here, never handed back to the model.
+  expect(JSON.stringify(out)).not.toContain('signed.invalid');
 });
 
+test('main refuses --to public without confirmation BEFORE rendering', async () => {
+  const relay = fakeRelay(() => okResult());
+  const delivery = fakeDelivery();
+  await expect(
+    main(argv('--html', HTML, '--duration', '3', '--to', 'public'), { relay, ...delivery }),
+  ).rejects.toThrow(ExitError);
+  expect(lastJson().error).toBe('public_needs_confirmation');
+  expect(relay.calls).toEqual([]);
+  expect(delivery.calls.publish).toEqual([]);
+});
+
+test('main publishes only with --to public --public-confirmed', async () => {
+  const relay = fakeRelay(() => okResult());
+  const delivery = fakeDelivery();
+  await main(argv('--html', HTML, '--duration', '3', '--to', 'public', '--public-confirmed'), {
+    relay,
+    ...delivery,
+  });
+  const out = lastJson();
+  expect(out.sharing).toBe('public-by-link');
+  expect(delivery.calls.publish).toEqual([{ extension: '.mp4', contentType: 'video/mp4' }]);
+  expect(delivery.calls.deliver).toEqual([]);
+});
+
+test('a failed Drive delivery fails loudly and never falls back to public', async () => {
+  const relay = fakeRelay(() => okResult());
+  const delivery = fakeDelivery();
+  delivery.deliver = async () => {
+    const err = new Error('Drive refused to share the file');
+    err.responseBody = { code: 'share_failed' };
+    throw err;
+  };
+  await expect(
+    main(argv('--html', HTML, '--duration', '3'), { relay, ...delivery }),
+  ).rejects.toThrow(ExitError);
+  expect(lastJson().error).toBe('share_failed');
+  expect(delivery.calls.publish).toEqual([]);
+});
+
+test('a dry run renders without downloading or delivering', async () => {
+  const relay = fakeRelay(() => ({
+    status: 'ok', bytes: 3, fps: 30, durationSeconds: 3, width: 1920, height: 1080,
+    dryRun: true, localPath: '/tmp/x.mp4',
+  }));
+  const delivery = fakeDelivery();
+  await main(argv('--html', HTML, '--duration', '3', '--dry-run'), { relay, ...delivery });
+  expect(lastJson()).toMatchObject({ dryRun: true, localPath: '/tmp/x.mp4' });
+  expect(delivery.calls.download).toEqual([]);
+  expect(delivery.calls.deliver).toEqual([]);
+});
+
+test('--audio-file inlines a local MP3 so the soundtrack needs no public URL', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hf-audio-'));
+  try {
+    const mp3 = path.join(dir, 'voice.mp3');
+    validatedFs.writeFileSync(mp3, Buffer.from('ID3fake'));
+    const p = buildPayload(parseArgs(argv('--html', HTML, '--duration', '3', '--audio-file', mp3)));
+    expect(p.html).toContain(
+      `<audio src="data:audio/mpeg;base64,${Buffer.from('ID3fake').toString('base64')}"`,
+    );
+    expect(() =>
+      buildPayload(parseArgs(argv('--html', HTML, '--duration', '3', '--audio-file', mp3, '--audio-url', 'https://x/a.mp3'))),
+    ).toThrow(ExitError);
+    const wav = path.join(dir, 'voice.wav');
+    validatedFs.writeFileSync(wav, Buffer.from('RIFF'));
+    expect(() =>
+      buildPayload(parseArgs(argv('--html', HTML, '--duration', '3', '--audio-file', wav))),
+    ).toThrow(ExitError);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ── injectAudioElement / composition-root lookup (#1298) ─────────────────────
 //

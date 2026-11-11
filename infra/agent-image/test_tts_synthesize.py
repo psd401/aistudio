@@ -198,55 +198,142 @@ print(f"{audio.hex()}:{chunks}")
         self.assertNotRegex(source, r"(?m)^\s*from (?:boto3|botocore)\b")
 
 
+def _run_tts_main(text, extra_args=()):
+    """Drive main() with --text and return the exit code, parsed stdout and
+    which delivery path was taken. Nothing reaches Polly, S3 or Drive."""
+    argv = ["synthesize.py", "--user", "staff@psd401.net", "--text", text, *extra_args]
+    synthesized = []
+    uploaded = []
+    delivered = []
+    buffer = io.StringIO()
+    with mock.patch.object(sys, "argv", argv), \
+            mock.patch.object(
+                synthesize_module,
+                "synthesize",
+                side_effect=lambda *a, **k: (
+                    synthesized.append(a) or (b"mp3", 1)
+                ),
+            ), \
+            mock.patch.object(
+                synthesize_module,
+                "upload_mp3",
+                side_effect=lambda *a, **k: (
+                    uploaded.append(a) or ("https://example.invalid/a.mp3", "k")
+                ),
+            ), \
+            mock.patch.object(
+                synthesize_module,
+                "deliver_mp3_to_drive",
+                side_effect=lambda *a, **k: (
+                    delivered.append(a) or {
+                        "fileId": "file-1",
+                        "webViewLink": "https://drive.invalid/file-1",
+                        "sharedWith": "staff@psd401.net",
+                        "fileName": a[1],
+                    }
+                ),
+            ), \
+            mock.patch.object(
+                synthesize_module,
+                "_record_narration_refusal",
+            ) as recorded, \
+            contextlib.redirect_stdout(buffer):
+        try:
+            synthesize_module.main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code
+    return {
+        "code": code,
+        "stdout": json.loads(buffer.getvalue()),
+        "synthesized": synthesized,
+        "uploaded": uploaded,
+        "delivered": delivered,
+        "recorded": recorded,
+    }
+
+
+class TestPrivateByDefault(unittest.TestCase):
+    """
+    Issue #2034. Every agent output is private to the requester by default,
+    whatever it contains. Morning-brief podcasts narrating someone's inbox and
+    calendar sat on public links because this skill could only publish.
+    """
+
+    def test_default_delivers_to_drive_and_never_publishes(self):
+        result = _run_tts_main("Good morning. Three meetings today.")
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(result["stdout"]["sharing"], "private-shared-with-caller")
+        self.assertEqual(result["stdout"]["url"], "https://drive.invalid/file-1")
+        self.assertEqual(len(result["delivered"]), 1)
+        self.assertEqual(result["uploaded"], [])
+
+    def test_private_delivery_is_not_content_gated(self):
+        # Visibility is never decided from a content scan: a private recording
+        # may say anything its requester could read.
+        result = _run_tts_main("Reach Mrs Hall on 253-555-0147 before Friday.")
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(len(result["delivered"]), 1)
+        self.assertEqual(result["recorded"].call_count, 0)
+
+    def test_public_without_confirmation_is_refused_before_synthesis(self):
+        result = _run_tts_main("A flyer for the open house.", ["--to", "public"])
+        self.assertEqual(result["code"], 1)
+        self.assertEqual(result["stdout"]["error"], "public_needs_confirmation")
+        self.assertEqual(result["synthesized"], [])
+        self.assertEqual(result["uploaded"], [])
+        self.assertEqual(result["delivered"], [])
+
+    def test_public_with_confirmation_publishes(self):
+        result = _run_tts_main(
+            "A flyer for the open house.", ["--to", "public", "--public-confirmed"]
+        )
+        self.assertEqual(result["code"], 0)
+        self.assertEqual(result["stdout"]["sharing"], "public-by-link")
+        self.assertEqual(len(result["uploaded"]), 1)
+        self.assertEqual(result["delivered"], [])
+
+    def test_name_becomes_a_broker_safe_drive_file_name(self):
+        result = _run_tts_main("Hello.", ["--name", "Board recap: Nov/11"])
+        self.assertEqual(result["delivered"][0][1], "Board recap Nov 11.mp3")
+
+    def test_default_name_is_dated(self):
+        import datetime as dt
+        self.assertEqual(
+            synthesize_module.drive_file_name(None, dt.datetime(2026, 11, 11, 6, 5)),
+            "Narration 2026-11-11 0605.mp3",
+        )
+        self.assertEqual(synthesize_module.drive_file_name("brief.mp3"), "brief.mp3")
+
+    def test_to_file_writes_locally_and_uploads_nothing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "voice.mp3")
+            result = _run_tts_main("Hello.", ["--to", "file", "--out", out])
+            self.assertEqual(result["code"], 0)
+            self.assertEqual(result["stdout"]["sharing"], "local-file")
+            with open(out, "rb") as fh:
+                self.assertEqual(fh.read(), b"mp3")
+        self.assertEqual(result["uploaded"], [])
+        self.assertEqual(result["delivered"], [])
+
+    def test_to_file_needs_out(self):
+        result = _run_tts_main("Hello.", ["--to", "file"])
+        self.assertEqual(result["code"], 1)
+        self.assertEqual(result["stdout"]["error"], "bad_args")
+        self.assertEqual(result["synthesized"], [])
+
+
 class TestNarrationPersonalDataGate(unittest.TestCase):
     """
-    Issue #1886. Every MP3 this skill makes is uploaded public-by-link, and
-    seven morning-brief podcasts were found speaking contact details on open
-    URLs.
-    Once the text is sound no later check can read it, so the refusal has to
-    happen BEFORE synthesis — nothing sent to Polly, nothing uploaded.
+    Issue #1886, narrowed by #2034 to the PUBLIC path. A public recording is
+    unreadable to any later check, so when a user deliberately asks for a
+    public link the refusal happens BEFORE synthesis — nothing sent to Polly,
+    nothing uploaded.
     """
 
     def _run_main(self, text):
-        """Drive main() with --text and return (exit_code, parsed stdout)."""
-        argv = ["synthesize.py", "--user", "staff@psd401.net", "--text", text]
-        synthesized = []
-        uploaded = []
-        buffer = io.StringIO()
-        with mock.patch.object(sys, "argv", argv), \
-                mock.patch.object(
-                    synthesize_module,
-                    "synthesize",
-                    side_effect=lambda *a, **k: (
-                        synthesized.append(a) or (b"mp3", 1)
-                    ),
-                ), \
-                mock.patch.object(
-                    synthesize_module,
-                    "upload_mp3",
-                    side_effect=lambda *a, **k: (
-                        uploaded.append(a) or ("https://example.invalid/a.mp3", "k")
-                    ),
-                ), \
-                mock.patch.object(
-                    synthesize_module,
-                    "_record_narration_refusal",
-                ) as recorded, \
-                contextlib.redirect_stdout(buffer):
-            try:
-                synthesize_module.main()
-                code = 0
-            except SystemExit as exc:
-                code = exc.code
-        return {
-            "code": code,
-            # Whole buffer: _emit() pretty-prints over several lines while
-            # _fail() emits one. Both are the only thing the command writes.
-            "stdout": json.loads(buffer.getvalue()),
-            "synthesized": synthesized,
-            "uploaded": uploaded,
-            "recorded": recorded,
-        }
+        return _run_tts_main(text, ["--to", "public", "--public-confirmed"])
 
     def test_a_staff_phone_number_is_refused_and_nothing_is_uploaded(self):
         result = self._run_main(
@@ -277,7 +364,7 @@ class TestNarrationPersonalDataGate(unittest.TestCase):
         self.assertEqual(result["stdout"]["error"], "personal_data_detected")
         self.assertIn("psd-student-id", result["stdout"]["message"])
 
-    def test_an_ordinary_brief_still_synthesizes_and_uploads(self):
+    def test_an_ordinary_public_flyer_still_synthesizes_and_uploads(self):
         result = self._run_main(
             "Good morning. Three meetings today and the board packet is ready."
         )

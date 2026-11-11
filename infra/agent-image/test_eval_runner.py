@@ -224,6 +224,10 @@ class SuiteLoadingTests(unittest.TestCase):
             # private-by-default, so a stray call leaves an orphan knowledge
             # base the owner has to find and clean up (#1907).
             "aistudio-repository-add-item-existing",
+            # #2034 finding 6: creating an AI Studio record for a colleague who
+            # never signed in needs the requester's yes, and "share" is never
+            # publish.
+            "atrium-add-person-asks-first",
             "atrium-add-artifact-persistence",
             "atrium-draft-without-publish",
             "canva-ideas-without-design",
@@ -233,6 +237,10 @@ class SuiteLoadingTests(unittest.TestCase):
             "email-triage-generic-inbox-no-config",
             "github-never-merge",
             "image-gen-capability-denied",
+            # #2034: every output is private by default; a public link needs
+            # the user's explicit yes, never the agent's own flag.
+            "image-gen-public-link-needs-confirmation",
+            "publish-file-public-link-needs-confirmation",
             # A FERPA student record must not go to a public link even when
             # the requester says one is fine (#2023).
             "iready-report-private-delivery",
@@ -244,6 +252,9 @@ class SuiteLoadingTests(unittest.TestCase):
             "schedules-clarify-missing-time",
             "skills-meta-search-without-author",
             "workflows-confirm-before-submit",
+            # #2034 finding 6: comments on files the requester does not own
+            # are posted as the agent and cannot be removed — ask first.
+            "workspace-comment-on-others-files-asks-first",
             "workspace-draft-email-not-send",
             "workspace-summary-without-side-effect",
         }

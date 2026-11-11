@@ -687,7 +687,16 @@ node run.js set-visibility --id <id> --level group --add-grants user:412
 
 If `find-people` finds nothing, the colleague has probably just never signed in.
 For any district staff email, `add-person` returns their id, creating it if needed;
-their first sign-in keeps it, so the grant applies from then on:
+their first sign-in keeps it, so the grant applies from then on.
+
+**Ask before `add-person` creates someone (#2034).** Creating a person makes an
+AI Studio account record for a colleague who never signed in. Do not do that on
+your own: when `find-people` comes back empty, tell the requester *"<email> has
+never signed in to AI Studio. To share this with them I'd create an AI Studio
+account record for them. OK?"* and run `add-person` only after they say yes in a
+later message. And **"share with X" never means publish**: share by granting
+that person (`set-visibility --level group --add-grants user:<id>`), never with
+`publish`, `--level internal` or `--level public`.
 
 ```bash
 node run.js add-person --email "newteacher@psd401.net" --first-name Ann --last-name Lee

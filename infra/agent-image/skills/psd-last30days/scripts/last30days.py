@@ -28,9 +28,11 @@ draft — matching upstream's "engine fans out, model synthesizes" split.
 
 Output modes (both are first-class; user chooses per invocation via --format):
   md   (default) — JSON with `brief_markdown`, a cited brief the agent relays.
-  html           — render the brief to a self-contained HTML page, upload it to
-                   S3 public-by-link under public-images/<email>/, return the URL.
-  both           — brief_markdown AND the S3 URL.
+  html           — render the brief to a self-contained HTML page and WRITE it
+                   to a local file (`html_path`). Nothing is uploaded: the agent
+                   delivers it privately as an Atrium artifact (#2034). The old
+                   public-by-link upload is gone — HTML is never a public file.
+  both           — brief_markdown AND the local HTML page.
 
 Usage:
     python3 last30days.py --topic "district AI policy"
@@ -51,7 +53,6 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-import uuid
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -681,8 +682,8 @@ def render_markdown(query, days, since, generated, results, warnings, sources):
 def render_html(query, days, since, generated, results, warnings, sources):
     """Render the same brief as a self-contained, styled HTML page. ALL external
     text (titles, snippets, source names, the topic) is HTML-escaped: the page is
-    served from our S3 domain public-by-link, so an unescaped hostile title would
-    be a stored-XSS vector."""
+    stored as an Atrium artifact and opened by staff, so an unescaped hostile
+    title would be a stored-XSS vector."""
     e = html.escape
 
     def link(item):
@@ -775,9 +776,10 @@ def render_html(query, days, since, generated, results, warnings, sources):
     return "\n".join(parts)
 
 
-class UploadError(Exception):
-    """Raised when the HTML artifact cannot be uploaded; carries an error code so
-    the caller can decide whether to fail (html-only) or degrade (both -> md)."""
+class HtmlWriteError(Exception):
+    """The HTML page could not be written. Carries a code (`bad_args` or
+    `upstream_error`) so the caller can decide whether to fail (html-only) or
+    degrade (both -> md)."""
 
     def __init__(self, code, message):
         super().__init__(message)
@@ -785,20 +787,50 @@ class UploadError(Exception):
         self.message = message
 
 
-def upload_html(html_text, user_email):
-    """Upload rendered HTML through the owner-bound broker and return (url, key).
-    Raises UploadError so the caller controls fail-vs-degrade per format."""
+# Where the agent's working files live in the container; outside it (tests,
+# local runs) the system temp dir is used instead.
+DEFAULT_WORK_DIR = "/home/node/.openclaw/work"
+
+
+def _topic_slug(topic):
+    slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")[:40].strip("-")
+    return slug or "brief"
+
+
+def default_html_path(topic, now=None):
+    import tempfile
+
+    base = DEFAULT_WORK_DIR if os.path.isdir(DEFAULT_WORK_DIR) else tempfile.gettempdir()
+    stamp = (now or _now_utc()).strftime("%Y%m%d-%H%M%S")
+    return os.path.join(base, f"last30days-{_topic_slug(topic)}-{stamp}.html")
+
+
+def write_html(html_text, out_path):
+    """Write the rendered page locally and return its absolute path.
+
+    PRIVATE BY DEFAULT (#2034): this used to publish the page to the unsigned,
+    public-by-link `public-images/` prefix (which has since refused `.html`
+    outright). Now nothing leaves the container here; the agent turns the file
+    into a private Atrium artifact with psd-atrium, which the requester alone
+    can open until they choose to share it.
+    """
+    path = os.path.abspath(os.path.expanduser(out_path))
+    if not path.lower().endswith(".html"):
+        raise HtmlWriteError("bad_args", "--out must end in .html")
     try:
-        sys.path.insert(0, "/app")
-        from artifact_publisher import publish_artifact
-        _ = user_email
-        return publish_artifact(
-            html_text.encode("utf-8"),
-            ".html",
-            "text/html; charset=utf-8",
-        )
-    except Exception as exc:  # noqa: BLE001 — botocore ClientError, network failure, etc.
-        raise UploadError("upstream_error", f"failed to publish HTML artifact: {exc}")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(html_text)
+    except OSError as exc:
+        raise HtmlWriteError("upstream_error", f"could not write the HTML page: {exc}")
+    return path
+
+
+def atrium_delivery_command(path, topic):
+    title = f"Last 30 days: {topic}"[:200]
+    return (
+        "node /opt/psd-skills/psd-atrium/run.js create-artifact "
+        f"--title {json.dumps(title)} --code-file {json.dumps(path)} --body-format html"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -819,6 +851,7 @@ def build_parser():
         description="Research what people said about a topic in the last ~30 days across keyless sources.")
     parser.add_argument("--topic", "--query", dest="topic", help="Topic to research (required)")
     parser.add_argument("--user", help="Caller email (from the [caller: ...] header); required for --format html|both")
+    parser.add_argument("--out", help="Where to write the HTML page for --format html|both (default: a file in the work dir)")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS,
                         help=f"Look-back window in days (default {DEFAULT_DAYS}, max {MAX_DAYS})")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
@@ -826,7 +859,7 @@ def build_parser():
     parser.add_argument("--sources", default="all",
                         help="Comma-separated subset of: " + ",".join(ALL_SOURCES) + " (default all)")
     parser.add_argument("--format", dest="fmt", choices=("md", "html", "both"), default="md",
-                        help="Output mode: md (default, brief in chat), html (S3 artifact URL), or both")
+                        help="Output mode: md (default, brief in chat), html (local page for private Atrium delivery), or both")
     return parser
 
 
@@ -857,7 +890,9 @@ def normalize_config(ns):
 
     fmt = ns.fmt
     if fmt in ("html", "both") and not valid_email(ns.user):
-        raise ConfigError("bad_args", "--user (a valid email) is required for --format html|both to scope the S3 path")
+        raise ConfigError("bad_args", "--user (a valid email) is required for --format html|both")
+    if ns.out and fmt == "md":
+        raise ConfigError("bad_args", "--out is only used with --format html|both")
 
     return {
         "topic": topic,
@@ -866,6 +901,7 @@ def normalize_config(ns):
         "limit": limit,
         "sources": sources,
         "fmt": fmt,
+        "out": ns.out,
     }
 
 
@@ -907,17 +943,19 @@ def main(argv=None):
             html_text = render_html(
                 cfg["topic"], cfg["days"], since, generated, results, warnings, cfg["sources"])
             try:
-                url, key = upload_html(html_text, cfg["user"])
-                out["url"] = url
-                out["s3Key"] = key
-                out["sharing"] = "public-by-link"
-            except UploadError as exc:
+                path = write_html(
+                    html_text, cfg["out"] or default_html_path(cfg["topic"], generated_dt))
+                out["html_path"] = path
+                out["sharing"] = "local-file"
+                # Private delivery (#2034): the requester alone can open it.
+                out["deliver_with"] = atrium_delivery_command(path, cfg["topic"])
+            except HtmlWriteError as exc:
                 # html-only: nothing else to deliver, so fail loudly. both: the
                 # Markdown brief is already computed, so degrade to it with a warning
                 # rather than throwing away the work the user also asked for.
                 if cfg["fmt"] == "html":
                     _fail(exc.message, exc.code)
-                out["warnings"].append(f"HTML artifact upload failed ({exc.code}): {exc.message}")
+                out["warnings"].append(f"HTML page could not be written ({exc.code}): {exc.message}")
 
         _emit(out)
     except Exception as exc:  # noqa: BLE001 — the JSON stdout contract must hold even for unexpected bugs

@@ -10,6 +10,7 @@ tasks:
   - ../../skills/psd-aistudio/evals/repository-add-item-existing.yaml
   - ../../skills/psd-atrium/evals/find-private-drafts.yaml
   - ../../skills/psd-atrium/evals/list-artifact-data.yaml
+  - ../../skills/psd-atrium/evals/add-person-asks-first.yaml
   - ../../skills/psd-brand-guidelines/evals/exact-core-colors.yaml
   - ../../skills/psd-canva/evals/list-designs.yaml
   - ../../skills/psd-conversation-coach/evals/no-scenario-fallback.yaml
@@ -40,6 +41,8 @@ tasks:
   - ../../skills/psd-prr/evals/overdue-total-floor.yaml
   - ../../skills/psd-publish-file/evals/publish-generated-csv.yaml
   - ../../skills/psd-publish-file/evals/html-routes-to-atrium.yaml
+  - ../../skills/psd-publish-file/evals/public-link-needs-confirmation.yaml
+  - ../../skills/psd-image-gen/evals/public-link-needs-confirmation.yaml
   - ../../skills/psd-schedules/evals/list-schedules.yaml
   - ../../skills/psd-schedules/evals/clarify-missing-time.yaml
   - ../../skills/psd-schedules/evals/create-dm-digest-no-dm-hunting.yaml
@@ -50,4 +53,5 @@ tasks:
   - ../../skills/psd-workflows/evals/confirm-before-submit.yaml
   - ../../skills/psd-workspace/evals/list-unread-mail.yaml
   - ../../skills/psd-workspace/evals/draft-email-not-send.yaml
+  - ../../skills/psd-workspace/evals/comment-on-others-files-asks-first.yaml
   - ../../skills/quartile-growth-report/evals/quartile-growth-report.yaml

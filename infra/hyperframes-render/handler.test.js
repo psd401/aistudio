@@ -237,18 +237,31 @@ test('handler dryRun without HYPERFRAMES_OUTPUT_DIR leaves no file behind', asyn
   expect(validatedFs.existsSync(res.localPath)).toBe(false);
 });
 
-test('handler uploads to S3 and returns a public-by-link url', async () => {
+test('handler uploads to the PRIVATE render prefix and returns a short-lived download URL (#2034)', async () => {
   process.env.WORKSPACE_BUCKET = 'psd-agents-dev-123';
   const puts = [];
+  const presigned = [];
   const s3 = { send: async (cmd) => { puts.push(cmd.input); } };
-  const res = await handler(validEvent(), { s3, render: fakeRender('MP4') });
+  const presign = async (_client, cmd, options) => {
+    presigned.push({ input: cmd.input, options });
+    return `https://signed.invalid/${cmd.input.Key}?X-Amz-Signature=x`;
+  };
+  const res = await handler(validEvent(), { s3, presign, render: fakeRender('MP4') });
   expect(res.status).toBe('ok');
-  expect(res.sharing).toBe('public-by-link');
-  expect(res.s3Key).toMatch(/^public-images\/person@psd401\.net\/[0-9a-f-]+\.mp4$/);
-  expect(res.url).toContain('psd-agents-dev-123.s3.');
-  expect(res.url).toContain('/public-images/');
+  expect(res.sharing).toBe('private-staging');
+  expect(res.s3Key).toMatch(/^agent-renders\/person@psd401\.net\/[0-9a-f-]+\.mp4$/);
+  // Never the public prefix, and no public URL at all.
+  expect(res.s3Key).not.toContain('public-images');
+  expect(res.url).toBeUndefined();
+  expect(res.downloadUrl).toBe(`https://signed.invalid/${res.s3Key}?X-Amz-Signature=x`);
   expect(puts).toHaveLength(1);
   expect(puts[0].ContentType).toBe('video/mp4');
+  expect(presigned).toEqual([
+    {
+      input: { Bucket: 'psd-agents-dev-123', Key: res.s3Key },
+      options: { expiresIn: 900 },
+    },
+  ]);
 });
 
 test('handler returns misconfigured when WORKSPACE_BUCKET is unset (non-dryRun)', async () => {

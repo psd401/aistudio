@@ -1,7 +1,7 @@
 ---
 name: psd-last30days
-summary: Research what people said about a topic in the last ~30 days across keyless social/community sources (Hacker News, Reddit, arXiv, GitHub, Google News) and return a grounded, cited brief — in chat, as an S3 HTML artifact, or both.
-description: Research recent chatter on a topic — "what did people actually say about X in the last ~30 days?" Fans out across free, keyless sources (Hacker News, Reddit, arXiv, GitHub, Google News), ranks by engagement/recency, de-duplicates, and returns a source-cited brief you synthesize. Default output is a Markdown brief in chat; on request it also (or instead) produces a self-contained HTML page uploaded to S3 and shareable by link. Use for trend/pulse/"what's new" research on a person, product, company, or topic.
+summary: Research what people said about a topic in the last ~30 days across keyless social/community sources (Hacker News, Reddit, arXiv, GitHub, Google News) and return a grounded, cited brief — in chat, as a private Atrium page, or both.
+description: Research recent chatter on a topic — "what did people actually say about X in the last ~30 days?" Fans out across free, keyless sources (Hacker News, Reddit, arXiv, GitHub, Google News), ranks by engagement/recency, de-duplicates, and returns a source-cited brief you synthesize. Default output is a Markdown brief in chat; on request it also (or instead) produces a self-contained HTML page delivered privately as an Atrium artifact. Use for trend/pulse/"what's new" research on a person, product, company, or topic.
 allowed-tools: Bash(/opt/agentcore-venv/bin/python3:*)
 ---
 
@@ -34,8 +34,8 @@ Paid sources (X/xAI, TikTok/Instagram via ScrapeCreators, Perplexity, Brave) are
 ## Identity
 
 Pass `--user <caller-email>` verbatim from the `[caller: Name <email>]` header of
-the user turn. It is **required for `--format html|both`** (it scopes the S3 key
-path to the caller). For the default Markdown mode it is optional but harmless.
+the user turn. It is **required for `--format html|both`**. For the default
+Markdown mode it is optional but harmless.
 
 ## Usage
 
@@ -50,6 +50,7 @@ Options:
 | `--topic "<text>"` | Topic to research (required; `--query` is an alias) |
 | `--user <email>` | Caller email; **required** for `--format html\|both` |
 | `--format md\|html\|both` | Output mode (default `md`) — see below |
+| `--out <path.html>` | Where to write the page for `html\|both` (default: a file in the work dir) |
 | `--days <n>` | Look-back window (default `30`, max `90`) |
 | `--limit <n>` | Max items per source (default `10`, max `25`) |
 | `--sources <list>` | Comma-separated subset of `hackernews,reddit,arxiv,github,web` (default all) |
@@ -61,10 +62,10 @@ Options:
 # Only two sources, tighter list
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --topic "chromebooks in schools" --sources web,hackernews
 
-# HTML artifact uploaded to S3 (public-by-link)
+# HTML page written locally, then delivered privately (see below)
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format html
 
-# Both: brief in chat AND an S3 HTML link
+# Both: brief in chat AND the HTML page
 /opt/agentcore-venv/bin/python3 /opt/psd-skills/psd-last30days/scripts/last30days.py --user name@psd401.net --topic "gpt-5" --format both
 ```
 
@@ -80,23 +81,28 @@ Pick the mode from what the user asked for:
   citations.
 - **`html`** — when the user wants "a page", "something to share", "a report",
   "a link", or a polished artifact. The engine renders the brief to a
-  self-contained styled HTML page, uploads it to S3 public-by-link, and returns a
-  `url`. Surface that URL (see the reply rule below); you do not need to relay the
-  Markdown.
-- **`both`** — when the user wants the answer now *and* a shareable link. The
-  result carries `brief_markdown` **and** `url`.
+  self-contained styled HTML page and writes it to a local file (`html_path`).
+  Nothing is uploaded and nothing is public.
+- **`both`** — when the user wants the answer now *and* a page. The result
+  carries `brief_markdown` **and** `html_path`.
 
-## Required Reply Format (`html` / `both`)
+## Delivering the page (`html` / `both`) — private by default
 
-When the result includes a `url`, your chat reply **must contain the bare `url`
-on a line by itself** — the user cannot see the tool result.
+Every agent output is private to the person who asked (#2034). Deliver the page
+as a **private Atrium artifact** by running the exact `deliver_with` command from
+the result (psd-atrium `create-artifact --code-file <html_path> --body-format
+html`). It starts private + draft: the requester can open it, nobody else can.
+Do **not** publish it to the intranet or widen its visibility unless the user
+asks for that audience in so many words — "share it with X" means grant that
+person (psd-atrium `set-visibility --level group --add-grants`), never publish.
 
-- ✅ One short line of context, then the bare URL on its own line:
-  `Here's the shareable brief:`
-  `https://<bucket>.s3.us-east-1.amazonaws.com/public-images/a@psd401.net/<uuid>.html`
+Then your chat reply **must contain the Atrium `url` bare, on a line by
+itself** — the user cannot see the tool result.
+
+- ✅ `Here's the brief (private to you):` then the bare URL on its own line.
 - ❌ `[Open the brief](https://…)` or `**https://…**` — Google Chat corrupts
-  long S3 URLs wrapped in link or bold markup.
-- ❌ Replying "the brief has been uploaded" without including the URL.
+  long URLs wrapped in link or bold markup.
+- ❌ Replying "the brief has been created" without including the URL.
 
 ## Result shape
 
@@ -112,15 +118,15 @@ on a line by itself** — the user cannot see the tool result.
   "counts": { "hackernews": 8, "reddit": 0, "arxiv": 5, "github": 5, "web": 5 },
   "warnings": ["Reddit: HTTPError: HTTP Error 429: Too Many Requests"],
   "brief_markdown": "# Last-30-days brief: gpt-5\n...",
-  "url": "https://<bucket>.s3.<region>.amazonaws.com/public-images/<email>/<uuid>.html",
-  "s3Key": "public-images/<email>/<uuid>.html",
-  "sharing": "public-by-link"
+  "html_path": "/home/node/.openclaw/work/last30days-gpt-5-20260710-211100.html",
+  "sharing": "local-file",
+  "deliver_with": "node /opt/psd-skills/psd-atrium/run.js create-artifact --title \"Last 30 days: gpt-5\" --code-file \"/home/node/.openclaw/work/last30days-gpt-5-20260710-211100.html\" --body-format html"
 }
 ```
 
-`brief_markdown` is present for `md`/`both`; `url`/`s3Key`/`sharing` for
-`html`/`both` — except that on `both`, a failed upload omits them and degrades
-to the Markdown brief plus a warning (see **Errors**).
+`brief_markdown` is present for `md`/`both`; `html_path`/`sharing`/`deliver_with`
+for `html`/`both` — except that on `both`, a page that cannot be written omits
+them and degrades to the Markdown brief plus a warning (see **Errors**).
 
 ## Notes & limits
 
@@ -132,10 +138,9 @@ to the Markdown brief plus a warning (see **Errors**).
   recency. Don't over-read the ordering of the recency-ranked sources.
 - **Reddit relevance is loose.** Keyless Reddit search returns recent posts that
   loosely match; treat low-signal Reddit hits with skepticism when you synthesize.
-- **No dedicated secrets.** The engine needs no API key. Artifact uploads use
-  the signed, owner-bound storage broker. GitHub access uses the allowlisted
-  GitHub broker; neither credentials nor storage authority enter the model
-  process.
+- **No dedicated secrets.** The engine needs no API key and uploads nothing.
+  GitHub access uses the allowlisted GitHub broker; no credentials enter the
+  model process.
 - **De-duplication is mechanical.** Items with the same normalized title or URL
   are folded to their first occurrence; the same story *retitled* by two outlets
   can still appear twice — fold those in your synthesis.
@@ -151,17 +156,17 @@ to the Markdown brief plus a warning (see **Errors**).
 Errors are a single JSON object `{ "status": "error", "error": "<code>", "message": "..." }`:
 
 - **`bad_args`** — missing `--topic`, an unknown `--source`, an over-long topic,
-  `--format html|both` without a valid `--user` email, or any malformed flag
+  `--format html|both` without a valid `--user` email, `--out` that is not an
+  `.html` path or is used without `--format html|both`, or any malformed flag
   (non-integer `--days`/`--limit`, unknown option — argparse failures honor the
   JSON contract too).
-- **`misconfigured`** — `--format html` requested but the trusted web broker is
-  unavailable.
-- **`upstream_error`** — `--format html` requested but the artifact upload failed.
+- **`upstream_error`** — `--format html` requested but the page could not be
+  written.
 
 Two kinds of failure are **not** fatal — they surface under `warnings` in a
 successful (`status: "ok"`) result, not as an error:
 - Any individual source failing or being rate-limited (the brief is built from
   the sources that answered).
-- For **`--format both`**, an HTML-upload failure degrades to delivering just the
-  Markdown brief plus a `HTML artifact upload failed (...)` warning — only
+- For **`--format both`**, a page that cannot be written degrades to delivering
+  just the Markdown brief plus a `HTML page could not be written (...)` warning — only
   `--format html` (with nothing else to return) fails hard.

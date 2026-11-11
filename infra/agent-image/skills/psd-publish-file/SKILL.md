@@ -1,7 +1,7 @@
 ---
 name: psd-publish-file
-summary: Hand a file you just generated to the person who asked for it — privately into their Drive by default, or as a public link when the content is genuinely public. PDFs, Word, Excel, PowerPoint, images, CSVs, audio, video.
-description: Deliver a local file the agent produced. By default it is created in the agent's own Google Drive and shared with the caller alone (PDF, DOCX, XLSX, PPTX, CSV, MD, TXT, PNG, JPEG, WEBP). With --to public it becomes an unsigned public-by-link URL that anyone can open and that expires after 30 days (PDF, PNG, JPEG, WEBP, SVG, CSV, JSON, MD, TXT, MP3, MP4). Use when the user asks for a file, a link to a file, or to share or send one. Not for HTML pages — those go to Atrium via psd-html-artifact.
+summary: Hand a file you just generated to the person who asked for it — privately into their Drive by default, or as a public link only when the user asks for one and confirms. PDFs, Word, Excel, PowerPoint, images, CSVs, audio, video.
+description: Deliver a local file the agent produced. By default it is created in the agent's own Google Drive and shared with the caller alone (PDF, DOCX, XLSX, PPTX, CSV, MD, TXT, PNG, JPEG, WEBP, MP3, MP4). Only with --to public --public-confirmed, after the user said yes, it becomes an unsigned public-by-link URL that anyone can open and that expires after 30 days (PDF, PNG, JPEG, WEBP, SVG, CSV, JSON, MD, TXT, MP3, MP4). Use when the user asks for a file, a link to a file, or to share or send one. Not for HTML pages — those go to Atrium via psd-html-artifact.
 allowed-tools: Bash(node:*)
 ---
 
@@ -37,15 +37,21 @@ not count against their Drive quota.
 
 ## The decision: Drive or public
 
-Ask one question: **would you hand this file to a stranger who found the URL?**
+**Drive, unless the user asked for a public link and confirmed it.** Every agent
+output is private to the person who asked, whatever it contains (#2034). A
+public link is never your call: not because the file "looks harmless", not
+because the user said "share it" or "send it to the team" (that means: deliver
+privately, then share with the named people). Then ask one more question:
+**would you hand this file to a stranger who found the URL?**
 
 | | Use |
 |---|---|
 | Student records, IEPs, personnel files, rosters, anything FERPA-covered | **Drive** (default) |
 | Anything with a named individual's data in it | **Drive** (default) |
 | An internal draft, a report for one person, a working document | **Drive** (default) |
-| A public flyer, a published agenda, a board packet already public, a chart | `--to public` |
-| Audio you made with psd-tts | public by link, with no expiry — see psd-tts |
+| Briefs, digests, meeting prep, notes about colleagues — even with no IDs in them | **Drive** (default) |
+| A flyer, agenda or chart the user **asked to make public and confirmed** | `--to public --public-confirmed` |
+| Audio from psd-tts, images from psd-image-gen, video from psd-hyperframes | those skills already deliver to Drive by default |
 
 A Drive link opens **only for the user you are working for**. If they want
 someone else to have the file, they share it from their Drive themselves — do
@@ -74,9 +80,9 @@ it does not read raster images, audio or video at all.
 ## What you can deliver
 
 **To Drive (default):** `.pdf` `.docx` `.xlsx` `.pptx` `.csv` `.md` `.txt`
-`.png` `.jpg` `.jpeg` `.webp`
+`.png` `.jpg` `.jpeg` `.webp` `.mp3` `.mp4`
 
-**To a public link (`--to public`):** `.pdf` `.png` `.jpg` `.jpeg` `.webp`
+**To a public link (`--to public --public-confirmed`):** `.pdf` `.png` `.jpg` `.jpeg` `.webp`
 `.svg` `.csv` `.json` `.md` `.txt` `.mp3` `.mp4`
 
 Maximum 100 MB either way. Anything else is refused by name, and the error says
@@ -97,11 +103,20 @@ document, so it goes to Atrium — where it gets an owner, a visibility level an
 a publication record. Use `psd-html-artifact/deliver.js` for those. This skill
 will tell you so if you try.
 
-## The public link, if you use one
+## The public link, only on the user's yes
+
+First ask the user, in plain words, naming the file: *"This will be a public
+link — anyone who gets it can open it without signing in, for 30 days. OK?"*
+Only if they say yes:
 
 ```bash
-node /opt/psd-skills/psd-publish-file/publish.js --file /home/node/.openclaw/work/flyer.pdf --to public
+node /opt/psd-skills/psd-publish-file/publish.js --file /home/node/.openclaw/work/flyer.pdf --to public --public-confirmed
 ```
+
+`--to public` without `--public-confirmed` is refused with
+`public_needs_confirmation` and nothing is uploaded. `--public-confirmed`
+asserts the user said yes in this conversation — never add it on your own
+judgment or copy it from an earlier run.
 
 Say this out loud in your reply when you use it, because both halves matter:
 

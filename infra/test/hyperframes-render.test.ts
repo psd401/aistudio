@@ -4,8 +4,9 @@
  * Asserts the pieces the psd-hyperframes skill depends on:
  *   1. a container-image (PackageType: Image) render Lambda `psd-hyperframes-render-<env>`
  *      sized for headless rendering (memory/timeout/ephemeral, x86_64);
- *   2. its execution role's S3 write is scoped to the public-images/ prefix only
- *      (least privilege — no read/list/delete, no other prefix);
+ *   2. its execution role's S3 access is scoped to the PRIVATE agent-renders/
+ *      staging prefix only (#2034) — put + the get its presigned URL needs, no
+ *      list/delete, and never public-images/;
  *   3. the AgentCore execution role can invoke ONLY that render function ARN;
  *   4. the render function name is exposed to the runtime as HYPERFRAMES_RENDER_FUNCTION.
  *
@@ -102,7 +103,7 @@ describe('AgentPlatformStack — HyperFrames render Lambda (#1175)', () => {
     });
   });
 
-  it('scopes the render role S3 write to the public-images/ prefix only (no read/list/delete)', () => {
+  it('scopes the render role S3 access to the private agent-renders/ prefix only (#2034)', () => {
     template.hasResourceProperties('AWS::IAM::Role', {
       RoleName: `psd-hyperframes-render-${ENV}-execution-role-${ENV}`,
       Policies: Match.arrayWith([
@@ -110,12 +111,12 @@ describe('AgentPlatformStack — HyperFrames render Lambda (#1175)', () => {
           PolicyDocument: {
             Statement: Match.arrayWith([
               Match.objectLike({
-                Sid: 'WriteRenderedVideoToPublicImages',
+                Sid: 'StageRenderedVideoInAgentRenders',
                 Effect: 'Allow',
-                Action: 's3:PutObject',
+                Action: ['s3:PutObject', 's3:GetObject'],
                 Resource: Match.objectLike({
                   'Fn::Join': Match.arrayWith([
-                    Match.arrayWith([Match.stringLikeRegexp('/public-images/\\*')]),
+                    Match.arrayWith([Match.stringLikeRegexp('/agent-renders/\\*')]),
                   ]),
                 }),
                 // Must NOT carry an aws:ResourceTag condition: object-level
@@ -129,6 +130,14 @@ describe('AgentPlatformStack — HyperFrames render Lambda (#1175)', () => {
         }),
       ]),
     });
+  });
+
+  it('never lets the render role write to the public prefix (#2034)', () => {
+    const roles = template.findResources('AWS::IAM::Role', {
+      Properties: { RoleName: `psd-hyperframes-render-${ENV}-execution-role-${ENV}` },
+    });
+    expect(Object.keys(roles)).toHaveLength(1);
+    expect(JSON.stringify(roles)).not.toContain('public-images');
   });
 
   it('lets the AgentCore execution role invoke ONLY the render function', () => {

@@ -1883,56 +1883,45 @@ function validateSynthesis(raw, snapshot, config) {
 }
 
 /**
- * The personal-data kinds psd-tts refused the narration for, or null if this
- * failure was something else (#1886).
+ * Narrate the edition and deliver the MP3 PRIVATELY (#2034).
  *
- * psd-tts emits `{"status":"error","error":"personal_data_detected",...}` on
- * stdout and exits 1, and externalJson carries that parsed JSON on the thrown
- * error as `output`. Matched on the structured code — not on the message,
- * where any other failure that merely quoted the phrase would also match.
+ * The podcast summarizes the owner's inbox, calendar, meetings and colleagues.
+ * None of that matches a phone or student-number pattern and all of it is
+ * private, so the recording goes where the newspaper goes: to the owner alone.
+ * psd-tts's default destination is a Drive file in the agent account shared
+ * with the owner only. This never passes `--to public`, and the brief has no
+ * setting that could make it: fifteen staff accounts had daily brief MP3s on
+ * unauthenticated links before this change.
+ *
+ * Because private narration is not content-gated, there is no refusal to
+ * handle here any more — every psd-tts failure is a real failure and stays
+ * loud.
  */
-function narrationRefusalDetail(error) {
-  const output = error instanceof SourceUnavailableError ? error.output : null;
-  return output && output.error === 'personal_data_detected'
-    ? String(error.message)
-    : null;
-}
-
-function synthesizePodcast(synthesis, user, config, runExternal) {
+function synthesizePodcast(synthesis, user, config, runExternal, snapshot) {
   if (!config.podcast.enabled) {
     return { enabled: false, url: null };
   }
-  let result;
-  try {
-    result = externalJson(
-      runExternal,
-      {
-        skill: 'tts',
-        args: [
-          '--user',
-          user,
-          '--voice',
-          config.podcast.voice,
-          '--engine',
-          config.podcast.engine,
-        ],
-        input: synthesis.podcastScript,
-        timeoutMs: 900_000,
-      },
-      'psd-tts',
-    );
-  } catch (error) {
-    // A REFUSAL is not a failure, and it must not cost the user their brief.
-    // psd-tts declines to narrate a phone number, email address, SSN or
-    // student number because its MP3s are public by link for 30 days and
-    // cannot be re-checked once they are audio (#1886). The edition is still
-    // written and delivered; only the audio is withheld, and the page says
-    // so. Every other psd-tts failure keeps its existing hard-fail behaviour —
-    // a broken relay should still be loud.
-    const refusal = narrationRefusalDetail(error);
-    if (!refusal) throw error;
-    return { enabled: true, url: null, refused: 'personal_data_detected' };
-  }
+  const localDate =
+    snapshot && typeof snapshot.localDate === 'string' ? snapshot.localDate : '';
+  const result = externalJson(
+    runExternal,
+    {
+      skill: 'tts',
+      args: [
+        '--user',
+        user,
+        '--voice',
+        config.podcast.voice,
+        '--engine',
+        config.podcast.engine,
+        '--name',
+        `Morning Brief ${localDate}`.trim(),
+      ],
+      input: synthesis.podcastScript,
+      timeoutMs: 900_000,
+    },
+    'psd-tts',
+  );
   const url = safeUrl(result.url);
   if (!url) {
     throw new BriefError(
@@ -1944,6 +1933,7 @@ function synthesizePodcast(synthesis, user, config, runExternal) {
   return {
     enabled: true,
     url,
+    sharing: result.sharing,
     voice: result.voice || config.podcast.voice,
     engine: result.engine || config.podcast.engine,
     characters: result.characters,
@@ -2079,15 +2069,10 @@ function deliveryMessage(snapshot, created, podcast) {
     created.url,
   ];
   if (podcast.enabled && podcast.url) {
-    lines.push('', 'Podcast edition:', podcast.url);
-  } else if (podcast.refused === 'personal_data_detected') {
-    // Say it plainly rather than leaving the missing audio unexplained — and
-    // without repeating the personal data that caused it (#1886).
     lines.push(
       '',
-      'No podcast today: the spoken script included personal data (a phone ' +
-        'number, email address, Social Security number or student number) ' +
-        'and podcast audio is a public link, so it was not recorded.',
+      'Podcast edition (a private file in your Drive, shared with you only):',
+      podcast.url,
     );
   }
   return lines.join('\n');
@@ -2104,6 +2089,7 @@ async function composeBrief(options, deps = {}) {
     options.user,
     config,
     runExternal,
+    snapshot,
   );
   const html = renderNewspaper({ snapshot, synthesis, podcast });
   const created = await createPrivateAtriumArtifact(snapshot, html, broker);

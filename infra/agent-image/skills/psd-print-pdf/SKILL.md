@@ -67,9 +67,11 @@ and not reachable by a link.
 
   With no `--to` flag the PDF is created in your agent's Drive and shared with
   the caller alone. **That is the right answer for anything with personal data
-  in it** — a student record, an IEP, a personnel letter, a roster. Only add
-  `--to public` when the content is genuinely public (a staff flyer, a
-  published agenda), and note that a public link is deleted after 30 days.
+  in it** — a student record, an IEP, a personnel letter, a roster — and for
+  everything else too: every output is private by default (#2034). Only add
+  `--to public --public-confirmed` when the user asked for a public link and
+  said yes after you told them anyone could open it; a public link is deleted
+  after 30 days.
 - Do not paste the local path as if it were a URL.
 
 ## Working with psd-html-artifact

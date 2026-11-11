@@ -340,33 +340,50 @@ class MainOutputTests(unittest.TestCase):
         self.assertNotIn("url", out)
         self.assertEqual(out["total_items"], 0)
 
-    def test_both_degrades_to_md_when_upload_fails(self):
-        err = last30days.UploadError("misconfigured", "no bucket")
-        with mock.patch.object(last30days, "upload_html", side_effect=err):
+    def test_both_degrades_to_md_when_the_page_cannot_be_written(self):
+        err = last30days.HtmlWriteError("upstream_error", "disk full")
+        with mock.patch.object(last30days, "write_html", side_effect=err):
             out = _run_main(["--topic", "x", "--format", "both", "--user", "a@psd401.net"])
         # The already-computed Markdown is still delivered; the failure is a warning.
         self.assertEqual(out["status"], "ok")
         self.assertIn("brief_markdown", out)
-        self.assertNotIn("url", out)
-        self.assertTrue(any("HTML artifact upload failed" in w for w in out["warnings"]))
+        self.assertNotIn("html_path", out)
+        self.assertTrue(any("HTML page could not be written" in w for w in out["warnings"]))
 
-    def test_html_only_fails_hard_when_upload_fails(self):
-        err = last30days.UploadError("misconfigured", "no bucket")
+    def test_html_only_fails_hard_when_the_page_cannot_be_written(self):
+        err = last30days.HtmlWriteError("upstream_error", "disk full")
         empty = {name: [] for name in last30days.ALL_SOURCES}
         with mock.patch.object(last30days, "gather", return_value=(empty, [])):
-            with mock.patch.object(last30days, "upload_html", side_effect=err):
+            with mock.patch.object(last30days, "write_html", side_effect=err):
                 with contextlib.redirect_stdout(io.StringIO()):
                     with self.assertRaises(SystemExit):
                         last30days.main(["--topic", "x", "--format", "html", "--user", "a@psd401.net"])
 
-    def test_html_mode_emits_url_from_successful_upload(self):
-        with mock.patch.object(last30days, "upload_html",
-                               return_value=("https://b.s3.us-east-1.amazonaws.com/public-images/a@psd401.net/u.html",
-                                             "public-images/a@psd401.net/u.html")):
-            out = _run_main(["--topic", "x", "--format", "html", "--user", "a@psd401.net"])
-        self.assertEqual(out["sharing"], "public-by-link")
-        self.assertTrue(out["url"].endswith("u.html"))
+    def test_html_mode_writes_a_local_page_and_uploads_nothing(self):
+        # #2034: the page is delivered privately through Atrium, never as a
+        # public-by-link file.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "brief.html")
+            publisher = types.ModuleType("artifact_publisher")
+            publisher.publish_artifact = mock.Mock()
+            with mock.patch.dict(sys.modules, {"artifact_publisher": publisher}):
+                out = _run_main(["--topic", "x y", "--format", "html",
+                                 "--user", "a@psd401.net", "--out", target])
+            with open(target, encoding="utf-8") as fh:
+                self.assertIn("<html", fh.read().lower())
+        publisher.publish_artifact.assert_not_called()
+        self.assertEqual(out["html_path"], target)
+        self.assertEqual(out["sharing"], "local-file")
+        self.assertNotIn("url", out)
+        self.assertIn("psd-atrium/run.js create-artifact", out["deliver_with"])
+        self.assertIn("--code-file", out["deliver_with"])
+        self.assertNotIn("public", out["deliver_with"])
         self.assertNotIn("brief_markdown", out)
+
+    def test_out_is_only_for_html(self):
+        with self.assertRaises(last30days.ConfigError):
+            _cfg(["--topic", "x", "--out", "/tmp/a.html"])
 
 
 _REDDIT_ATOM = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -459,17 +476,17 @@ class GatherTests(unittest.TestCase):
         self.assertTrue(any("no response within" in w for w in warnings))
 
 
-class UploadTests(unittest.TestCase):
-    def test_publisher_failure_raises_upstream_error(self):
-        publisher = types.ModuleType("artifact_publisher")
-        publisher.publish_artifact = mock.Mock(
-            side_effect=RuntimeError("broker unavailable"),
-        )
-        with mock.patch.dict(sys.modules, {"artifact_publisher": publisher}):
-            with self.assertRaises(last30days.UploadError) as ctx:
-                last30days.upload_html("<html></html>", "a@psd401.net")
-        self.assertEqual(ctx.exception.code, "upstream_error")
-        self.assertIn("broker unavailable", ctx.exception.message)
+class HtmlWriteTests(unittest.TestCase):
+    def test_out_must_be_html(self):
+        with self.assertRaises(last30days.HtmlWriteError) as ctx:
+            last30days.write_html("<html></html>", "/tmp/brief.txt")
+        self.assertEqual(ctx.exception.code, "bad_args")
+
+    def test_default_path_is_slugged_and_dated(self):
+        import datetime as _dt
+        path = last30days.default_html_path(
+            "GPT-5 & schools!", _dt.datetime(2026, 11, 11, 6, 5, 0))
+        self.assertTrue(path.endswith("last30days-gpt-5-schools-20261111-060500.html"))
 
 
 if __name__ == "__main__":
