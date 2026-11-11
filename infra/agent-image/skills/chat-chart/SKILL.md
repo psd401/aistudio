@@ -79,6 +79,14 @@ fetch the image. Treat a chart of student data the way you would treat any
 other image you post into a Chat space: fine for the audience in the space,
 not a place for anything you would not put in the message body.
 
+**The one documented public-by-default exception (#2034).** Every other agent
+output is private to the requester by default. Inline Chat-card chart PNGs are
+the single accepted exception, decided 2026-11-11: Google Chat fetches card
+images anonymously, so a chart rendered inline in a card must sit on the
+30-day `public-images/` prefix. If a chart does not need to render inline — or
+the user wants it kept private — render it to a file and deliver it with
+`psd-publish-file` (Drive, shared with the requester only) instead.
+
 **Never pass `--engine quickchart` for district data.** It encodes the values
 into a quickchart.io URL, so the numbers land in a third party's logs. The skill
 refuses that combination when `--sensitive` is set or the data trips the inline

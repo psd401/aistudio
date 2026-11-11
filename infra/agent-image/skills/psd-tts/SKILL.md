@@ -20,6 +20,11 @@ link is an explicit, user-confirmed exception (see **Public links** below).
 **Identity.** Requires `--user <caller-email>`. Pass the email verbatim from the
 `[caller: Name <email>]` header of the user turn.
 
+**Approved processor.** Amazon Polly runs in the district's own AWS account
+under the same AWS agreement as Bedrock, which already processes agent data, so
+private narration is sent to Polly without a content scan (decided 2026-11-11,
+#2034). The personal-data check below applies only to public links.
+
 Polly is a standard AWS service (not Bedrock). A root-owned, fixed-operation loopback
 relay authenticates with the AgentCore execution role — the model-facing subprocess never
 receives reusable AWS credentials or an API key. Long text is split at sentence boundaries
