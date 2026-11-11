@@ -46,9 +46,16 @@ const memoryModel: LanguageModel = bedrock(memoryModelId)
 
 function systemPrompt(input: Parameters<typeof buildNexusSystemPrompt>[0] = {}): string {
   const prompt = buildNexusSystemPrompt(input)
-  return withoutRules
-    ? prompt.replace(`\n\n${NEXUS_DATA_HANDLING_PROMPT}`, "")
-    : prompt
+  if (!withoutRules) return prompt
+  // Fail loudly rather than let the baseline silently run WITH the rules if
+  // the way the block is joined into the base prompt ever changes.
+  const block = `\n\n${NEXUS_DATA_HANDLING_PROMPT}`
+  if (!prompt.includes(block)) {
+    throw new Error(
+      "--without-rules: the data-handling block was not found in the Nexus system prompt; update the eval's baseline stripping",
+    )
+  }
+  return prompt.replace(block, "")
 }
 
 async function chat(system: string, userMessage: string): Promise<string> {
