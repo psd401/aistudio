@@ -1,7 +1,7 @@
 ---
 name: chat-chart
 summary: REQUIRED for any user request containing "chart", "graph", "plot", or "visualize" — renders inline bar/line/pie/scatter in Google Chat.
-description: Render an inline bar/line/pie/scatter chart in Google Chat from a small data payload. REQUIRED whenever the user asks to "chart", "graph", "plot", or "visualize" data.
+description: Render a bar/line/pie/scatter chart from a small data payload — inline in Google Chat for aggregate data, or as a private Drive link when flagged --sensitive (student- or staff-level data). REQUIRED whenever the user asks to "chart", "graph", "plot", or "visualize" data.
 allowed-tools: Bash(node:*)
 ---
 
@@ -26,6 +26,8 @@ Don't use this for:
 For "chart this data for me" style requests:
 
 1. Run `chat-chart` to render the chart and get the image URL (first line of stdout).
+   A `--sensitive` (private) chart returns a Drive link instead and no card — do not
+   pass a Drive link to `chat-card --image`; paste it as a bare link.
 2. Run `chat-card` with `--image "$CHART_URL"` plus any `--paragraph` / `--kv` widgets you want to add as context (top-line summary, key stats, source date range).
 3. Include the chat-card envelope in your reply.
 
@@ -63,29 +65,27 @@ The flat `{"label":…,"value":…}` shape is unchanged for single-series charts
 | `local`    | <1s   | No (stays in PSD AWS) | Same as `auto`; name it when you want the choice to be explicit in the transcript. |
 | `quickchart` | <1s   | YES (quickchart.io) | Only for data you have verified is public. Refused outright for `--sensitive` or PII-matching data. |
 
-**You do not need to reason about sensitivity to get a chart.** The default
-engine rasterises the PNG inside the agent container and uploads it to the PSD
-workspace bucket, so student, staff, achievement, attendance and HR data all
-chart normally. `--sensitive` is still worth passing — it documents intent and
-hard-blocks an accidental `--engine quickchart` — but it is no longer the
-difference between a chart and a refusal.
+**Pass `--sensitive` for any student- or staff-level data (#2034).** Anything
+about identifiable students or staff — a student's scores, one class's
+attendance, a staff member's leave, a roster, a discipline breakdown — gets
+`--sensitive`. Such a chart still renders on-host, but it is delivered
+**privately**: a Drive file shared with the requester only, returned as a
+bare link on the first stdout line, followed by a `PRIVATE CHART:` note and
+**no card**. Paste that link bare on its own line. A chart whose title, labels
+or series names match a student-ID, email, phone or SSN pattern goes private
+the same way even without the flag — but the pattern is a backstop, not a
+substitute for passing `--sensitive`.
 
-**What "on-host" does and does not mean.** The *values* never leave PSD AWS:
-no third party ever sees the numbers, the labels, or the chart spec. The
-finished PNG is a different matter — Google Chat has to fetch it, so it is
-published to an unauthenticated (unguessable, ~30-day) workspace URL, exactly
-like `psd-image-gen` output. Anyone holding that URL, Google included, can
-fetch the image. Treat a chart of student data the way you would treat any
-other image you post into a Chat space: fine for the audience in the space,
-not a place for anything you would not put in the message body.
+**Only non-sensitive aggregate charts render inline (the one public exception).**
+Every other agent output is private to the requester by default. An inline Chat
+card needs an image URL Google fetches anonymously, so a non-sensitive chart is
+published to the unauthenticated 30-day `public-images/` prefix — anyone holding
+that URL can open the image. That is accepted (decided 2026-11-11) only for
+aggregate, non-identifying data: message volume, district-wide enrollment
+trends, school-level percentages. When in doubt, pass `--sensitive`.
 
-**The one documented public-by-default exception (#2034).** Every other agent
-output is private to the requester by default. Inline Chat-card chart PNGs are
-the single accepted exception, decided 2026-11-11: Google Chat fetches card
-images anonymously, so a chart rendered inline in a card must sit on the
-30-day `public-images/` prefix. If a chart does not need to render inline — or
-the user wants it kept private — render it to a file and deliver it with
-`psd-publish-file` (Drive, shared with the requester only) instead.
+**What "on-host" means.** The *values* never leave PSD AWS on either path: no
+third party ever sees the numbers, the labels, or the chart spec.
 
 **Never pass `--engine quickchart` for district data.** It encodes the values
 into a quickchart.io URL, so the numbers land in a third party's logs. The skill
@@ -122,10 +122,14 @@ The 50-point cap is enforced by the local renderer, so it binds on `auto` and `l
 
 ## Output
 
-Prints two things to stdout in order:
+For a non-sensitive chart, prints two things to stdout in order:
 
 1. The chart's image URL on its own line (useful if the agent wants to mention it in prose).
 2. A `PSD_AGENT_RICH_V1` envelope wrapping a cardsV2 entry whose section contains an `image` widget pointing at the chart.
+
+For a private chart (`--sensitive`, or personal-data patterns in the chart text),
+prints the Drive link on the first line and a `PRIVATE CHART:` note — no envelope.
+Reply with the bare Drive link; that is the deliverable, not a missing card.
 
 **Include the envelope verbatim in your reply** so the Router renders the card. Add a sentence of prose above or below it if the chart needs context — that text becomes the fallback `text` of the message.
 
@@ -155,7 +159,7 @@ reporting by hand, because `run.js` has no way to know.
 
 ## Examples
 
-### Any district data — the default (on-host) engine
+### Aggregate, non-identifying data — inline card
 
 ```bash
 node /opt/psd-skills/chat-chart/run.js \
@@ -166,7 +170,7 @@ node /opt/psd-skills/chat-chart/run.js \
   --text-fallback "Daily message volume chart"
 ```
 
-### Student attendance — flagged sensitive (still the local engine)
+### Student attendance — flagged sensitive (private Drive link, no card)
 
 ```bash
 node /opt/psd-skills/chat-chart/run.js \
