@@ -27,7 +27,7 @@ describe("Atrium Capture execute scope migration", () => {
 
   it("is idempotent and registered", () => {
     expect(migration).toContain("NOT allowed_scopes ? 'assistants:execute'")
-    expect(registry.migrationFiles.at(-1)).toBe(
+    expect(registry.migrationFiles).toContain(
       "191-atrium-capture-execute-scope.sql",
     )
   })

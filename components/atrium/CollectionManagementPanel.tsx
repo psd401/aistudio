@@ -376,8 +376,12 @@ function DistrictCollectionOptions({
     <>
       <div className="space-y-2">
         <Label htmlFor="district-default-visibility">
-          Default content visibility
+          Collection visibility
         </Label>
+        <p className="text-xs text-muted-foreground">
+          Who can open this collection. Content saved here stays private to its
+          owner until it is shared.
+        </p>
         <select
           id="district-default-visibility"
           className="h-9 w-full rounded-md border bg-background px-3 text-sm"
