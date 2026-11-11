@@ -15,8 +15,9 @@
  *   is created in migration 085.
  * - `nav_item_id` — links a collection to its `navigation_items` row so the
  *   collection surfaces in the sidebar.
- * - `default_visibility_level` — applied to objects created in the collection when
- *   no explicit visibility is supplied.
+ * - `default_visibility_level` — who may open and browse the collection. It is
+ *   NOT applied to content created or moved into it: content is private until
+ *   widened explicitly (#2034).
  */
 
 import {

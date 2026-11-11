@@ -850,8 +850,7 @@ export const contentService = {
    * (v1) is snapshotted in the same transaction and becomes the object's head.
    *
    * §26.4 create-as-private (issue #1118 item 2) — creating an object directly at
-   * `visibility.level === "public"` (explicitly, or via a public collection
-   * default) without authority (`content:publish_public` / admin) is NOT blocked:
+   * an explicit `visibility.level === "public"` without authority (`content:publish_public` / admin) is NOT blocked:
    * the object is created PRIVATE and a durable `visibility_widen` request is
    * queued for it (visible in /admin/atrium, replayed on approve). So `create`
    * still cannot become a side door around `publish` — an unauthorized caller
@@ -975,8 +974,7 @@ export const contentService = {
           }
 
           // Reconcile grants against the RESOLVED level (enforces group-≥1-grant
-          // even when the level came from the collection default, and the
-          // non-group / private rules) — the same invariant `setLevelInTx` applies.
+          // and the non-group / private rules) — the same invariant `setLevelInTx` applies.
           await visibilityService.applyGrantsForLevel(
             tx,
             row.id,

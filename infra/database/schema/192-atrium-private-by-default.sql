@@ -1,16 +1,22 @@
 -- =====================================================
 -- Migration: 192-atrium-private-by-default.sql
--- Description: Return implicitly all-staff Atrium content to private (#2034).
+-- Description: Return all-staff Atrium content to private (#2034).
 -- Dependencies: 085-atrium-content.sql, 090 (content_audit_logs)
 --
 -- Policy: Atrium content is private to its owner unless someone explicitly
 -- widens it. Until #2034, agent skills created every HTML page at `internal`
 -- (all staff) and published it, and content created in a collection inherited
--- the collection's default level. This sets every `internal` object that was
--- never explicitly widened (no successful `set_visibility` audit event) back
--- to `private`. Owners re-share deliberately.
+-- the collection's default level. This sets `internal` objects back to
+-- `private`, by decision of the district owner, and owners re-share
+-- deliberately.
 --
--- Objects owned by user id 1 are excluded at the district owner's request.
+-- The audit trail CANNOT separate a deliberate all-staff share from a skill
+-- default: an explicit create at `internal` is logged only as `create`, and a
+-- Share-dialog change (setVisibilityAction) writes no audit row unless the
+-- level is `public`. So this resets deliberate shares too. The only objects
+-- kept `internal` are those widened through the REST/MCP set-visibility path
+-- (a successful `set_visibility` audit row) and those owned by user id 1,
+-- which the district owner excluded.
 -- `internal` objects carry no grants, so there are none to clear.
 --
 -- Each change is recorded as a `set_visibility` audit row with surface
