@@ -381,6 +381,26 @@ class MainOutputTests(unittest.TestCase):
         self.assertNotIn("public", out["deliver_with"])
         self.assertNotIn("brief_markdown", out)
 
+    def test_deliver_with_never_expands_shell_syntax_in_the_topic(self):
+        import shlex
+        import subprocess
+        topic = "gpt-5 $(touch /tmp/pwned-2034) `id` $HOME 'quoted'"
+        path = "/tmp/a dir/$(x).html"
+        cmd = last30days.atrium_delivery_command(path, topic)
+        # Parsed the way a POSIX shell will parse it: every argument literal.
+        self.assertEqual(shlex.split(cmd), [
+            "node", "/opt/psd-skills/psd-atrium/run.js", "create-artifact",
+            "--title", f"Last 30 days: {topic}", "--code-file", path,
+            "--body-format", "html",
+        ])
+        # And a real shell agrees: echo the args instead of running node.
+        out = subprocess.run(
+            ["bash", "-c", cmd.replace("node ", "printf '%s\\n' ", 1)],
+            capture_output=True, text=True, check=True,
+        ).stdout.splitlines()
+        self.assertIn(f"Last 30 days: {topic}", out)
+        self.assertIn(path, out)
+
     def test_out_is_only_for_html(self):
         with self.assertRaises(last30days.ConfigError):
             _cfg(["--topic", "x", "--out", "/tmp/a.html"])

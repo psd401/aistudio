@@ -47,6 +47,7 @@ import html
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -826,11 +827,19 @@ def write_html(html_text, out_path):
 
 
 def atrium_delivery_command(path, topic):
+    """The shell command the agent runs to deliver the page privately.
+
+    Every argument is shell-quoted with shlex.quote: the topic is user text and
+    the agent runs this string verbatim, so `$(...)`, backticks or `$VAR` in a
+    topic must stay literal title text, never execute. (json.dumps is NOT shell
+    quoting — bash still expands all three inside double quotes.)
+    """
     title = f"Last 30 days: {topic}"[:200]
-    return (
-        "node /opt/psd-skills/psd-atrium/run.js create-artifact "
-        f"--title {json.dumps(title)} --code-file {json.dumps(path)} --body-format html"
-    )
+    argv = [
+        "node", "/opt/psd-skills/psd-atrium/run.js", "create-artifact",
+        "--title", title, "--code-file", path, "--body-format", "html",
+    ]
+    return " ".join(shlex.quote(arg) for arg in argv)
 
 
 # --------------------------------------------------------------------------- #

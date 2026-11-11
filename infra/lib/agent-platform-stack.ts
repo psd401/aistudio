@@ -574,8 +574,8 @@ export class AgentPlatformStack extends cdk.Stack {
     // agent-media (#1738): HTML-to-PDF, ffmpeg transcode/probe and Transcribe.
     // A SEPARATE function from the renderer above even though both carry
     // Chromium and FFmpeg — the renderer's role may touch only the
-    // `agent-renders/` staging prefix, while this one reads and writes owners' PRIVATE workspace
-    // prefixes and is explicitly denied public-images/. Merging them would
+    // `agent-renders/` staging prefix, while this one reads and writes owners'
+    // PRIVATE workspace prefixes and is explicitly denied public-images/. Merging them would
     // widen a production role to save an image.
     resources.agentMediaFunction = new AgentMediaFunction(this, 'AgentMedia', {
       environment,

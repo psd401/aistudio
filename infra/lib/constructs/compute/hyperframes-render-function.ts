@@ -74,8 +74,9 @@ export class HyperframesRenderFunction extends Construct {
     // Least-privilege S3 access, scoped to the PRIVATE agent-renders/ staging
     // prefix only (#2034). PutObject writes the MP4; GetObject exists solely so
     // the presigned GET this role mints for the agent skill is valid — the
-    // function itself never reads. No list or delete (the `expire-agent-renders`
-    // lifecycle rule cleans up), and no other prefix, public-images/ included. The specific bucket ARN + prefix IS the boundary (a dev function
+    // function itself never reads. No list or delete (the
+    // `expire-agent-renders` lifecycle rule cleans up), and no other prefix,
+    // public-images/ included. The specific bucket ARN + prefix IS the boundary (a dev function
     // is handed the dev bucket), so a dev role cannot reach a prod bucket.
     //
     // Deliberately NO aws:ResourceTag/Environment|ManagedBy condition: an
