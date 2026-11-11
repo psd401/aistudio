@@ -69,3 +69,6 @@ cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/credential-entry-form.test.t
 # PR #1960: placeholder Bearer value ("bedrock-sigv4") createOpenAI requires but the SigV4
 # fetch strips before signing; not a credential. Since renamed to a low-entropy non-key constant.
 15992d15abf5464446486c44cff19710ce07eced:lib/ai/bedrock-openai.ts:generic-api-key:37
+# PR #2033: async execute curl example in the API docs; "sk-your-key" is the same
+# placeholder every other curl example there uses, not a credential.
+86bb5e21de05be5a8153b2d7d1d2dd5e2ce80404:docs/API/v1/context-graph.md:curl-auth-header:1286
