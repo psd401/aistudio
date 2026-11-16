@@ -14,6 +14,8 @@ openwiki:
     - infra/lib/agent-platform-stack.ts
     - infra/lib/frontend-stack-ecs.ts
     - infra/lib/constructs/ecs-service.ts
+    - infra/lib/constructs/processing/unified-content-processing.ts
+    - infra/test/unit/unified-content-processing.test.ts
     - infra/test/ecs-scheduled-scaling.test.ts
     - infra/test/frontend-waf-body-signatures.test.ts
     - infra/test/agent-skill-cdn-allowlist.test.ts
@@ -289,6 +291,7 @@ Migrations run via Lambda function:
 | `agent-router/` | Agent request routing with promoted turn recovery, and settlement of deferred scheduled runs (#1890) |
 | `agent-cron/` | Scheduled run invocation, telemetry, silent reply delivery (#1853), and owner notices for failing schedules (#1890) |
 | `document-processor-v2/` | SQS-driven document text extraction (PDF, Office, text) with a standard and a high-memory processor |
+| `unified-content-processor/` | Unified repository content processing worker, built by `UnifiedContentProcessing`; its asset size is governed by the [Unified Content Worker Bundle](#unified-content-worker-bundle) rules |
 
 ### Document Processor v2
 
@@ -326,6 +329,29 @@ flowchart TD
 - `cd infra/lambdas/document-processor-v2 && npm ci && npm run build && npm test` — the same steps as the CI job.
 - `cd infra/lambdas/document-processor-v2 && npm audit --omit=dev` — the CI runtime-audit gate. The full `npm audit` still reports dev-only findings that CI does not gate on.
 - `processors/__tests__/office-processor-docx-parse.test.ts` mocks `mammoth`, so the Jest suite does not exercise the real library. Confirming the override needs a real-library check, which the override commit ran as a manual smoke test outside the repo.
+
+### Unified Content Worker Bundle
+
+**Location**: `/infra/lib/constructs/processing/unified-content-processing.ts` (`UnifiedContentProcessing`, which defines the `NodejsFunction`); the handler is `/infra/lambdas/unified-content-processor/index.ts`. The construct is instantiated from the processing stack in `/infra/lib/processing-stack.ts`.
+
+The worker's deployed asset is assembled in three steps, and each one decides what ends up in the zip:
+
+1. esbuild inlines the handler with `externalModules: ["@aws-sdk/*"]`, so AWS SDK clients are not bundled.
+2. `bundling.nodeModules` installs `sharp`, `pdf-parse`, `@aws-sdk/client-bedrock-data-automation-runtime`, and `@aws-sdk/client-cloudwatch` into the asset. CDK takes each module's version from `/infra/package.json`, and falls back to the installed copy only for modules not listed there.
+3. `afterBundling` runs `bun install --frozen-lockfile --os linux --cpu arm64 --backend copyfile` in the asset directory, against the copied `/infra/bun.lock`.
+
+**Why `@aws-sdk/client-cloudwatch` is pinned (#2044).** Before the fix, the client was not an `infra` dependency, so CDK took 3.982.0 from the root `node_modules`, and none of its `@smithy/*` packages were in `infra/bun.lock`. The newest `@smithy/*` helpers depend on `@smithy/core` 3.40.0, while the lock pins 3.38.1, so bun nested about 27 extra `@smithy/core` copies. The asset reached 418 MB, over Lambda's unzipped limit of 262,144,000 bytes, and the dev `ProcessingStack` update failed with "Unzipped size must be smaller than 262144000 bytes". The fix is `"@aws-sdk/client-cloudwatch": "3.1160.0"` in `/infra/package.json`, locked in `/infra/bun.lock` with its two new transitive packages. The synthesized worker asset measured 222,261,899 bytes after it. The pin is exact on purpose: `^3.1160.0` resolved to 3.1169.0, which brought newer `@smithy/*` packages and nested `@smithy/core` copies back into the lock.
+
+**Invariants and change rules**
+- Keep an `infra` pin for every AWS SDK client that a bundled module needs, in the same SDK release as the other `infra` clients. A module that is only in the root `node_modules` is versioned by the root lock, not by `infra/bun.lock`.
+- A caret range on a bundled SDK client can pull newer `@smithy/*` versions that the lock does not cover. Keep exact pins for these clients.
+- After any change to `/infra/package.json` or `/infra/bun.lock`, check that `bun install --frozen-lockfile` in `infra` makes no changes, and that the worker asset stays under the limit with headroom. At the time of the fix the headroom was about 40 MB, because darwin and musl `sharp` and `canvas` binaries from CDK's host-side install are still in the asset.
+- The prod `ProcessingStack` builds the same asset from the same construct, so a fix that is only verified in dev does not cover prod.
+
+**Focused checks**:
+- `cd infra && bunx jest --silent test/unit/unified-content-processing.test.ts` — stack-level synthesis of `UnifiedContentProcessing` with a test VPC and queues. It does not assert the bundle contents or size.
+- `cd infra && bun install --frozen-lockfile` — the lock-consistency check. It is quick and does not need AWS credentials.
+- Asset size is only verified by a real synth of the processing stack (for example `AIStudio-ProcessingStack-Dev`). That is expensive and needs AWS configuration, so run it when `nodeModules`, the lock, or the SDK pins change, not for every construct edit.
 
 ### Agent Cron
 
