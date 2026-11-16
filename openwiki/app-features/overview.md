@@ -25,6 +25,9 @@ openwiki:
     - actions/db/atrium/create-content.ts
     - actions/db/atrium/snapshot-document.ts
     - lib/attachments/chat-attachment-adapters.ts
+    - lib/attachments/image-normalize.ts
+    - lib/attachments/image-format.ts
+    - lib/nexus/unsupported-image-parts.ts
     - lib/attachments/use-chat-attachments.ts
     - actions/db/atrium/comments.ts
     - actions/db/atrium/publish-document.ts
@@ -651,7 +654,7 @@ File attachments (documents and images) are handled through a unified adapter sy
 | Adapter | Purpose | Features |
 |---------|---------|----------|
 | `HybridDocumentAdapter` | PDF, DOCX, XLSX, TXT, CSV, JSON, etc. | Server-side processing with 500MB limit; magic-byte validation; safe error messages for LLM context |
-| `VisionImageAdapter` | JPEG, PNG, WebP, GIF | Base64 inline for vision models; 20MB limit; optional repository canonical reference |
+| `VisionImageAdapter` | Any `image/*` plus `.heic`/`.heif` (accept list) | Converts non-model-safe images to JPEG at attach time or refuses them (see [HEIC Photos and Unreadable Images](#heic-photos-and-unreadable-images-2042)); base64 inline for vision models; 20MB limit; optional repository canonical reference. It is the only image adapter in the Nexus composite. |
 | `CompositeAttachmentAdapter` | Combines multiple adapters | `createEnhancedNexusAttachmentAdapter()` for Nexus; `createDocumentAttachmentAdapter()` for Assistant Architect (images excluded) |
 
 **Repository-Backed Mode**: When `repositoryBacked: true`, uploads go through `uploadTemporaryAttachment` and return an opaque marker (e.g., `[[repository-attachment:v1:...]]`) that the AI model sees instead of raw file content. This preserves privacy and enables consistent retrieval from the repository service. Images are the exception on a standard chat turn: they carry the marker and the inline data URL, and the model sees the data URL for the current turn and for every prior turn the client resends. Only the image-generation/edit route treats caller-carried pixels as untrusted: it reads the canonical attachment from storage by its `s3Key` (`getAttachmentFromS3` in `app/api/nexus/chat/image-generation-handler.ts`).
@@ -763,6 +766,8 @@ Caption: every failure path returns the original data URL, so shrinking is an op
 
 **Key Sources**:
 - `/lib/attachments/chat-attachment-adapters.ts` — Adapter implementations
+- `/lib/attachments/image-normalize.ts` — Attach-time HEIC/other-format conversion and refusal rules (#2042)
+- `/lib/nexus/unsupported-image-parts.ts` — Model-side replacement of unreadable inline images (#2042)
 - `/lib/attachments/use-chat-attachments.ts` — Shared hook for attachment wiring
 - `/lib/attachments/image-downscale.ts` — Client-side photo shrink for the inline image copy (#1850)
 - `/components/assistant-ui/attachment.tsx` — Attachment UI primitives
@@ -774,6 +779,70 @@ Caption: every failure path returns the original data URL, so shrinking is an op
 - `tests/e2e/assistant-architect-attachment.functional.spec.ts` — E2E attachment flow for Assistant Architect
 - `tests/unit/lib/attachments/chat-attachment-adapters.test.ts` — Adapter behavior (719 lines)
 - `tests/unit/lib/attachments/use-chat-attachments.test.ts` — Hook contract (123 lines)
+
+### HEIC Photos and Unreadable Images (#2042)
+
+An iPhone photo is HEIC by default, and Chrome cannot decode it. Before this fix, `VisionImageAdapter` rejected HEIC, so the attachment fell through to assistant-ui's `SimpleImageAttachmentAdapter` and was inlined as `data:image/heic`. Bedrock Claude rejected that request. The client resends the whole history every turn, so every later turn in the conversation failed too. Two layers now prevent this: the browser converts or refuses at attach time, and the server swaps any unreadable inline image out of the model's copy of the history.
+
+```mermaid
+flowchart TD
+    A[VisionImageAdapter.add] --> B{original.size over 20MB?}
+    B -- yes --> R1[refuse: tooLarge]
+    B -- no --> C["normalizeImageFile: sniff first 16 bytes"]
+    C -- model-safe JPEG/PNG/GIF/WebP --> P[return file, type fixed to sniffed format]
+    C -- HEIF container or HEIC name/type --> H{canvas re-encode works?}
+    H -- yes --> J[JPEG]
+    H -- no --> W[heic-to WASM decode]
+    W -- ok --> J
+    W -- fails --> R2[refuse: heicConversionFailed]
+    C -- SVG --> R3[refuse: svg]
+    C -- other --> X{canvas re-encode works?}
+    X -- yes --> J
+    X -- no --> R4[refuse: unsupported]
+    J --> S{converted size over 20MB?}
+    S -- yes --> R1
+    S -- no --> OK[chip, upload and inline pixels use the JPEG]
+```
+
+Caption: attach-time path in `VisionImageAdapter.add`. Every refusal throws `ImageAttachmentRejectedError` before anything is uploaded.
+
+**Client rules** (`lib/attachments/image-normalize.ts`, `lib/attachments/image-format.ts`):
+- The format is sniffed from the bytes. `file.type` is never trusted, because Chrome derives it from the extension. `sniffImageFormat()` returns one of the four model-safe types, `"heif"` for an ISO-BMFF `ftyp` brand in the HEIF list, or `null`.
+- A model-safe file is returned unchanged when its declared type matches the bytes. Otherwise it is re-wrapped with the sniffed type, because `FileReader` builds the data URL from `file.type`.
+- HEIC/HEIF is converted through the canvas first, which handles Safari's native decoding. If that fails, `heic-to` is used. `heic-to` is a `package.json` dependency, loaded with a dynamic `import()` so its roughly 3MB WASM decoder is fetched only on the first HEIC.
+- SVG is refused explicitly. Other formats are re-encoded through the canvas, which covers BMP, AVIF and similar types. Anything that cannot be converted is refused.
+- Converted files are renamed to `.jpg` by `toJpegFileName()` and carry `image/jpeg`. The 20MB limit is checked again after conversion.
+- `IMAGE_REJECTION_MESSAGES` holds the user-facing text. `isImageRejectionMessage()` lets the composer toast in `components/assistant-ui/attachment.tsx` show "Image could not be attached" with that message. Other adapter errors keep the generic "File could not be attached" toast.
+
+**Composition rules** (`createEnhancedNexusAttachmentAdapter` in `lib/attachments/chat-attachment-adapters.ts`):
+- `VisionImageAdapter` is the only image adapter. `SimpleImageAttachmentAdapter` was removed from the composite. An image it refuses must never fall through to an adapter that inlines the raw bytes. The old `verifyImageMimeType` magic-byte check is replaced by the sniffer.
+- The adapter's `accept` is `image/*,.heic,.heif`. Chrome can report an empty type for HEIC, so the extension is also matched.
+
+**Server guard** (`replaceUnsupportedImageParts` in `lib/nexus/unsupported-image-parts.ts`, called from `prepareChatRequest` in `app/api/nexus/chat/route.ts`): Existing conversations still contain HEIC inline parts, and a stale tab can still send one. The guard runs on `prepared.modelMessages` before `pruneStaleWorkspaceToolPayloads`. For every `file` part (AI SDK) or `image` part (legacy assistant-ui) whose base64 payload is an image and does not sniff as a model-safe format, it substitutes a text part from `unsupportedImageNote(format)`. The format label is "HEIC" for HEIF, otherwise the declared subtype in uppercase. The note never includes the filename, because that name is user-chosen. The replacement is logged at `warn` with the count and `conversationId`.
+
+**Invariants**
+- The bytes decide, not the label. assistant-ui labels every image part `image/png`, so the guard also catches a HEIC payload whose data URL claims JPEG.
+- Persistence is unchanged. `safePersistenceMessages` keeps the original part, so the thread reloads byte-for-byte. Only the model's copy changes, as with the workspace pruning above.
+- Non-image files, remote URLs, text and JPEG/PNG/GIF/WebP images are left alone. Unchanged messages are returned as the same objects.
+- The client sends a JPEG for a converted HEIC. The server stream classifier maps a provider format rejection to the `unsupportedImage` message (see [Stream Errors Are Sanitized](../architecture/streaming.md#stream-errors-are-sanitized)).
+
+**CSP dependency**: `heic-to` runs its decoder in a Worker built from a `blob:` URL. `middleware.ts` adds `worker-src 'self' blob:` to the Content-Security-Policy. Without it, workers fall back to `script-src`, which has no `blob:`, and the conversion is refused. Changing the CSP directives or the decoder can break the conversion with no server error.
+
+**Focused tests**:
+- `lib/attachments/__tests__/image-normalize.test.ts` — `sniffImageFormat` for the four model-safe types, HEIC, and RIFF that is not WebP; `normalizeImageFile` pass-through, declared-type fix, canvas-first HEIC, the `heic-to` fallback, the HEIC rejection message, SVG refusal, and `toJpegFileName`.
+- `lib/attachments/__tests__/chat-attachment-adapters.test.ts` — `describe('VisionImageAdapter HEIC conversion')`: accepted types include `image/*`, `.heic` and `.heif`; a HEIC is converted before the chip, the upload and the inline pixels; an undecodable HEIC is refused before any upload.
+- `lib/nexus/__tests__/unsupported-image-parts.test.ts` — HEIC `file` part replaced with a note without the filename; a HEIC payload behind a JPEG label; legacy `image` parts and BMP; JPEG/PNG, PDF, remote and text left unchanged; the input is not mutated.
+- `lib/streaming/__tests__/stream-error-message.test.ts` — the `unsupportedImage` rule for provider format rejections, ranked ahead of the 5xx rule.
+- Conditional: `tests/e2e/nexus-heic-photo-attachment.functional.spec.ts` (flow `nexus-heic-photo-attachment`). It chooses a real HEIC fixture (`tests/e2e/fixtures/images/iphone-photo.heic`) through the composer, expects no `image/heic` in any request body, and fails on CSP violations. It also checks that an SVG is refused with an actionable message. It is skipped unless `PLAYWRIGHT_AUTH_ENABLED=true` and needs the authenticated app.
+
+**Minimal validation**: `bunx jest --silent lib/attachments/__tests__/image-normalize.test.ts lib/attachments/__tests__/chat-attachment-adapters.test.ts lib/nexus/__tests__/unsupported-image-parts.test.ts`
+
+**Change guidance**:
+- Add a new format by extending the sniffer and its tests first. Only the four `MODEL_SAFE_IMAGE_MIME_TYPES` may pass through untouched. Every other format must be converted.
+- Do not reintroduce a second image adapter in the composite. Doing so lets a refused image fall through to raw inlining.
+- A change to the CSP `worker-src` or to the `heic-to` import needs the Playwright spec above, because the jest suite mocks `heic-to` and does not exercise the browser Worker.
+
+**Scope boundary**: the server does not convert images. Its only job is to replace unreadable inline parts in the history it sends to the model. Stored conversations are not rewritten.
 
 ### Workspace Chat Editing (#1087)
 

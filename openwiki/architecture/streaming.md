@@ -491,9 +491,9 @@ Caption: decision order for the notice shape in `classifyEmptyTurn`. The `requir
 
 ### Stream Errors Are Sanitized
 
-`toUIMessageStream()` is called with `onError: sanitizeStreamErrorMessage`. Without it, the AI SDK default `An error occurred.` reaches the browser. `lib/streaming/stream-error-message.ts` classifies the error with an ordered rule table (`classifyStreamError`: timeout, rate limit, content blocked, context too long, unavailable, or unknown) and returns one of six fixed strings from `STREAM_ERROR_MESSAGES`. The classifier reads the error, and the reply never quotes it, because provider messages can carry request ids, model ARNs, or prompt fragments. The handler logs the kind.
+`toUIMessageStream()` is called with `onError: sanitizeStreamErrorMessage`. Without it, the AI SDK default `An error occurred.` reaches the browser. `lib/streaming/stream-error-message.ts` classifies the error with an ordered rule table (`classifyStreamError`: unsupported image format, timeout, rate limit, content blocked, context too long, unavailable, or unknown) and returns one of seven fixed strings from `STREAM_ERROR_MESSAGES`. The `unsupportedImage` string is returned when a provider rejects an image format, such as the Bedrock "Unsupported image mime type: image/heic" error. Its text tells the user to re-attach the image as JPEG or PNG. The attach-time conversion that prevents this is described in [HEIC Photos and Unreadable Images](../app-features/overview.md#heic-photos-and-unreadable-images-2042). The classifier reads the error, and the reply never quotes it, because provider messages can carry request ids, model ARNs, or prompt fragments. The handler logs the kind.
 
-Ordering matters: a `504 gateway timeout` must classify as a timeout, not as an outage, so the timeout rule comes first and the broad 5xx rule comes last.
+Ordering matters: the image-format rule comes first, so no broader rule claims it. Its needles are format-specific (`unsupported image`, `image mime type`, `image format could not be determined`) because a bare "image processing failed" could also be a timeout. A `504 gateway timeout` must classify as a timeout, not as an outage, so the timeout rule comes next and the broad 5xx rule comes last.
 
 ### Browser Transport Failures Are Rewritten (#1966)
 
