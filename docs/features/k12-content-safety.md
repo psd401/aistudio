@@ -61,7 +61,19 @@ Amazon Comprehend detection remains on two durable-content boundaries:
 1. **Nexus memory writes** — detected entity types and counts are logged as telemetry (never offsets or values). The write proceeds, and detector errors are non-fatal. A memory is the user's own record of their own life, so names, relationships, dates, ages, and contact details are the substance of the feature rather than a leak; refusing them made memory unusable and produced no user-visible reason (see the 2026-08-05 import incident, issue #1610). Content safety (`processInput`) still evaluates every memory write and would block on a guardrail intervention; with the current detect-only guardrail configuration none occurs.
 2. **Published agent content screening** — detected entity types are logged as telemetry. Content remains unmodified, and detector errors are non-fatal.
 
-Automatic memory extraction is the one place third-party identifiers are still held back, and it is held back at the *prompt*, not by a refusal: it runs unattended after every persisted Nexus turn, so its extraction prompt continues to exclude contact details and sensitive identifiers. Memory import does not, because the user pastes their own export and approves each candidate before it is saved.
+Automatic memory extraction is the one place third-party information is still held back, and it is held back at the *prompt*, not by a refusal: it runs unattended after every persisted Nexus turn, so its extraction prompt excludes contact details and sensitive identifiers and, since #2034, asks only for facts about the user. Nothing about a student, parent, colleague or other person becomes an automatic memory. The same rule is repeated beside the exchange and in the tool description, because the default extraction model (Nova Lite) followed it inconsistently from the system prompt alone, and the consolidation prompt returns NOOP for a candidate about someone else. On recall, the memory fragment tells the chat model that memories describe the user only and are never facts about another person, so a row saved before #2034 cannot carry one student's facts into another student's letter. None of this blocks a write: whatever the extractor returns still goes through the normal save path, with detect-only PII telemetry. Memory import does not apply this scope, because the user pastes their own export and approves each candidate before it is saved. Model behaviour for these rules is checked by `bun run eval:nexus:privacy` (live Bedrock; not in CI).
+
+### Nexus Data-Handling Instructions (#2034)
+
+Every Nexus turn's system prompt starts with a data-handling block (`NEXUS_DATA_HANDLING_PROMPT` in `lib/nexus/system-prompt.ts`), ahead of any skill, workspace, repository or memory fragment:
+
+- Nexus is the district's own approved platform for district work, including student and staff data. Asked whether student data may go in, it says yes.
+- It never suggests setting a Google file or folder to "anyone with the link", public, or other general access, including so that it can read the file.
+- When it cannot read a linked Google file, it asks the user to attach it or paste its contents.
+- It never suggests taking district, student or staff data to a personal or consumer AI tool such as ChatGPT.
+- It keeps each person's facts separate and never carries one student's details into writing about another.
+
+Unit tests (`tests/unit/lib/nexus/nexus-data-handling-prompts.test.ts`) pin the text; `bun run eval:nexus:privacy` checks model behaviour for each rule.
 
 The detection helper applies the existing K-12 type allowlist and confidence floors to standard Comprehend entities, plus custom patterns for district-specific identifiers:
 
