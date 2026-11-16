@@ -1159,7 +1159,7 @@ In both cases, the block renders with `readToolAvailable: false` and/or `updateT
 | `/lib/attachments/use-chat-attachments.ts` | Shared attachment wiring hook for Nexus, decision capture, and Assistant Architect (#1735) |
 | `/lib/nexus/workspace-chat-tools.ts` | Workspace panel editing tools |
 | `/lib/nexus/chat-step-budget.ts` | Multi-step budget (10 vs 20 steps) |
-| `/lib/nexus/system-prompt.ts` | System prompt assembly for Nexus chat (#1839) |
+| `/lib/nexus/system-prompt.ts` | System prompt assembly for Nexus chat (#1839); the district data-handling block comes first (#2034, see [Nexus Data-Handling Rules and User-Only Memory Scope](nexus-data-handling-and-memory-scope.md)) |
 | `/lib/nexus/preview-diagnostics-header.ts` | Unconsumed diagnostics header contract (#1839) |
 | `/lib/atrium/workspace-change-event.ts` | DOM event for panel refresh |
 | `/lib/atrium/workspace-panel-width.ts` | Panel width persistence and clamping (#1793) |

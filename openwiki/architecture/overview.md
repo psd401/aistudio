@@ -164,7 +164,7 @@ Amazon Comprehend detection runs at two durable-content boundaries:
 1. **Nexus memory writes** — Detected entity types logged as telemetry (never values). Writes proceed; detector errors are non-fatal.
 2. **Published agent content** — Detected entity types logged as telemetry. Content remains unmodified.
 
-Automatic memory extraction excludes third-party identifiers at the prompt level, not via refusal, because it runs unattended after each persisted Nexus turn.
+Automatic memory extraction is limited to facts about the user, enforced in its prompts and in the recall suffix rather than by refusal, because it runs unattended after each persisted Nexus turn. Nexus system prompts also open with district data-handling rules. See [Nexus Data-Handling Rules and User-Only Memory Scope](../app-features/nexus-data-handling-and-memory-scope.md).
 
 | PII Type | Source |
 |----------|--------|
