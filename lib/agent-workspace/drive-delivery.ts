@@ -39,12 +39,17 @@ const log = createLogger({ module: "agent-drive-delivery" })
  *    blocked from publishing entirely, which is the bug that cost real decks
  *    and spreadsheets. Drive is where an Office file belongs anyway: it opens
  *    in place, keeps its format, and carries an owner.
- *  - `.svg`, `.json`, `.mp3` and `.mp4` are NOT here. They are publish-only
- *    types (charts, recordings, machine payloads) with no private-delivery
- *    demand, and `.svg` in particular is active content — one script-bearing
- *    SVG shared into a human's Drive is a different risk from the same file
- *    behind a UUID'd S3 link. Adding one later is a one-line change plus a
- *    test; guessing now is not.
+ *  - `.mp3` and `.mp4` are HERE (#2034). Narration (psd-tts, the morning-brief
+ *    podcast) and rendered video (psd-hyperframes) used to go only to the
+ *    public-by-link prefix, so a brief narrating someone's inbox and calendar
+ *    sat on an open URL. Every agent output is now private to the requester by
+ *    default, whatever it contains, and Drive plays both types in place.
+ *  - `.svg` and `.json` are NOT here. They are publish-only types (charts,
+ *    machine payloads) with no private-delivery demand, and `.svg` in
+ *    particular is active content — one script-bearing SVG shared into a
+ *    human's Drive is a different risk from the same file behind a UUID'd S3
+ *    link. Adding one later is a one-line change plus a test; guessing now is
+ *    not.
  *  - `.html` is absent for the same reason it is absent from PUBLIC_EXTENSIONS:
  *    an HTML page is a district document and goes to Atrium.
  *
@@ -62,6 +67,8 @@ export const DRIVE_DELIVERY_CONTENT_TYPES: ReadonlyMap<string, string> =
     [".jpeg", "image/jpeg"],
     [".jpg", "image/jpeg"],
     [".md", "text/markdown"],
+    [".mp3", "audio/mpeg"],
+    [".mp4", "video/mp4"],
     [".pdf", "application/pdf"],
     [".png", "image/png"],
     [

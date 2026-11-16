@@ -1,13 +1,15 @@
 ---
 name: psd-image-gen
 summary: Generate images with OpenAI gpt-image-2.5-flare — shared API key, district-funded.
-description: Generate an image from a text prompt (OpenAI gpt-image-2.5-flare) and return a shareable HTTPS URL. Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
+description: Generate an image from a text prompt (OpenAI gpt-image-2.5-flare) and deliver it privately (a Drive file shared with the requester only). Use for image generation — "make/create/generate a picture or image", logos, illustrations, visuals.
 allowed-tools: Bash(node:*)
 ---
 
 # psd-image-gen
 
-Generate an image from a prompt using OpenAI `gpt-image-2.5-flare`. The image is uploaded to the workspace S3 bucket under the `public-images/` prefix (granted public `s3:GetObject` by the bucket policy) and returned as an unsigned HTTPS URL — anyone who receives the URL can fetch the image. The UUID in the path makes the link unguessable; the security model matches Google Drive "anyone with the link" sharing. Surface the URL to the user — Google Chat will render it as a download link today (inline rendering is a planned follow-up).
+Generate an image from a prompt using OpenAI `gpt-image-2.5-flare`. The PNG is delivered **privately** by default: it is created in your agent account's Drive and shared with the requester alone, as a writer (same path as `psd-publish-file`).
+
+**Private by default, whatever the image shows (#2034).** Every output is private to the person who asked until they deliberately widen it. A public link is an explicit, user-confirmed exception — see **Public links** below.
 
 **Identity.** All commands require `--user <caller-email>`. Pass the email verbatim from the `[caller: Name <email>]` header of the user turn.
 
@@ -20,10 +22,20 @@ node /opt/psd-skills/psd-image-gen/generate.js \
   [--image <path-to-reference-image>] \
   [--size 1024x1024 | 1024x1536 | 1536x1024 | auto] \
   [--quality low | medium | high | auto] \
-  [--background opaque | transparent | auto]
+  [--background opaque | transparent | auto] \
+  [--name "<Drive file name>"] \
+  [--to drive | file | public] [--out <path.png>] [--public-confirmed]
 ```
 
-Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2.5-flare", "prompt": "...", "size": "...", "mode": "generate"|"edit", "sharing": "public-by-link" }`.
+- `--to drive` (default) — private Drive file shared with the requester only.
+- `--to file --out <path.png>` — write the PNG locally and upload nothing, to embed it in something else you are building (a deck, a PDF, an Atrium page).
+- `--to public --public-confirmed` — unsigned public link; see **Public links**.
+
+Returns JSON (default): `{ "url": "<Drive link>", "driveFileId": "...", "fileName": "Image 2026-11-11 0605.png", "sharing": "private-shared-with-caller", "sharedWith": "<caller>", "expires": "never", "model": "gpt-image-2.5-flare", "prompt": "...", "size": "...", "mode": "generate"|"edit" }`.
+
+## Public links (opt-in, user-confirmed)
+
+Only make a public image when the user asks for one **and** confirms after you tell them, in plain words, that **anyone who gets the link can open it without signing in, for 30 days**. Then pass `--to public --public-confirmed`. `--to public` alone returns `public_needs_confirmation` and generates nothing. Never add `--public-confirmed` on your own judgment or because the image "looks harmless" — it asserts the user said yes in this conversation. "Share it with X" is **not** a request for a public link: deliver privately and share the Drive file with the named people (psd-workspace).
 
 ### With a reference image (logo, brand asset, layout)
 
@@ -40,16 +52,16 @@ Accepted reference-image formats: `.png`, `.jpg`/`.jpeg`, `.webp`, `.gif`. Max 8
 
 ## Required Reply Format
 
-After this skill returns a 2xx result, your **next chat message MUST be the bare `url` value on a line by itself**.
+After this skill returns a 2xx result with a `url`, your **next chat message MUST be the bare `url` value on a line by itself**.
 
 - ✅ Correct:
   ```
-  Here you go:
-  https://<agent-workspace-bucket>.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.png
+  Here you go (a private file in your Drive):
+  https://drive.google.com/file/d/<id>/view
   ```
 - ❌ Wrong: Describing the image's contents/layers/composition in prose without pasting the URL. The user cannot see the tool result. If the URL is not in your chat reply, the user got nothing.
 - ❌ Wrong: Wrapping the URL in `[label](url)` or `**bold**` — Google Chat's renderer corrupts these for long S3 URLs. Bare URL only.
-- ❌ Wrong: Re-generating, "fixing," or presigning the returned URL. It is already a public-by-link URL with HTTP 200; do not touch it.
+- ❌ Wrong: Re-generating, "fixing," presigning, or re-publishing the returned URL to make it public. Do not touch it.
 
 You may add one short sentence of context above or below the URL line ("Here's the infographic.") but the URL line itself is non-negotiable.
 
@@ -75,12 +87,11 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 - **`forbidden_capability`** — caller lacks `skill.image-gen` capability. The skill refuses without spending any OpenAI quota. Tell the user to ask an administrator to grant it via `/admin/roles`.
 - **`shared_key_missing`** — the shared OpenAI key has not been bootstrapped. Tell the user to ask an administrator to provision `psd-agent-creds/{env}/shared/openai_api_key` from the AI Studio settings table value.
 - **`upstream_error`** — OpenAI returned non-2xx. Surface the status and a brief message; do not retry automatically.
+- **`public_needs_confirmation`** — `--to public` without `--public-confirmed`. Nothing was generated. Deliver privately (omit `--to public`), or ask the user and only on their yes re-run with both flags.
+- **`share_failed` / `create_failed`** — the Drive delivery failed; nothing became public. Retry once; do not fall back to a public link.
 
 ## Operational Notes
 
 - Always uses the fixed `openai-image` operation broker. The OpenAI key stays in the trusted web tier and is never returned to the model process.
-- Uploads through the owner-bound artifact broker, which derives the storage
-  prefix from the signed invocation and returns a public-by-link URL.
-- Returned URL is **unsigned** and does not embed any STS token — anyone who receives the link can fetch it, with no sign-in, until the `expire-public-artifacts` lifecycle rule deletes the object **30 days** after it is written.
-- Generated imagery is public-by-link by design (flyers, headers, social cards). If an image instead carries personal data — a chart of one student's scores, a screenshot of a record, a photo of an identifiable child — do **not** hand back this URL. Write the bytes under `/home/node/.openclaw/work/` and deliver them privately with `node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, which puts the file in the agent's Drive shared with the caller alone.
-- This was a deliberate switch from presigned URLs (PR #934 dev rollout 2026-05-03): presigned URLs signed with AgentCore's STS session credentials produced intermittent `InvalidToken` failures when fetched through chat clients. Unsigned-public-by-link is the structural fix.
+- Delivers through the owner-bound broker: by default `deliver-to-drive` (a file in the agent account's Drive, shared with the caller alone); only `--to public --public-confirmed` publishes to the unsigned `public-images/` prefix, whose objects the `expire-public-artifacts` lifecycle rule deletes **30 days** after they are written.
+- Private Drive delivery replaced the old default (#2034). Unsigned public links were adopted in #934 only because presigned URLs signed with AgentCore's STS session credentials failed intermittently in chat clients — a transport workaround, never a privacy decision. Drive links avoid that problem without being public.

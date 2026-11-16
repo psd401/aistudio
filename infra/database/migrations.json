@@ -181,6 +181,7 @@
     "188-agent-schedule-owner-notified.sql",
     "189-openclaw-repository-write-scopes.sql",
     "190-voice-model-vertex-live.sql",
-    "191-atrium-capture-execute-scope.sql"
+    "191-atrium-capture-execute-scope.sql",
+    "192-atrium-private-by-default.sql"
   ]
 }

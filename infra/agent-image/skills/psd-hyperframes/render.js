@@ -5,17 +5,22 @@
  *
  * Thin OpenClaw skill: compose a short video by writing a HyperFrames
  * HTML/CSS/JS scene, hand it to the `hyperframes-render` Lambda (headless
- * Chromium + FFmpeg live THERE, not in this image), and return a shareable
- * public-by-link MP4 URL — same delivery + reply-format contract as
- * psd-image-gen / psd-tts (issue #1175).
+ * Chromium + FFmpeg live THERE, not in this image), and deliver the MP4
+ * PRIVATELY by default (#2034): the Lambda stages it under the bucket's
+ * private `agent-renders/` prefix with a short-lived download URL, this script
+ * fetches it and creates a Drive file shared with the requester alone — same
+ * private path as psd-publish-file / psd-image-gen / psd-tts (issue #1175).
+ * A public link needs `--to public --public-confirmed`.
  *
  * Usage:
  *   node render.js --file <composition.html> --duration <sec>
  *                  [--html "<inline composition>"]
  *                  [--css-file <path>] [--js-file <path>]
+ *                  [--audio-file <narration.mp3> | --audio-url <https-url>]
  *                  [--fps 30] [--width 1920] [--height 1080] [--dry-run]
+ *                  [--name "<Drive file name>"] [--to drive|public] [--public-confirmed]
  *
- * Emits JSON: { url, s3Key, bytes, fps, durationSeconds, width, height, sharing }
+ * Emits JSON: { url, driveFileId, bytes, fps, durationSeconds, width, height, sharing }
  * On any failure emits { error, message } and exits non-zero — never a silent null.
  */
 
@@ -23,6 +28,15 @@
 const { validatedFs } = require("../../../validated-fs.cjs");
 
 const http = require('node:http');
+const path = require('node:path');
+
+const { publishArtifact } = require('../_shared/artifact-publisher');
+const { deliverFileToDrive } = require('../_shared/drive-deliverer');
+const {
+  DeliveryChoiceError,
+  driveFileName,
+  resolveDelivery,
+} = require('../_shared/delivery-choice');
 const AWS_RELAY_HOST = '127.0.0.1';
 const AWS_RELAY_PORT = 18791;
 const AWS_RELAY_PATH = '/aws-skill/hyperframes/invoke';
@@ -63,6 +77,14 @@ const MAX_DIMENSION = 3840;
 // A separate serialized-payload check below accounts for JSON escaping before
 // enforcing Lambda's exact 6 MiB synchronous invocation ceiling.
 const MAX_COMPOSITION_BYTES = 4 * 1024 * 1024;
+// A local narration MP3 (psd-tts --to file) is inlined as a data: URI, so it
+// spends the composition budget. ~2 MiB is about four minutes of Polly speech
+// at its default bitrate — more than the 180s duration cap needs.
+const MAX_AUDIO_FILE_BYTES = 2 * 1024 * 1024;
+// The rendered MP4 is fetched into memory before delivery. Matches the Drive
+// delivery and public-artifact ceilings (MAX_DRIVE_DELIVERY_BYTES).
+const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 function fail(message, code = 'error') {
   process.stderr.write(`Error: ${message}\n`);
@@ -265,6 +287,36 @@ function resolveAudioUrl(args) {
   return url;
 }
 
+/**
+ * `--audio-file <path.mp3>`: a local narration (psd-tts --to file) inlined as a
+ * data: URI, so the soundtrack never needs a public URL (#2034).
+ */
+function resolveAudioFile(args) {
+  if (args.audio_file === undefined) return undefined;
+  if (args.audio_file === true) fail('--audio-file requires a path', 'bad_args');
+  if (args.audio_url !== undefined) {
+    fail('Use --audio-file or --audio-url, not both', 'bad_args');
+  }
+  const file = String(args.audio_file);
+  if (path.extname(file).toLowerCase() !== '.mp3') {
+    fail('--audio-file must be an .mp3 (make one with psd-tts --to file)', 'bad_args');
+  }
+  let stat;
+  try {
+    stat = validatedFs.statSync(file);
+  } catch (err) {
+    fail(`--audio-file not found or unreadable: ${file} (${err.message})`, 'bad_args');
+  }
+  if (!stat.isFile() || stat.size === 0) fail(`--audio-file is empty or not a file: ${file}`, 'bad_args');
+  if (stat.size > MAX_AUDIO_FILE_BYTES) {
+    fail(
+      `--audio-file is ${stat.size} bytes; the inline soundtrack limit is ${MAX_AUDIO_FILE_BYTES}. Shorten the narration.`,
+      'bad_args'
+    );
+  }
+  return `data:audio/mpeg;base64,${validatedFs.readFileSync(file).toString('base64')}`;
+}
+
 function validateCompositionSize(html, css, js) {
   const bytes =
     Buffer.byteLength(html, 'utf8') +
@@ -341,8 +393,7 @@ function buildPayload(args) {
   let html = resolveCompositionHtml(args);
   const css = resolveOptionalSource(args, 'css', 'css_file');
   const js = resolveOptionalSource(args, 'js', 'js_file');
-  const audioUrl = resolveAudioUrl(args);
-  validateCompositionSize(html, css, js);
+  const audioUrl = resolveAudioFile(args) || resolveAudioUrl(args);
   const durationSeconds = resolveDuration(args);
   const fps = resolveFps(args, durationSeconds);
   const { width, height } = resolveDimensions(args);
@@ -350,6 +401,8 @@ function buildPayload(args) {
     fail('--dry-run is a flag and takes no value', 'bad_args');
   }
   if (audioUrl) html = injectAudioElement(html, audioUrl, durationSeconds);
+  // After injection: an inlined --audio-file soundtrack spends this budget too.
+  validateCompositionSize(html, css, js);
 
   // Identity is deliberately absent. The root relay resolves the owner from
   // the installed signed invocation context and injects userEmail only after
@@ -434,32 +487,107 @@ async function invokeRender(payload, deps = {}) {
   return result;
 }
 
+/** Where the MP4 goes. Resolved BEFORE the render so a refusal costs nothing. */
+function resolveVideoDelivery(args) {
+  try {
+    return resolveDelivery(args, { allowed: ['drive', 'public'] });
+  } catch (err) {
+    if (err instanceof DeliveryChoiceError) fail(err.message, err.code);
+    throw err;
+  }
+}
+
+/**
+ * Fetch the staged MP4 from the Lambda's short-lived presigned URL. Used once,
+ * seconds after it was minted — never handed to a chat client (#934).
+ */
+async function downloadRenderedVideo(downloadUrl) {
+  if (typeof downloadUrl !== 'string' || !downloadUrl.startsWith('https://')) {
+    fail('Render Lambda returned no download URL for the rendered video', 'render_failed');
+  }
+  const response = await fetch(downloadUrl, {
+    redirect: 'error',
+    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    fail(`Could not fetch the rendered video: HTTP ${response.status}`, 'download_failed');
+  }
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_VIDEO_BYTES) {
+    fail(`Rendered video is ${declared} bytes; the delivery limit is ${MAX_VIDEO_BYTES}`, 'too_large');
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length === 0) fail('Rendered video was empty', 'render_failed');
+  if (bytes.length > MAX_VIDEO_BYTES) {
+    fail(`Rendered video is ${bytes.length} bytes; the delivery limit is ${MAX_VIDEO_BYTES}`, 'too_large');
+  }
+  return bytes;
+}
+
+async function deliverVideo(bytes, destination, args, deps = {}) {
+  if (destination === 'public') {
+    const publish = deps.publish || publishArtifact;
+    const { url, key } = await publish(bytes, '.mp4', 'video/mp4');
+    return {
+      url,
+      s3Key: key,
+      sharing: 'public-by-link',
+      expires: '30 days after publication',
+    };
+  }
+  const deliver = deps.deliver || deliverFileToDrive;
+  const delivered = await deliver(bytes, driveFileName(args.name, '.mp4', 'Video'), 'video/mp4');
+  return {
+    url: delivered.webViewLink,
+    driveFileId: delivered.fileId,
+    fileName: delivered.fileName,
+    sharing: 'private-shared-with-caller',
+    sharedWith: delivered.sharedWith,
+    expires: 'never',
+  };
+}
+
 async function main(argv = process.argv, deps = {}) {
   const args = parseArgs(argv);
   if (args.help) {
     process.stdout.write(
       'Usage: render.js --file <composition.html> --duration <sec> ' +
         '[--html "<inline>"] [--css-file <path>] [--js-file <path>] ' +
-        '[--audio-url <https-mp3-url>] ' +
-        '[--fps 30] [--width 1920] [--height 1080] [--dry-run]\n',
+        '[--audio-file <narration.mp3> | --audio-url <https-mp3-url>] ' +
+        '[--fps 30] [--width 1920] [--height 1080] [--dry-run] ' +
+        '[--name "<Drive file name>"] [--to drive|public] [--public-confirmed]\n',
     );
     process.exit(0);
   }
 
+  const destination = resolveVideoDelivery(args);
   const payload = buildPayload(args);
   const result = await invokeRender(payload, deps);
 
-  emit({
-    url: result.url,
-    s3Key: result.s3Key,
+  const meta = {
     bytes: result.bytes,
     fps: result.fps,
     durationSeconds: result.durationSeconds,
     width: result.width,
     height: result.height,
-    sharing: result.sharing || 'public-by-link',
-    ...(result.dryRun ? { dryRun: true, localPath: result.localPath } : {}),
-  });
+  };
+  if (result.dryRun) {
+    emit({ ...meta, dryRun: true, localPath: result.localPath });
+    return;
+  }
+
+  const download = deps.download || downloadRenderedVideo;
+  const bytes = await download(result.downloadUrl);
+  let delivered;
+  try {
+    delivered = await deliverVideo(bytes, destination, args, deps);
+  } catch (err) {
+    // A Drive failure never falls back to a public link.
+    const body = err && typeof err === 'object' ? err.responseBody : null;
+    const code = body && typeof body.code === 'string' ? body.code : 'delivery_failed';
+    fail(err instanceof Error ? err.message : String(err), code);
+  }
+  emit({ ...delivered, ...meta, bytes: bytes.length });
 }
 
 if (require.main === module) {
@@ -475,6 +603,9 @@ module.exports = {
   findCompositionRootOpenTagEnd,
   injectAudioElement,
   invokeRender,
+  downloadRenderedVideo,
+  deliverVideo,
+  MAX_AUDIO_FILE_BYTES,
   requestRenderRelay,
   MAX_DURATION_SECONDS,
   MAX_INVOKE_PAYLOAD_BYTES,

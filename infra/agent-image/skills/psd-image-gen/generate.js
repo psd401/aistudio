@@ -7,12 +7,19 @@
  *                    [--size 1024x1024|1024x1536|1536x1024|auto]
  *                    [--quality low|medium|high|auto]
  *                    [--background opaque|transparent|auto]
+ *                    [--name "<Drive file name>"]
+ *                    [--to drive|file|public] [--out <path.png>] [--public-confirmed]
  *
- * Calls OpenAI v1/images/generations with model gpt-image-2.5-flare,
- * uploads the result to the agent workspace S3 bucket, and returns a
- * presigned URL valid for 1 hour. The shared OpenAI key is read from
- * Secrets Manager via the psd-credentials skill — never from env vars
- * or files.
+ * Calls the image broker (gpt-image-2.5-flare) and delivers the PNG PRIVATELY
+ * by default (#2034): the file is created in the agent account's Drive and
+ * shared with the requester alone.
+ *
+ *   --to drive   (default) private Drive file, shared with the caller only.
+ *   --to file    write the PNG to --out and upload nothing (for embedding in
+ *                another deliverable the agent is building).
+ *   --to public  unsigned public-by-link URL, deleted after 30 days. Refused
+ *                with `public_needs_confirmation` unless --public-confirmed is
+ *                also passed: the agent must ask the user and get a yes.
  */
 
 'use strict';
@@ -25,13 +32,17 @@ const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
 const { requestAgentBroker } = require('../_shared/agent-broker');
+const { deliverFileToDrive } = require('../_shared/drive-deliverer');
+const {
+  DeliveryChoiceError,
+  driveFileName,
+  resolveDelivery,
+} = require('../_shared/delivery-choice');
 
-// Skill output lives under `public-images/` which is granted public
-// `s3:GetObject` by the workspace bucket's resource policy (see
-// agent-platform-stack.ts:AgentWorkspaceBucket). Anyone who receives the
-// returned URL can fetch the image — same security model as Google
-// Drive "anyone with the link" sharing. The UUID in the key makes the
-// path unguessable. Keep this prefix in sync with the bucket policy.
+// Output is PRIVATE by default (#2034): a Drive file shared with the caller
+// alone. Only `--to public --public-confirmed` writes to the unsigned
+// `public-images/` prefix, which the workspace bucket policy makes readable by
+// anyone with the URL (deleted after 30 days by `expire-public-artifacts`).
 // The unversioned alias rather than a dated snapshot. The dated form
 // (`gpt-image-2-2026-04-21`) is gated by an OpenAI per-project allowlist
 // and silently 404s for projects that don't have that snapshot enabled —
@@ -223,9 +234,56 @@ async function requestImage(params, referenceDataUrl) {
   return Buffer.from(result.imageBase64, 'base64');
 }
 
-async function uploadAndShare(bytes, userEmail) {
-  void userEmail;
-  return publishArtifact(bytes, '.png', 'image/png');
+/**
+ * Resolve where the PNG goes before any paid generation call, so a refused
+ * public link or a bad --out costs nothing.
+ */
+function resolveImageDelivery(args) {
+  let destination;
+  try {
+    destination = resolveDelivery(args, { allowed: ['drive', 'file', 'public'] });
+  } catch (err) {
+    if (err instanceof DeliveryChoiceError) fail(err.message, err.code);
+    throw err;
+  }
+  const out = args.out && args.out !== true ? path.resolve(String(args.out)) : null;
+  if (destination === 'file') {
+    if (!out) fail('--to file needs --out <path.png>', 'bad_args');
+    if (!out.toLowerCase().endsWith('.png')) fail('--out must end in .png', 'bad_args');
+  } else if (args.out !== undefined) {
+    fail('--out is only used with --to file', 'bad_args');
+  }
+  return { destination, out };
+}
+
+async function deliverImage(bytes, delivery, args) {
+  if (delivery.destination === 'file') {
+    validatedFs.writeFileSync(delivery.out, bytes);
+    return { path: delivery.out, sharing: 'local-file' };
+  }
+  if (delivery.destination === 'public') {
+    const { url, key } = await publishArtifact(bytes, '.png', 'image/png');
+    return {
+      url,
+      s3Key: key,
+      // Unsigned: anyone with the link can fetch it, with no sign-in.
+      sharing: 'public-by-link',
+      expires: '30 days after publication',
+    };
+  }
+  const delivered = await deliverFileToDrive(
+    bytes,
+    driveFileName(args.name, '.png', 'Image'),
+    'image/png',
+  );
+  return {
+    url: delivered.webViewLink,
+    driveFileId: delivered.fileId,
+    fileName: delivered.fileName,
+    sharing: 'private-shared-with-caller',
+    sharedWith: delivered.sharedWith,
+    expires: 'never',
+  };
 }
 
 function optionalString(value, fallback) {
@@ -262,10 +320,11 @@ function validateGenerationOptions(args) {
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
+    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent] [--name "<Drive file name>"] [--to drive|file|public] [--out <path.png>] [--public-confirmed]');
     process.exit(0);
   }
   const { size, quality, background, imagePath } = validateGenerationOptions(args);
+  const delivery = resolveImageDelivery(args);
 
   // --image is optional. When present it must be a real path (no `--image`
   // followed by another flag) and selects the /v1/images/edits endpoint so
@@ -282,20 +341,16 @@ async function main() {
     params,
     referenceImage ? referenceImage.dataUrl : null,
   );
-  const { url, key } = await uploadAndShare(bytes, args.user);
+  const delivered = await deliverImage(bytes, delivery, args);
 
   emit({
-    url,
-    s3Key: key,
+    ...delivered,
     model: MODEL_ID,
     prompt: args.prompt,
     size,
     quality,
     background,
     mode: referenceImage ? 'edit' : 'generate',
-    // The URL is unsigned and does not expire. Anyone with the link can fetch
-    // until the object is deleted (manual lifecycle policy may be added later).
-    sharing: 'public-by-link',
   });
 }
 
