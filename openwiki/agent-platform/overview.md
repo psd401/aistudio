@@ -10,6 +10,15 @@ openwiki:
     - lib/agent-workspace/storage-broker.ts
     - infra/agent-image/skills/psd-publish-file/publish.js
     - infra/agent-image/skills/_shared/drive-deliverer.js
+    - infra/agent-image/skills/_shared/delivery-choice.js
+    - infra/agent-image/artifact_publisher.py
+    - infra/agent-image/skills/psd-image-gen/generate.js
+    - infra/agent-image/skills/psd-tts/scripts/synthesize.py
+    - infra/agent-image/skills/psd-hyperframes/render.js
+    - infra/hyperframes-render/handler.js
+    - infra/agent-image/skills/chat-chart/run.js
+    - infra/agent-image/skills/psd-morning-brief/run.js
+    - infra/agent-image/skills/psd-last30days/scripts/last30days.py
     - lib/agent-schedules/validation.ts
     - lib/agent-schedules/schedule-description.ts
     - lib/agent-schedules/schedule-audit.ts
@@ -57,6 +66,12 @@ openwiki:
     - tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts
     - tests/unit/agent-image-drive-delivery-drift.test.ts
     - infra/agent-image/skills/psd-publish-file/publish.test.js
+    - infra/agent-image/skills/_shared/delivery-choice.test.js
+    - infra/agent-image/skills/psd-hyperframes/render.test.js
+    - infra/agent-image/skills/chat-chart/run.test.js
+    - infra/agent-image/skills/psd-morning-brief/run.test.js
+    - infra/agent-image/test_tts_synthesize.py
+    - infra/agent-image/test_artifact_publisher.py
     - infra/lambdas/agent-cron/thread-session-map.test.ts
     - infra/lambdas/agent-router/thread-session-map.test.ts
     - tests/e2e/atrium-sandbox-script-order.spec.ts
@@ -152,7 +167,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-strategic-plan` — Peninsula 2030 strategic plan queries from live repository 166
 
 **Utilities**
-- `chat-card`, `chat-chart` — Chat UI enhancements
+- `chat-card`, `chat-chart` — Chat UI enhancements. `chat-chart` renders a card PNG to the public `public-images/` prefix by default, the one accepted public-by-default exception; a sensitive chart is delivered privately instead (see [Private File Delivery to Drive](#private-file-delivery-to-drive-1885))
 - `psd-brand-guidelines` — PSD branding enforcement
 - `psd-skills-meta` — Skill metadata and discovery
 
@@ -385,6 +400,8 @@ node run.js add-person --email "newteacher@psd401.net" --first-name Ann --last-n
 
 The person's first sign-in links this row by email and keeps the `id`, so grants made beforehand apply automatically.
 
+**Ask before creating (#2034).** `add-person` writes an AI Studio account record for someone who has never signed in, so the skill asks the requester first and runs it only after a yes in a later message. A request to "share with X" is never a publish: it is a `set-visibility --level group --add-grants user:<id>` grant, and `publish`, `--level internal`, and `--level public` are not used for it. The same rule covers the Workspace skill, which asks before commenting on or editing a file the requester does not own (`psd-workspace/SKILL.md`). Both rules are checked by the L1 evals `atrium-add-person-asks-first` and `comment-on-others-files-asks-first` in `infra/agent-image/eval/suites/regression.yaml`.
+
 **Domain restriction**: Only `@psd401.net` staff addresses accepted. Student-number addresses (`@edtools.psd401.net`) and other domains are rejected.
 
 **Role assignment**: New rows get `staff` role with source `manual` — the default role sign-in gives a new staff user. Required because the first sign-in takes the link path which never calls `assignDefaultRole`.
@@ -452,7 +469,7 @@ Validation: `python3 -m venv /tmp/verify-venv && /tmp/verify-venv/bin/pip instal
 
 **When to consult**: changing the image model, the OpenAI image request body, or the error text an image failure produces. Nexus chat image generation is a separate path. It is documented in [app-features/overview.md](../app-features/overview.md#gemini-image-model-ids-1967).
 
-**Flow**: `infra/agent-image/skills/psd-image-gen/generate.js` calls the agent broker with `kind: "openai-image"` on `/api/agent/credentials`. That route checks `canAccessSkill(ownerEmail, "skill.image-gen")` and then calls `executeOpenAiImageOperation` in `lib/agent-credentials/owner-operation-broker.ts`. The broker reads the shared `openai_api_key` through `AgentCredentialBroker.get` with `sharedOnly`, posts to OpenAI's image endpoint, and returns the base64 image. The skill then stores the image under the workspace `public-images/` prefix and returns an unsigned link, as described in `SKILL.md`.
+**Flow**: `infra/agent-image/skills/psd-image-gen/generate.js` calls the agent broker with `kind: "openai-image"` on `/api/agent/credentials`. That route checks `canAccessSkill(ownerEmail, "skill.image-gen")` and then calls `executeOpenAiImageOperation` in `lib/agent-credentials/owner-operation-broker.ts`. The broker reads the shared `openai_api_key` through `AgentCredentialBroker.get` with `sharedOnly`, posts to OpenAI's image endpoint, and returns the base64 image. `generate.js` then resolves the destination before that paid call (`resolveImageDelivery` → `resolveDelivery` in `_shared/delivery-choice.js`). The default delivers the PNG through `deliverFileToDrive` as a private Drive file shared with the caller alone. `--to public --public-confirmed` is the only route to the unsigned `public-images/` link (see [Destination gate](#private-file-delivery-to-drive-1885)).
 
 **Model pin**: `AGENT_IMAGE_MODEL_ID` (`"gpt-image-2.5-flare"`) is exported from `owner-operation-broker.ts` and written into the request body by `openAiImageRequestBody`. The skill's `MODEL_ID` only reports the model back, but it must equal the broker value. The `SKILL.md` text and the skill's `package.json` description also name it. On 2026-10-26 OpenAI stopped serving `gpt-image-2` to the district project, and every call failed with 403 `model_not_found`.
 
@@ -606,13 +623,38 @@ The `psd-print-pdf`, `psd-media`, and `psd-transcribe` skills route through a sh
 - Validates workspace-relative paths against traversal, backslashes, and control characters
 - Removes scratch objects on all exit paths (important for transcription: the transport copy is someone's voice)
 
-The relay injects `workspacePrefix` from the web-verified invocation context — the caller never states who it is, preventing cross-owner access. Publishing stays separate through `psd-publish-file` and its sensitivity gate.
+The relay injects `workspacePrefix` from the web-verified invocation context — the caller never states who it is, preventing cross-owner access. Publishing stays separate through `psd-publish-file` and its `--public-confirmed` gate.
 
 ### Private File Delivery to Drive (#1885)
 
-**When to consult**: any change to how an agent hands a generated file to a person (`psd-publish-file`, the only caller of `_shared/drive-deliverer.js`, plus the SKILL.md guidance of the other file-producing skills that points at it), to the `drive-upload` / `deliver-to-drive` storage operations, or to the Drive delivery type policy.
+**When to consult**: any change to how an agent hands a generated file to a person: the destination gate in `_shared/delivery-choice.js` and the skills that call it, the Python twin `deliver_to_drive` in `infra/agent-image/artifact_publisher.py`, the `_shared/drive-deliverer.js` entry, the `drive-upload` / `deliver-to-drive` storage operations, or the Drive delivery type policy.
 
 **Why it exists**: Before #1885 the only outbound path for an agent-made file was `publishArtifact()`, an unsigned public-by-link S3 object. Office files could not be published at all, and Drive `drive +upload` is refused because the Workspace CLI runs in an empty temp directory on the web tier. A file containing student or staff data therefore had either a public link or nothing. The new default creates the file inside the agent's own account (`agnt_<uniqname>@psd401.net`) and shares it with exactly one person, the caller, as a `writer`.
+
+**Destination gate (#2034)**: every agent output is private to the requester by default, whatever it contains. Visibility is never decided by scanning content: a morning brief about someone's meetings and colleagues never matches a phone or student-number pattern, and it is still private. `resolveDelivery(args, { allowed })` in `_shared/delivery-choice.js` makes the decision from two flags, `--to` and `--public-confirmed`. `--public-confirmed` records that the agent asked the user and the user said yes, so a public link cannot come from a default or a copied example. The flag is friction, not proof, because the skill cannot see the chat.
+
+```mermaid
+flowchart TD
+    A["Parsed args: --to, --public-confirmed"] --> B{"--to omitted or valid for this skill?"}
+    B -- "no" --> X["refuse bad_args"]
+    B -- "omitted or drive" --> D["Drive file shared with the caller only"]
+    B -- "file (psd-image-gen, psd-tts)" --> L["Local file, nothing uploaded"]
+    B -- "public" --> C{"--public-confirmed set?"}
+    C -- "no" --> R["refuse public_needs_confirmation, nothing uploaded"]
+    C -- "yes" --> P["Unsigned public-images link, deleted after 30 days"]
+```
+
+*The gate runs before any paid generation call or render, so a refused public link costs nothing.*
+
+| Skill | Default | Other destinations |
+|---|---|---|
+| `psd-publish-file` | Drive | `--to public --public-confirmed` |
+| `psd-image-gen` | Drive | `--to file --out <path.png>`; `--to public --public-confirmed` |
+| `psd-tts` | Drive | `--to file --out <path.mp3>` (no upload; used as a soundtrack); `--to public --public-confirmed`, which is the only path that runs the narration personal-data gate (#1886) |
+| `psd-hyperframes` | Drive, from a private `agent-renders/` staging object (see [Hyperframes Render Function](../infrastructure/overview.md#hyperframes-render-function-2034)) | `--to public --public-confirmed`; a Drive failure never falls back to public |
+| `psd-morning-brief` podcast | Drive, through `psd-tts --name "Morning Brief <date>"` | none; the brief never passes `--to public` |
+| `chat-chart` | Inline Chat card on `public-images/` for non-sensitive charts (the accepted exception: Google Chat fetches card images anonymously) | A chart flagged `--sensitive` or whose text matches a personal-data pattern is delivered to Drive with no card |
+| `psd-last30days` (`--format html` or `both`) | A local HTML file (`html_path`) | Returns a `deliver_with` `psd-atrium create-artifact` command for a private Atrium artifact; nothing is uploaded |
 
 **Flow**: the skill stages bytes through the broker, then asks the broker to create the Drive copy. The bytes never pass through the broker's JSON route.
 
@@ -646,13 +688,14 @@ sequenceDiagram
 - **Staging cleanup is non-fatal.** The staging object is deleted after Drive succeeds; a failure there is logged, never thrown, so the agent does not retry into a second copy.
 - **Bounded time.** The server's worst case (initiate + upload + share) is 210 s and must fit inside the skill's 240 s `DELIVER_TIMEOUT_MS`. If the skill gives up first, the server still delivers and a retry creates a duplicate.
 
-**Type and size policy**: `DRIVE_DELIVERY_CONTENT_TYPES` in `/lib/agent-workspace/drive-delivery.ts` allows `.csv .docx .jpeg .jpg .md .pdf .png .pptx .txt .webp .xlsx`, each with exactly one content type. `MAX_DRIVE_DELIVERY_BYTES` is 100 MiB, equal to `MAX_PUBLIC_ARTIFACT_BYTES`. Publish-only types (`.svg`, `.json`, `.mp3`, `.mp4`) and `.html` are not deliverable; HTML belongs in Atrium. A declared content type that disagrees with the extension is refused as `content_type_mismatch`.
+**Type and size policy**: `DRIVE_DELIVERY_CONTENT_TYPES` in `/lib/agent-workspace/drive-delivery.ts` allows `.csv .docx .jpeg .jpg .md .mp3 .mp4 .pdf .png .pptx .txt .webp .xlsx`, each with exactly one content type. `.mp3` and `.mp4` joined in #2034 so narration and rendered video can be delivered privately. `MAX_DRIVE_DELIVERY_BYTES` is 100 MiB, equal to `MAX_PUBLIC_ARTIFACT_BYTES`. Publish-only types (`.svg`, `.json`) are not deliverable, and `.html` is not deliverable either; HTML belongs in Atrium. A declared content type that disagrees with the extension is refused as `content_type_mismatch`.
 
 **Routing and gates**:
 - `/app/api/agent/workspace-storage/route.ts` lists `drive-upload` and `deliver-to-drive` in `STORAGE_OPERATIONS`, dispatching to `createDriveDeliveryUpload` and `deliverStagedUploadToDrive`. `DriveDeliveryError` surfaces its `code` in the JSON error.
 - `/infra/agent-image/mantle_proxy.py` admits both operations on the model-callable path (the same class as `publish`), and the finalization drain closes them before root sync begins.
-- `/infra/agent-image/skills/_shared/drive-deliverer.js` (`deliverFileToDrive`) is the agent-side entry used by `psd-publish-file`; `staged-upload.js` owns the signed PUT, and `artifact-publisher.js` is the public-link ending of the same staging move.
-- `psd-publish-file/SKILL.md` tells the agent to run with no `--to` flag and documents the error codes (`share_failed`, `unsupported_type`, `content_type_mismatch`).
+- `/infra/agent-image/skills/_shared/drive-deliverer.js` (`deliverFileToDrive`) is the agent-side entry used by `psd-publish-file`, `psd-image-gen`, `psd-hyperframes`, and the `chat-chart` private branch; `staged-upload.js` owns the signed PUT, and `artifact-publisher.js` is the public-link ending of the same staging move. `_shared/delivery-choice.js` (`resolveDelivery`, `driveFileName`, `PUBLIC_NEEDS_CONFIRMATION_MESSAGE`) is the shared destination gate for those skills and for `psd-tts`.
+- `infra/agent-image/artifact_publisher.py` is the Python twin: `deliver_to_drive` (240 s broker timeout) and `public_needs_confirmation` mirror the JavaScript gate for the `psd-tts` synthesizer. `publish_artifact` is documented as opt-in only.
+- `psd-publish-file/SKILL.md` tells the agent to run with no `--to` flag and documents the error codes (`share_failed`, `unsupported_type`, `content_type_mismatch`, `public_needs_confirmation`).
 
 **Extension seam: adding a deliverable type.** Change `DRIVE_DELIVERY_CONTENT_TYPES` in `drive-delivery.ts` and its skill-side mirror `DRIVE_DELIVERABLE_TYPES` in `drive-deliverer.js`, which `publish.js` imports for its `--to drive` gate. The public path has a separate list: `PUBLISHABLE_TYPES` in `publish.js` mirrors `PUBLIC_EXTENSIONS` in `storage-broker.ts`. `tests/unit/agent-image-drive-delivery-drift.test.ts` and the "publishable set matches the storage broker" test in `publish.test.js` fail when these diverge. Update `SKILL.md`'s "What you can deliver" list too. Non-goals: adding `.svg` or other active content to Drive without an explicit decision; the source comment calls that a different risk.
 
@@ -662,9 +705,16 @@ sequenceDiagram
 - `tests/unit/agent-workspace-storage-route.test.ts` — route operations and error mapping.
 - `tests/unit/agent-image-drive-delivery-drift.test.ts` — skill-side mirrors, the 30-day public-expiry wording, and that other file skills point to the private path.
 - `infra/agent-image/skills/psd-publish-file/publish.test.js` — argument handling, type gate, the broker publishable-set contract, and a Drive refusal surfacing its broker code.
+- `infra/agent-image/skills/_shared/delivery-choice.test.js` — the destination gate: the default is `drive`, `--to public` without `--public-confirmed` is refused as `public_needs_confirmation`, `--public-confirmed` takes no value, and `driveFileName` produces a broker-safe name.
+- `infra/agent-image/test_artifact_publisher.py` — `public_needs_confirmation` and the Drive delivery wrapper in the Python twin.
+- `infra/agent-image/test_tts_synthesize.py`, class `TestPrivateByDefault` — the `psd-tts` default is Drive, `--to file` uploads nothing, and `--to public` without the flag fails before any Polly call.
+- `infra/agent-image/skills/psd-hyperframes/render.test.js` and `infra/agent-image/skills/chat-chart/run.test.js` — the private video path and the sensitive-chart private branch.
+- `infra/agent-image/skills/psd-morning-brief/run.test.js` — the podcast is narrated with `--name "Morning Brief <date>"` and never with `--to public`.
 
 **Validation**:
 - `bun run test:skill:publish-file` (runs the skill package's own `bun test` suite).
+- `bun test infra/agent-image/skills/_shared/delivery-choice.test.js` (narrow, runs the shared gate alone).
+- `cd infra/agent-image && python -m pytest -q test_artifact_publisher.py` and `python -m pytest -q test_tts_synthesize.py -k PrivateByDefault` (quiet Python twin and `psd-tts` checks).
 - `bun run test -- tests/unit/lib/agent-workspace/drive-delivery.test.ts tests/unit/lib/agent-workspace/storage-broker-drive-delivery.test.ts tests/unit/agent-image-drive-delivery-drift.test.ts` (root Jest, narrow paths).
 - Consumer boundary: the drift test and `infra/test/agent-skill-cdn-allowlist.test.ts` (which allowlists `drive.google.com` for returned Drive links) are the checks that cross from broker code into the shipped skill. Changing the skill files requires rebuilding the agent image; the source of truth for skill text is `infra/agent-image/skills/`.
 
@@ -1909,3 +1959,8 @@ Skills are published and managed through:
 - **[app-features/overview.md](../app-features/overview.md)** — Features agents interact with
 - **[api-integration/overview.md](../api-integration/overview.md)** — External API access
 - **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+ucture deployment
+s/overview.md)** — Features agents interact with
+- **[api-integration/overview.md](../api-integration/overview.md)** — External API access
+- **[infrastructure/overview.md](../infrastructure/overview.md)** — Agent infrastructure deployment
+ucture deployment
