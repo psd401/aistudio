@@ -9,6 +9,9 @@ openwiki:
     - Dockerfile
     - Dockerfile.dev
     - Dockerfile.graviton
+    - infra/hyperframes-render/handler.js
+    - infra/lib/constructs/compute/hyperframes-render-function.ts
+    - infra/lib/agent-platform-stack.ts
     - infra/lib/frontend-stack-ecs.ts
     - infra/lib/constructs/ecs-service.ts
     - infra/test/ecs-scheduled-scaling.test.ts
@@ -393,6 +396,52 @@ Google Chat messages carry **32,000 bytes** of text plus cards—a combined budg
 | `agent-triage-poll/` | Email triage dispatcher and worker: a 5-minute poll and a daily learning run fan out one FIFO message per opted-in user. See [agent-platform triage topology](../agent-platform/overview.md#runtime-topology) |
 | `agent-triage-digest/` | Per-user daily triage digest, invoked by EventBridge Scheduler and summing `dailyStats` through `digest-window.ts`. See [agent-platform triage](../agent-platform/overview.md#email-triage-content-first-classification-1855-1861) |
 
+### Hyperframes Render Function (#2034)
+
+**Source**: `/infra/lib/constructs/compute/hyperframes-render-function.ts`, `/infra/hyperframes-render/handler.js`, `/infra/lib/agent-platform-stack.ts` (bucket lifecycle and policy)
+
+**When to consult**: changing where the rendered MP4 is staged, the `agent-renders/` lifecycle rule, the render role's S3 statement, or the workspace bucket's public-read statement. The skill side of the same flow is in [Private File Delivery to Drive](../agent-platform/overview.md#private-file-delivery-to-drive-1885).
+
+**Why it changed**: the render function used to write to the unsigned `public-images/` prefix and return a public URL for every video. Since #2034 it stages the MP4 privately, and the agent skill moves the bytes into the requester's Drive. Nothing this Lambda writes is public.
+
+**Flow**: the `psd-hyperframes` skill invokes the container Lambda synchronously with a composition. The handler renders with the `hyperframes` CLI, puts the MP4 under `agent-renders/<email>/<uuid>.mp4`, and returns a presigned GET valid for `DOWNLOAD_URL_TTL_SECONDS` (900 s). The skill fetches that URL at once and then delivers it, so the URL never reaches a chat client.
+
+```mermaid
+sequenceDiagram
+    participant Skill as psd-hyperframes render.js
+    participant Lambda as hyperframes-render handler.js
+    participant S3 as workspace bucket agent-renders/
+    participant Drive as deliverFileToDrive
+    Skill->>Lambda: composition payload (userEmail injected by relay)
+    Lambda->>Lambda: hyperframes CLI renders MP4 in a work dir
+    Lambda->>S3: PutObject agent-renders/email/uuid.mp4
+    Lambda-->>Skill: downloadUrl (presigned GET, 900 s), s3Key, sharing private-staging
+    Skill->>S3: GET downloadUrl (https only, redirects refused)
+    Skill->>Drive: create Drive file shared with the caller only
+```
+
+*The skill's `--to public --public-confirmed` branch publishes through `publishArtifact` instead of Drive. Both branches are resolved before the render, so a refused public link costs no render.*
+
+**Runtime invariants**:
+- **No public write.** The render role's statement `StageRenderedVideoInAgentRenders` grants `s3:PutObject` and `s3:GetObject` only on `agent-renders/*`. `GetObject` exists so the presigned URL is valid; the function never lists or deletes.
+- **Staging expires.** The `expire-agent-renders` lifecycle rule deletes `agent-renders/` objects after one day. The skill moves the bytes within the same turn.
+- **Public-read carve-out is opt-in.** The bucket's `PublicReadOnPublicImagesPrefix` statement is kept, and `BlockPublicPolicy` and `RestrictPublicBuckets` stay false so it can exist. Every default path is private; the chat-chart card PNG is the one remaining default public write (see [Private File Delivery to Drive](../agent-platform/overview.md#private-file-delivery-to-drive-1885)).
+- **No fallback to public.** A Drive failure in the skill ends with the broker error code. It never retries as a public link.
+- **Presign is a test seam.** `uploadMp4` accepts an injected `presign` function, so the handler test does not call AWS.
+
+**Focused tests**:
+- `infra/hyperframes-render/handler.test.js` — the result carries an `agent-renders/<email>/<uuid>.mp4` `s3Key` and the private sharing value.
+- `infra/test/hyperframes-render.test.ts` — the render role's S3 access is scoped to `agent-renders/*`, and the role never mentions `public-images`.
+- `infra/test/agent-workspace-lifecycle.test.ts` — the `expire-agent-renders` rule exists with the `agent-renders/` prefix.
+- `infra/agent-image/skills/psd-hyperframes/render.test.js` — the skill's download and delivery path.
+
+**Validation**:
+- `cd infra/hyperframes-render && bun test` (the Lambda package's own suite).
+- `bun run test:skill:hyperframes` (the skill's suite).
+- `cd infra && bunx jest --silent test/hyperframes-render.test.ts test/agent-workspace-lifecycle.test.ts` (CDK assertions).
+
+**Escalation**: a change to the bucket policy or lifecycle rules should also synthesize the `AIStudio-AgentPlatformStack-Dev` stack. This is conditional: run it when a construct-level error is possible that the assertion tests above would not catch. Changing the result shape needs the skill's `downloadRenderedVideo` and the handler test in the same edit.
+
 ### Agent Media Function
 
 **Source**: `/infra/lib/constructs/compute/agent-media-function.ts`, `/infra/agent-media/`
@@ -405,7 +454,7 @@ A container-image Lambda providing three capabilities the agent kept having to r
 | `media` | ffprobe inspection + ffmpeg transcode via named presets |
 | `transcribe` | Amazon Transcribe over audio in owner's private workspace |
 
-**Why separate from hyperframes-render**: IAM isolation. That role may write only to `public-images/`; this one reads/writes owners' private workspace prefixes and carries an explicit DENY on `public-images/`. A scanned IEP or staff recording must never become a public-by-link object.
+**Why separate from hyperframes-render**: IAM isolation. The render role may only put and get under the private `agent-renders/` prefix (see [Hyperframes Render Function](#hyperframes-render-function-2034)); this one reads/writes owners' private workspace prefixes and carries an explicit DENY on `public-images/`. A scanned IEP or staff recording must never become a public-by-link object.
 
 **Security model**: The function never accepts an identity from its caller. The relay injects `workspacePrefix` after the web-verified invocation context; the caller supplies only workspace-relative paths, validated against traversal, backslashes, and control characters. Publishing stays a separate act through `psd-publish-file`.
 
@@ -985,3 +1034,4 @@ Benefits:
 - **[architecture/overview.md](../architecture/overview.md)** — Overall architecture
 - **[data-models/overview.md](../data-models/overview.md)** — Database schema
 - **[agent-platform/overview.md](../agent-platform/overview.md)** — Agent-specific infrastructure
+specific infrastructure
