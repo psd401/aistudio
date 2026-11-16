@@ -15,10 +15,14 @@
  */
 import { MODEL_SAFE_IMAGE_MIME_TYPES, sniffImageFormat } from "@/lib/attachments/image-format";
 
-/** What the model sees in place of an image it could not have read. */
-export function unsupportedImageNote(filename: string | undefined, format: string): string {
-  const label = filename ? `"${filename}"` : "an image";
-  return `[The user attached ${label} in ${format} format, which could not be sent to the model. Ask them to re-attach it as JPEG or PNG if it matters.]`;
+/**
+ * What the model sees in place of an image it could not have read. Format only:
+ * the filename is user-chosen (it can name a student) and a provider image block
+ * never carries it (Bedrock image blocks are format + bytes), so the note must
+ * not be what sends it.
+ */
+export function unsupportedImageNote(format: string): string {
+  return `[The user attached an image in ${format} format, which could not be sent to the model. Ask them to re-attach it as JPEG or PNG if it matters.]`;
 }
 
 /**
@@ -73,7 +77,6 @@ export function replaceUnsupportedImageParts<T>(messages: readonly T[]): Replace
         url?: unknown;
         image?: unknown;
         mediaType?: unknown;
-        filename?: unknown;
       };
       // AI SDK `file` parts carry the data URL in `url`; legacy assistant-ui
       // `image` parts carry it in `image`.
@@ -95,10 +98,7 @@ export function replaceUnsupportedImageParts<T>(messages: readonly T[]): Replace
       replaced += 1;
       return {
         type: "text",
-        text: unsupportedImageNote(
-          typeof p.filename === "string" ? p.filename : undefined,
-          formatLabel(parsed.declared, sniffed)
-        ),
+        text: unsupportedImageNote(formatLabel(parsed.declared, sniffed)),
       };
     });
 

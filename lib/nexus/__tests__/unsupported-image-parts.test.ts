@@ -34,8 +34,9 @@ describe('replaceUnsupportedImageParts', () => {
     const parts = (messages[0] as { parts: Part[] }).parts
     expect(parts[0]).toEqual({ type: 'text', text: 'what is this?' })
     expect(parts[1].type).toBe('text')
-    expect(parts[1].text).toContain('"IMG_0001.HEIC"')
     expect(parts[1].text).toContain('HEIC format')
+    // The user-chosen filename (it can name a student) never goes into the note.
+    expect(parts[1].text).not.toContain('IMG_0001')
   })
 
   it('catches a HEIC payload even when its data URL claims JPEG', () => {
