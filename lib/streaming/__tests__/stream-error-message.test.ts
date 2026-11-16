@@ -66,6 +66,32 @@ describe('classifyStreamError', () => {
     expect(classifyStreamError({ status: 504, message: 'gateway timeout' })).toBe('timeout')
   })
 
+  it('recognises a provider rejecting an image format (iPhone HEIC)', () => {
+    // Verbatim from prod logs, 2026-11-15: Bedrock Claude, then Bedrock GPT.
+    expect(
+      classifyStreamError(
+        new Error(
+          'Unsupported image mime type: image/heic, expected one of: image/jpeg, image/png, image/gif, image/webp'
+        )
+      )
+    ).toBe('unsupportedImage')
+    expect(
+      classifyStreamError(
+        new Error(
+          'image processing failed: cannot measure image dimensions: The image format could not be determined'
+        )
+      )
+    ).toBe('unsupportedImage')
+    // Ranked ahead of the 5xx rule a wrapped rejection may carry.
+    expect(
+      classifyStreamError({ status: 500, message: 'Unsupported image mime type: image/heic' })
+    ).toBe('unsupportedImage')
+  })
+
+  it('leaves a non-format image failure to the other rules', () => {
+    expect(classifyStreamError(new Error('image processing failed: request timeout'))).toBe('timeout')
+  })
+
   it('falls back to the generic explanation for anything unrecognised', () => {
     expect(classifyStreamError(new Error('weird provider failure'))).toBe('unknown')
     expect(classifyStreamError(undefined)).toBe('unknown')

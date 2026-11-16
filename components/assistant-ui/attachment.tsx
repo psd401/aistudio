@@ -2,6 +2,7 @@
 
 import { PropsWithChildren, useEffect, useMemo, useState, startTransition, type FC } from "react";
 import { createLogger } from "@/lib/client-logger";
+import { isImageRejectionMessage } from "@/lib/attachments/image-normalize";
 import {
   CheckCircle2,
   CircleXIcon,
@@ -308,6 +309,13 @@ export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAt
       toast.error("File type not supported", {
         description: "This chat can't accept that kind of file.",
       });
+      return;
+    }
+    // An image the adapter could not convert (an unreadable HEIC, an SVG, too
+    // large) carries a message written for the user — show it instead of the
+    // generic one. The event carries only the message, so match the known set.
+    if (reason === "adapter-error" && isImageRejectionMessage(message)) {
+      toast.error("Image could not be attached", { description: message });
       return;
     }
     if (reason === "adapter-error") {
