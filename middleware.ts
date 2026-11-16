@@ -97,6 +97,10 @@ const CONTENT_SECURITY_POLICY =
   "style-src 'self' 'unsafe-inline'; " +
   "img-src 'self' data: https: blob:; " +
   "font-src 'self' data:; " +
+  // heic-to (HEIC → JPEG for iPhone photos in Nexus) runs its decoder in a
+  // Worker built from a blob: URL. Without this, workers fall back to
+  // script-src, which has no blob:, and the conversion is refused.
+  "worker-src 'self' blob:; " +
   "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com https://apis.google.com; " +
   `frame-src ${FRAME_SRC}; ` +
   "frame-ancestors 'none';";

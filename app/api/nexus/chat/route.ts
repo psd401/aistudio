@@ -94,6 +94,7 @@ import {
 } from './chat-helpers';
 import { EMPTY_TURN_PERSIST_NOTICE } from '@/lib/streaming/empty-turn-notice';
 import { sanitizeStreamErrorMessage } from '@/lib/streaming/stream-error-message';
+import { replaceUnsupportedImageParts } from '@/lib/nexus/unsupported-image-parts';
 
 import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
@@ -2847,6 +2848,17 @@ async function prepareChatRequest(params: {
     userId: auth.userId,
     requestId: params.requestId,
   });
+  // An inline image no model can read (an iPhone HEIC from before attach-time
+  // conversion) would fail this turn and every later one, because the client
+  // resends the whole history. Swap it for a text note in what the MODEL sees;
+  // `safePersistenceMessages` keeps the original part.
+  const modelImages = replaceUnsupportedImageParts(prepared.modelMessages as UIMessage[]);
+  if (modelImages.replaced > 0) {
+    params.log.warn("Replaced unsupported inline image parts in model history", {
+      replaced: modelImages.replaced,
+      conversationId: conversationIdValue,
+    });
+  }
   return {
     ok: true,
     context: {
@@ -2868,7 +2880,7 @@ async function prepareChatRequest(params: {
       // sees. `safePersistenceMessages` above keeps them, so the thread still
       // reloads byte-for-byte; only the re-sent history shrinks.
       safeModelMessages: pruneStaleWorkspaceToolPayloads(
-        prepared.modelMessages as UIMessage[]
+        modelImages.messages
       ) as ChatMessages,
       routingEnabledTools: routingTools.tools,
       routingBindingTools: routingTools.bindingTools,

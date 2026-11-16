@@ -36,15 +36,21 @@ jest.mock('@/lib/repositories/temporary-attachment-client', () => ({
     mockWaitForTemporaryAttachment(...args),
 }));
 
+const mockHeicTo = jest.fn<Promise<Blob>, [{ blob: Blob; type: string; quality?: number }]>();
+jest.mock('heic-to', () => ({
+  heicTo: (args: { blob: Blob; type: string; quality?: number }) => mockHeicTo(args),
+}));
+
 // Import after mocking
 import {
   HybridDocumentAdapter,
   VisionImageAdapter,
 } from '../chat-attachment-adapters';
 
-// Polyfill File.arrayBuffer() for Jest environment
-if (typeof File !== 'undefined' && !File.prototype.arrayBuffer) {
-  File.prototype.arrayBuffer = async function() {
+// Polyfill Blob.arrayBuffer() for Jest environment (jsdom lacks it). On Blob,
+// not just File: the image adapter sniffs `file.slice(0, 16)`, which is a Blob.
+if (typeof Blob !== 'undefined' && !Blob.prototype.arrayBuffer) {
+  Blob.prototype.arrayBuffer = async function() {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.addEventListener('load', () => resolve(reader.result as ArrayBuffer));
@@ -662,6 +668,67 @@ const defineVisionImageAdapterEagerUploadSuite = () => {
 };
 
 describe('VisionImageAdapter eager upload', defineVisionImageAdapterEagerUploadSuite);
+
+/**
+ * 2026-11-15 prod report: iPhone HEIC photos were turned away by this adapter's
+ * old jpeg/png/webp/gif `accept`, fell through to assistant-ui's
+ * SimpleImageAttachmentAdapter, and reached Bedrock as `data:image/heic` — which
+ * failed that turn and every later one. HEIC is now accepted and converted here.
+ */
+const defineVisionImageAdapterHeicSuite = () => {
+  const HEIC_BYTES = [0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63, 0, 0, 0, 0];
+  const JPEG_BYTES = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46, 0x49, 0x46, 0, 1];
+
+  beforeEach(() => {
+    mockUploadTemporaryAttachment.mockReset();
+    mockWaitForTemporaryAttachment.mockReset();
+    mockHeicTo.mockReset();
+    mockUploadTemporaryAttachment.mockResolvedValue({
+      mode: 'canonical',
+      reference: { bindingId: 'b1', itemId: 43 },
+    });
+    mockWaitForTemporaryAttachment.mockResolvedValue('[[marker]]');
+  });
+
+  it('accepts HEIC by type and by extension', () => {
+    const accept = new VisionImageAdapter().accept.split(',');
+    expect(accept).toEqual(expect.arrayContaining(['image/*', '.heic', '.heif']));
+  });
+
+  it('converts a HEIC to JPEG before the chip, the upload and the inlined pixels see it', async () => {
+    mockHeicTo.mockResolvedValue(new Blob([new Uint8Array(JPEG_BYTES)], { type: 'image/jpeg' }));
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    const pending = await adapter.add({
+      file: new File([new Uint8Array(HEIC_BYTES)], 'IMG_0001.HEIC', { type: 'image/heic' }),
+    });
+
+    expect(mockHeicTo).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/jpeg' }));
+    expect(pending.contentType).toBe('image/jpeg');
+    expect(pending.file?.type).toBe('image/jpeg');
+    expect(pending.name).toBe('IMG_0001.jpg');
+    const uploaded = (mockUploadTemporaryAttachment.mock.calls[0][0] as { file: File }).file;
+    expect(uploaded.type).toBe('image/jpeg');
+
+    const complete = await adapter.send(pending);
+    expect(complete.content[0]).toEqual({
+      type: 'image',
+      image: expect.stringMatching(/^data:image\/jpeg;base64,/),
+    });
+  });
+
+  it('refuses a HEIC it cannot decode, before anything is uploaded', async () => {
+    mockHeicTo.mockRejectedValue(new Error('libheif: unsupported codec'));
+    const adapter = new VisionImageAdapter(undefined, { repositoryBacked: true });
+    await expect(
+      adapter.add({
+        file: new File([new Uint8Array(HEIC_BYTES)], 'IMG_0001.HEIC', { type: 'image/heic' }),
+      })
+    ).rejects.toThrow(/could not be converted/);
+    expect(mockUploadTemporaryAttachment).not.toHaveBeenCalled();
+  });
+};
+
+describe('VisionImageAdapter HEIC conversion', defineVisionImageAdapterHeicSuite);
 
 /**
  * remove() used to be a no-op on both adapters, so a discarded attachment kept

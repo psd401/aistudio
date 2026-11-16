@@ -3,12 +3,16 @@ import {
   PendingAttachment,
   CompleteAttachment,
   CompositeAttachmentAdapter,
-  SimpleImageAttachmentAdapter,
   SimpleTextAttachmentAdapter,
 } from "@assistant-ui/react";
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
 import { dataUrlMediaType, downscaleImageDataUrl } from "@/lib/attachments/image-downscale";
+import {
+  IMAGE_REJECTION_MESSAGES,
+  ImageAttachmentRejectedError,
+  normalizeImageFile,
+} from "@/lib/attachments/image-normalize";
 import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
 import {
   uploadTemporaryAttachment,
@@ -697,7 +701,11 @@ Please try re-uploading. If the issue persists, contact support.`
  * Enhanced with additional validation but maintains full compatibility
  */
 export class VisionImageAdapter implements AttachmentAdapter {
-  accept = "image/jpeg,image/png,image/webp,image/gif";
+  // Every image, including HEIC/HEIF by extension (Chrome can report an empty
+  // type for them). add() converts anything outside the model-safe four to JPEG
+  // or refuses it, so this is the ONLY image adapter: an image it turns away
+  // must never fall through to one that inlines the raw bytes.
+  accept = "image/*,.heic,.heif";
 
   private callbacks?: AttachmentProcessingCallbacks;
   private readonly options: ChatAttachmentAdapterOptions;
@@ -777,23 +785,34 @@ export class VisionImageAdapter implements AttachmentAdapter {
     this.uploadPromises.set(attachmentId, promise);
   }
 
-  async add({ file }: { file: File }): Promise<PendingAttachment> {
+  async add({ file: original }: { file: File }): Promise<PendingAttachment> {
     log.info('VisionImageAdapter.add() called', {
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: file.type
+      fileName: original.name,
+      fileSize: original.size,
+      fileType: original.type
     });
 
     // Validate file size (20MB limit for most LLMs)
     const maxSize = 20 * 1024 * 1024; // 20MB
-    if (file.size > maxSize) {
-      throw new Error("Image size exceeds 20MB limit");
+    if (original.size > maxSize) {
+      throw new ImageAttachmentRejectedError(IMAGE_REJECTION_MESSAGES.tooLarge);
     }
 
-    // Validate MIME type using magic bytes
-    const isValidImage = await this.verifyImageMimeType(file);
-    if (!isValidImage) {
-      throw new Error("Invalid image file format");
+    // Sniff the bytes and convert anything a model can't take (HEIC, BMP, AVIF,
+    // ...) to JPEG here, so the composer chip, the repository upload and the
+    // inlined pixels all use the converted file. Throws a user-facing error for
+    // an image that can't be converted.
+    const file = await normalizeImageFile(original);
+    if (file !== original) {
+      log.info('VisionImageAdapter normalized image', {
+        fromType: original.type || 'unknown',
+        toType: file.type,
+        fromSize: original.size,
+        toSize: file.size,
+      });
+    }
+    if (file.size > maxSize) {
+      throw new ImageAttachmentRejectedError(IMAGE_REJECTION_MESSAGES.tooLarge);
     }
 
     log.info('VisionImageAdapter.add() validation passed');
@@ -888,30 +907,6 @@ export class VisionImageAdapter implements AttachmentAdapter {
     });
   }
 
-  private async verifyImageMimeType(file: File): Promise<boolean> {
-    try {
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer).subarray(0, 4);
-      const header = Array.from(bytes)
-        .map(byte => byte.toString(16).padStart(2, '0'))
-        .join('');
-
-      // Check magic bytes for common image formats
-      const imageHeaders = {
-        '89504e47': 'image/png',
-        'ffd8ffe0': 'image/jpeg',
-        'ffd8ffe1': 'image/jpeg',
-        'ffd8ffe2': 'image/jpeg',
-        '47494638': 'image/gif',
-        '52494646': 'image/webp', // Actually checks for RIFF, need to check WEBP after
-      };
-
-      return Object.keys(imageHeaders).some(h => header.startsWith(h.toLowerCase()));
-    } catch {
-      return false;
-    }
-  }
-
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
     return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
@@ -957,8 +952,10 @@ export function createEnhancedNexusAttachmentAdapter(
   options: ChatAttachmentAdapterOptions = {}
 ) {
   return new CompositeAttachmentAdapter([
+    // The only image adapter. assistant-ui's SimpleImageAttachmentAdapter used to
+    // sit behind it and inline any image VisionImageAdapter declined (HEIC) as raw
+    // bytes, which the model rejected on that turn and on every later one.
     new VisionImageAdapter(callbacks, options),  // Canonical shadow + vision pixels
-    new SimpleImageAttachmentAdapter(), // For display-only images (RESTORED)
     new HybridDocumentAdapter(callbacks, options), // Smart document processing (client/server)
     new SimpleTextAttachmentAdapter(),  // Text files
   ]);

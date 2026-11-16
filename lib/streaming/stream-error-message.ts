@@ -26,6 +26,8 @@ export const STREAM_ERROR_MESSAGES = {
     "The response was blocked by a content safety filter. Please rephrase your request.",
   tooLong:
     "This conversation is too long for the model to continue. Start a new chat, or shorten your request.",
+  unsupportedImage:
+    "This model can't read one of the attached images. Re-attach it as a JPEG or PNG, or start a new chat.",
   unknown:
     "Something went wrong while writing the response, so it stopped partway. Please try again.",
 } as const;
@@ -60,8 +62,9 @@ function errorFingerprint(error: unknown): { text: string; status?: number } {
 /**
  * Classification rules, in priority order.
  *
- * Order matters: a provider reporting a timeout as `504 gateway timeout` must be
- * called a timeout, not a generic outage, so the timeout rule is first and the
+ * Order matters: an image-format rejection is matched first so no broader rule
+ * claims it, and a provider reporting a timeout as `504 gateway timeout` must be
+ * called a timeout, not a generic outage, so the timeout rule comes next and the
  * broad 5xx rule is last.
  */
 const CLASSIFICATION_RULES: ReadonlyArray<{
@@ -69,6 +72,18 @@ const CLASSIFICATION_RULES: ReadonlyArray<{
   needles: readonly string[];
   matchesStatus?: (status: number) => boolean;
 }> = [
+  {
+    // Before "timeout"/"unavailable": provider image-format rejections
+    // ("Unsupported image mime type: image/heic", "image processing failed:
+    // cannot measure image dimensions") must not read as a generic failure.
+    kind: "unsupportedImage",
+    needles: [
+      "unsupported image",
+      "image mime type",
+      "image processing failed",
+      "image format could not be determined",
+    ],
+  },
   {
     kind: "timeout",
     needles: ["timeout", "timed out", "etimedout", "deadline", "aborterror", "aborted"],
