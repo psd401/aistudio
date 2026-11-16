@@ -80,10 +80,11 @@ an inaccessible private collection is reported exactly like an absent one.
 If an accessible child cuts off inheritance beneath a denied ancestor,
 collection discovery omits the denied ancestor and re-roots the child at the
 nearest returned ancestor, so denied names, slugs, and ids are not exposed.
-When a collection default is `group`, its effective `view` grants become the new
-object's group-visibility grants. A personal collection left at the `private`
-default still produces private content; one its owner has shared at `group`
-seeds new objects with that collection's own grants.
+New content is private to its owner in every collection (#2034). A collection's
+`defaultVisibilityLevel` and effective `view` grants decide who may open and
+browse the collection; they are never copied onto content created or moved into
+it. Content becomes `group`, `internal` or `public` only through an explicit
+visibility change on that object.
 
 ### Items shared into a restricted collection (grant passage)
 

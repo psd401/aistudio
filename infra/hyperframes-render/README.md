@@ -1,8 +1,10 @@
 # hyperframes-render
 
 Container-image AWS Lambda that renders a [HyperFrames](https://hyperframes.heygen.com/)
-HTML/CSS/JS composition to an **MP4** (headless Chromium + FFmpeg) and uploads it to the agent
-workspace S3 bucket under the public `public-images/<email>/` prefix. This is the render half
+HTML/CSS/JS composition to an **MP4** (headless Chromium + FFmpeg) and stages it in the agent
+workspace S3 bucket under the PRIVATE `agent-renders/<email>/` prefix, returning a 15-minute
+presigned GET the agent skill uses at once to deliver the MP4 to the requester's Drive (#2034).
+Nothing this function writes is public. This is the render half
 of the **`psd-hyperframes`** OpenClaw agent skill (issue #1175).
 
 The native render stack (Chromium/FFmpeg/`hyperframes` CLI) lives **only here** — never in the
@@ -36,8 +38,8 @@ reusable execution-role credentials.
 }
 ```
 
-Returns `{ "status":"ok", "url":"https://…/public-images/<email>/<uuid>.mp4", "s3Key":"…",
-"bytes":N, … }` or `{ "status":"error", "error":"<code>", "message":"…" }`.
+Returns `{ "status":"ok", "downloadUrl":"https://…/agent-renders/<email>/<uuid>.mp4?X-Amz-…",
+"s3Key":"agent-renders/<email>/<uuid>.mp4", "sharing":"private-staging", "bytes":N, … }` or `{ "status":"error", "error":"<code>", "message":"…" }`.
 
 ## Local unit tests (no Docker)
 

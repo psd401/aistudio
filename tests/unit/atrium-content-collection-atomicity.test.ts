@@ -193,25 +193,50 @@ describe("content collection placement transaction boundary", () => {
     expect(txStub.insert).not.toHaveBeenCalled();
   });
 
-  it("persists the locked current default and grants, not stale preflight values", async () => {
-    const viewGrant: CollectionGrant = {
-      access: "view",
-      kind: "role",
-      value: "staff",
-    };
+  it.each<VisibilityLevel>(["group", "internal", "public"])(
+    "creates content PRIVATE with no grants in a %s-default collection (#2034)",
+    async (level) => {
+      const viewGrant: CollectionGrant = {
+        access: "view",
+        kind: "role",
+        value: "staff",
+      };
+      collectionAccessSnapshotInTxMock.mockResolvedValue(
+        accessSnapshot({ level, grants: [viewGrant] })
+      );
+
+      await contentService.create(requester, {
+        kind: "document",
+        title: "Policy",
+        collectionId,
+      });
+
+      expect(insertedValues?.visibilityLevel).toBe("private");
+      expect(applyGrantsForLevelMock.mock.calls[0][3]).toEqual([]);
+    }
+  );
+
+  it("honors an explicit visibility in a collection, ignoring the collection's grants", async () => {
     collectionAccessSnapshotInTxMock.mockResolvedValue(
-      accessSnapshot({ level: "group", grants: [viewGrant] })
+      accessSnapshot({
+        level: "group",
+        grants: [{ access: "view", kind: "role", value: "staff" }],
+      })
     );
 
     await contentService.create(requester, {
       kind: "document",
       title: "Policy",
       collectionId,
+      visibility: {
+        level: "group",
+        grants: [{ kind: "group", value: "team@example.org" }],
+      },
     });
 
     expect(insertedValues?.visibilityLevel).toBe("group");
     expect(applyGrantsForLevelMock.mock.calls[0][3]).toEqual([
-      { kind: "role", value: "staff" },
+      { kind: "group", value: "team@example.org" },
     ]);
   });
 

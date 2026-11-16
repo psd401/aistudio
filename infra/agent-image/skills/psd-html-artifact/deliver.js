@@ -20,9 +20,11 @@
  * lib/agent-workspace/storage-broker.ts, so the rule is enforced by the broker
  * rather than merely documented here. Every OTHER file type still goes to S3.
  *
- * Delivery mirrors psd-learning-page/run.js: `create-artifact --code-file
- * <path> --body-format html --visibility internal`, then `publish --id <id>
- * --destination intranet`, returning the completed publication's reader URL.
+ * Delivery: `create-artifact --code-file <path> --body-format html` (PRIVATE to
+ * the requester, #2034), then `publish --id <id> --destination intranet`,
+ * returning the completed publication's reader URL. The reader enforces the
+ * object's level, so that URL opens for the requester alone until someone
+ * widens the page explicitly with `psd-atrium set-visibility`.
  *
  * Three Atrium behaviours are load-bearing here:
  *   - create starts PRIVATE + DRAFT, so a /c/{slug} link 404s until publish
@@ -201,10 +203,9 @@ function createAtriumArtifact(buffer, title, run) {
       codePath,
       '--body-format',
       'html',
-      // Without this the artifact stays PRIVATE even after publish, so the page
-      // would be invisible to exactly the audience it was made for.
-      '--visibility',
-      'internal',
+      // No --visibility: the page is PRIVATE to the requester (#2034). Agent
+      // pages carried staff and student data to all staff when this defaulted
+      // to `internal`; widening is now an explicit, separate step.
     ]);
   } catch (err) {
     // Capture, do NOT fail() here. fail() ends in process.exit(), which in Node
@@ -237,17 +238,24 @@ function createAtriumArtifact(buffer, title, run) {
   return created;
 }
 
-// A widen-to-internal that needs admin approval leaves the page invisible. Say
-// so instead of handing back a link the intended audience cannot open.
+// A create that came back pending approval leaves the page unusable. Say so
+// instead of handing back a link that does not open.
+// The page is private to the requester. Widening is the user's decision, made
+// explicitly, never a default (#2034).
+const SHARE_INSTRUCTION =
+  'This page is private to the person who asked for it. Do not widen it on your ' +
+  'own. If they want others to see it, ask exactly who (a group, all staff), ' +
+  'then run psd-atrium set-visibility --id <artifactId> with that level and say ' +
+  'who can now open it.';
+
 function requireAtriumVisibility(created) {
   if (created.approvalRequired) {
     fail(
       `Atrium created artifact ${created.id}${
         created.slug ? ` (slug ${created.slug})` : ''
-      } as "${created.visibilityLevel}" instead of the requested "internal" — ${
-        created.visibilityNote ||
-        'a visibility widen-to-internal request is pending admin approval'
-      }. The page is NOT visible to its intended audience yet; do not report it ` +
+      } as "${created.visibilityLevel}" pending approval — ${
+        created.visibilityNote || 'an approval request is pending'
+      }. The page is NOT ready yet; do not report it ` +
         `as published. Retry after the widen is approved: psd-atrium publish ` +
         `--id ${created.id} --destination intranet.`,
       'visibility_denied'
@@ -387,10 +395,11 @@ async function main() {
     title,
     bytes: size,
     destination: 'atrium-intranet',
-    visibility: artifact.visibilityLevel ?? 'internal',
-    // Authenticated PSD readers only — this is the whole reason HTML no longer
-    // goes to the unsigned public S3 prefix.
-    sharing: 'psd-internal',
+    visibility: artifact.visibilityLevel ?? 'private',
+    // Opens for the requester alone (#2034). Never the unsigned public S3
+    // prefix, and never all staff unless the user asks to share it.
+    sharing: 'private-to-requester',
+    shareInstruction: SHARE_INSTRUCTION,
     instruction: BARE_URL_INSTRUCTION,
     a11y: { pass: true, standard: report.standard, counts: report.counts },
   });

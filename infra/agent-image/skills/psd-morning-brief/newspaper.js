@@ -221,30 +221,17 @@ function renderPodcast(podcast) {
   if (!podcast || podcast.enabled === false) return '';
   const url = safeUrl(podcast.url);
   if (!url) {
-    // Distinguish "the relay was down" from "we chose not to record this"
-    // (#1886): psd-tts refuses to narrate a phone number, email address, SSN
-    // or student number, because its audio is public by link for 30 days and
-    // cannot be re-checked once recorded. The edition is still delivered;
-    // only the recording is withheld, and the reader is told which it was.
-    if (podcast.refused === 'personal_data_detected') {
-      return (
-        '<aside class="podcast"><p class="kicker">Podcast edition</p>' +
-        '<p>No recording today. The spoken script included personal data — a ' +
-        'phone number, email address, Social Security number or student ' +
-        'number — and audio links are public, so it was not recorded. Read ' +
-        'the edition above; ' +
-        'tomorrow’s script will avoid reading contact details aloud.</p></aside>'
-      );
-    }
     return '<aside class="podcast"><p class="kicker">Podcast edition</p><p>Audio was disabled or unavailable for this run.</p></aside>';
   }
+  // A LINK, not an <audio> player (#2034): the recording is a private Drive
+  // file shared with the owner alone, and a Drive viewer URL is not an audio
+  // source. Drive plays it in place for the signed-in owner.
   return [
     '<aside class="podcast">',
     '<p class="kicker">Podcast edition</p>',
     '<h2>Listen to today’s brief</h2>',
-    `<audio controls preload="none" src="${escapeHtml(url)}">`,
-    `<a href="${escapeHtml(url)}">Download the MP3</a>`,
-    '</audio>',
+    `<p><a href="${escapeHtml(url)}">Play the recording in Google Drive</a> `,
+    '— a private file shared with you only.</p>',
     '</aside>',
   ].join('');
 }
@@ -300,12 +287,12 @@ a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:3px}
 .dateline{display:flex;justify-content:space-between;gap:20px;margin-top:12px;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}.kicker{font:700 .72rem/1.2 Arial,sans-serif;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin:0 0 7px}
 .lead{padding:28px 0;border-bottom:1px solid var(--rule);display:grid;grid-template-columns:minmax(0,2fr) minmax(220px,1fr);gap:30px}.lead h2{font-size:clamp(2rem,5vw,4rem);line-height:1;margin:0 0 14px;letter-spacing:-.035em}.lead p{font-size:1.13rem;margin:0;color:var(--muted)}
 .people,.podcast{border-left:5px solid var(--accent);background:#eee5d4;padding:18px}.people ul{list-style:none;padding:0;margin:0}.people li{padding:8px 0;border-bottom:1px solid #b79d7460}.people li:last-child{border:0}.people span{display:block;color:var(--muted);font-size:.86rem}
-.podcast{margin:24px 0}.podcast h2{margin:0 0 12px}.podcast audio{width:100%}
+.podcast{margin:24px 0}.podcast h2{margin:0 0 12px}
 .sections{columns:2 340px;column-gap:34px}.section{break-inside:avoid;padding:25px 0;border-bottom:1px solid var(--rule)}.section.custom{border-top:5px solid var(--accent);padding-top:18px}.section-heading h2{font-size:1.9rem;line-height:1.05;margin:0}.summary{font-style:italic;color:var(--muted)}
 .item{padding:13px 0;border-top:1px solid #b79d7460}.item h3{font-size:1.08rem;line-height:1.25;margin:0}.item p{margin:6px 0 0}.meta{font:700 .7rem/1.2 Arial,sans-serif!important;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}.empty{color:var(--muted);font-style:italic}
 footer{border-top:4px double var(--ink);margin-top:28px;padding-top:13px;text-align:center;font-size:.78rem;color:var(--muted)}
 @media(max-width:720px){main{margin:0;width:100%;padding:20px}.lead{grid-template-columns:1fr}.dateline{display:block}.dateline span{display:block;margin-top:5px}.sections{columns:1}}
-@media print{body{background:white}main{box-shadow:none;margin:0;width:100%}.podcast audio{display:none}}
+@media print{body{background:white}main{box-shadow:none;margin:0;width:100%}}
 </style>
 </head>
 <body><main>
