@@ -120,7 +120,7 @@ infra/agent-image/skills/{skill-name}/
 - `psd-aistudio` — Live capability discovery + authenticated actions in AI Studio, including repository list/describe/search/source/changes and, since #1907, `repositories-create` and `repositories-add-item` (text items only, staff and administrator, gated by the live `knowledge-repositories` capability). The write contract and ingestion states are in **[app-features/overview.md](../app-features/overview.md#repository-mcp-tools-1266-1907)**
 - `psd-learning-page` — Multimodal UDL learning page generation
 - `psd-hyperframes` — HTML/CSS/JS to MP4 video rendering
-- `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as internal reader pages (not S3); enforces strict CSP — inline scripts/styles only, external CDN limited to allowlist (default: cdnjs.cloudflare.com), connect-src blocked
+- `psd-html-artifact` — HTML artifacts published to Atrium with WCAG 2.2 AA audit, delivered as reader pages private to the requester until widened explicitly (#2034), not S3; enforces strict CSP — inline scripts/styles only, external CDN limited to allowlist (default: cdnjs.cloudflare.com), connect-src blocked
 - `psd-print-pdf` — HTML to printable PDF with headless Chromium (8.5×11, letter, A4, landscape), honouring `@page` CSS, flexbox, and web fonts; routes through agent-media Lambda
 - `psd-media` — ffprobe inspection + ffmpeg transcode via named presets (`social-mp4`, `web-mp4`, `audio-mp3`); routes through agent-media Lambda
 - `psd-transcribe` — Speech-to-text using Amazon Transcribe over audio/video in owner's private workspace; routes through agent-media Lambda
@@ -1061,7 +1061,7 @@ The SOUL.md "Message size — the transport can cut your reply" section (lines 1
 
 ### FERPA and Visibility
 
-Document creation uses `--visibility private` on the `create-document` command, not on `publish`. Publish flips only Live/Draft and never sets an audience. Creation into a collection with a wider default audience, without the visibility flag, causes the document to inherit that wider default—so explicit visibility matters.
+Document creation uses `--visibility private` on the `create-document` command, not on `publish`. Publish flips only Live/Draft and never sets an audience. Creating into a collection does not change the audience. Since #2034, content created in any collection starts `private` and is not given the collection's default level, so an audience at creation time has to be requested explicitly. See [Create-Time Visibility in Collections](../app-features/overview.md#create-time-visibility-in-collections-2034).
 
 ### Rule 6a Integration
 
@@ -1682,7 +1682,7 @@ flowchart TD
 
 HTML files (`.html`) are **absent** from `PUBLIC_EXTENSIONS`. HTML artifacts go to Atrium—where they get an owner, visibility level, and publication record—never to public-by-link S3. This is enforced at the broker level, not just skill convention.
 
-For HTML artifacts, use `psd-html-artifact` skill which creates an Atrium artifact with `--body-format html` and publishes to the internal reader surface.
+For HTML artifacts, use `psd-html-artifact` skill which creates an Atrium artifact with `--body-format html` and publishes it to the reader surface. The create passes no visibility flag, so the page is private to the requester. Someone widens it only by an explicit `psd-atrium set-visibility` step (#2034; see [Create-Time Visibility in Collections](../app-features/overview.md#create-time-visibility-in-collections-2034)).
 
 #### Scope Gap Handling
 

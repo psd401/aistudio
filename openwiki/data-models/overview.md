@@ -132,6 +132,11 @@ The function safely extracts `causeCode`, `causeConstraint`, and `causeTable` wi
 - Authoritative authorization stays in `author_actor`/`author_user_id` (chat runs under user's requester)
 - Surfaces in version dropdown as "via Nexus chat" and in About rail as "Written by the agent in Nexus chat"
 
+**`content_collections.default_visibility_level`** (#2034):
+- Governs who may open and browse the collection. It is not applied to content created or moved into the collection, which starts `private` (see [app-features](../app-features/overview.md#create-time-visibility-in-collections-2034))
+- Migration `192-atrium-private-by-default.sql` reset `content_objects` at `visibility_level = 'internal'` back to `private`, except objects with a successful `set_visibility` audit row (written by the REST or MCP visibility path, not the Share dialog) and objects owned by user id 1
+- Each reset is recorded as a `set_visibility` row in `content_audit_logs` with surface `migration` and `details.previousLevel`, so it is reversible. The rollback SQL is in the migration header and only restores objects still `private`
+
 ---
 
 ### AI & Models
