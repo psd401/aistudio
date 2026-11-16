@@ -31,6 +31,48 @@ The REST API provides programmatic access to AI Studio's core capabilities:
 | **Tools** | `/api/v1/tools` | Tool catalog inspection |
 | **Voice** | `/api/nexus/voice` | Real-time voice via WebSocket with Gemini Live API |
 
+#### Assistant Execution API
+
+**Endpoint**: `POST /api/v1/assistants/{id}/execute`, handler `POST` in `/app/api/v1/assistants/[id]/execute/route.ts`. The request contract is in `/docs/API/v1/openapi.yaml` and `/docs/API/v1/context-graph.md`; the polling side is `/docs/API/v1/assistant-execution.md`.
+
+The route has two response modes, chosen by the `Accept` header. `Accept: application/json` (without `text/event-stream`) selects async mode: the route returns `202` with a `jobId`, status `pending`, and a `pollUrl` that the caller reads through `GET /api/v1/jobs/{jobId}`. Any other `Accept` value gets the SSE stream from `executeAssistant`.
+
+**Order of checks** (each step can end the request before any job or stream exists):
+
+1. `authorizeExecution` checks the `assistants:execute` scope (every returned scope is enforced through `requireScope`, because OAuth scope lists can carry several entries), the assistant, repository ACLs and readiness. It also requires the assistant's final prompt, by `position`, to have a `modelId`. Otherwise it returns `400 CONFIGURATION_ERROR` "Assistant has no model configured" in both modes. On success it returns `finalPromptModelId`.
+2. The body is parsed (128 KB limit) and `validateExecutionInputs` runs.
+3. `prepareAssistantExecutionInputs` resolves owner-bound temporary repositories, and `assertRepositoriesSearchable` checks readiness. Async mode reuses this same preparation in the background run, so no job is created for an unavailable source (`400 VALIDATION_ERROR` "Temporary repository input is unavailable").
+
+**Async job record.** `handleAsyncExecution` calls `jobManagementService.createJob` with `modelId: finalPromptModelId`, `modelIdString: "pending"`, and `source: "assistant_execution"`. A background task then runs `executeAssistantForJobCompletion` and calls `completeJob`, or `failJob` on error. The job's `modelId` is bookkeeping only: each prompt still runs on its own model. The job record must hold a real model row because `ai_streaming_jobs.model_id` is a NOT NULL foreign key and `createJob` rejects falsy IDs. An earlier version used `modelId: 0`, so every async call failed with `400 "Field is required"`. Fixed in #2033; the unit test in `tests/unit/api/assistant-v1-execute-runtime-inputs.test.ts` guards it.
+
+```mermaid
+sequenceDiagram
+    participant C as API client
+    participant R as POST execute route
+    participant P as prepareAssistantExecutionInputs
+    participant J as jobManagementService
+    participant S as executeAssistantForJobCompletion
+    C->>R: POST /api/v1/assistants/{id}/execute
+    R->>R: authorizeExecution (scope, ACL, final prompt model)
+    R->>P: prepare temporary repository inputs, assert searchable
+    alt Accept: application/json
+        R->>J: createJob(modelId = finalPromptModelId, modelIdString "pending")
+        R-->>C: 202 jobId, status pending, pollUrl
+        R--)S: background run (not awaited)
+        S-->>J: completeJob or failJob
+        C->>J: GET /api/v1/jobs/{jobId}
+    else streaming (text/event-stream)
+        R->>S: executeAssistant
+        S-->>C: SSE stream
+    end
+```
+
+*Caption: the v1 execute route admits both modes through the same checks; only the async branch creates a polling job.*
+
+**Focused tests**: `tests/unit/api/assistant-v1-execute-runtime-inputs.test.ts`, describe `v1 async assistant runtime repository inputs` (preparation before job creation; the case "creates the polling job with the final prompt's model, never 0"; the repository-rejection cases), and describe `v1 streaming assistant execution coordination`. `tests/unit/api/assistant-import-openapi-contract.test.ts` is the only unit test that reads the v1 docs.
+
+**Minimal validation**: `bunx jest --silent tests/unit/api/assistant-v1-execute-runtime-inputs.test.ts`. After changing the OpenAPI or context-graph text, also run `bunx jest --silent tests/unit/api/assistant-import-openapi-contract.test.ts`. Run the full suite only if the shared execution service changes, because the route depends on it (see [Assistant Architect execution](../app-features/overview.md)).
+
 #### Content Publishing API
 
 **Endpoint**: `POST /api/v1/content/{id}/publish`
