@@ -1388,6 +1388,40 @@ Atrium objects have both a **visibility level** (who can access) and a **grant l
 - **Internal** — Staff with visibility grants (specific users, groups, roles, buildings, departments, grades)
 - **Public** — Anyone with the link, including anonymous visitors
 
+#### Create-Time Visibility in Collections (#2034)
+
+**Sources**: `/lib/content/content-service.ts` (`resolveCreateVisibilityForCollection`, `createVisibilityGrants`, `collectionDefaultFromAccess`), `/components/atrium/CollectionManagementPanel.tsx`
+
+New content is **private to its owner in every collection**, whatever the collection's default. Before #2034, a create or move into a collection inherited the collection's `defaultVisibilityLevel`, and a `group` default also copied its effective `view` grants. Agent skills had already created every HTML page at `internal`, so pages carrying staff and student data reached all staff. Migration 192 reset existing `internal` content to `private` (see [Key Column Notes in data-models](../data-models/overview.md#key-column-notes)).
+
+```mermaid
+flowchart TD
+    A["Create or move into a collection"] --> B{"Explicit visibility.level?"}
+    B -->|no| C["Level private, no grants"]
+    B -->|yes| D["Explicit level, caller's grants only"]
+    D --> E{"group level with no grants?"}
+    E -->|yes| F["ValidationError before the transaction"]
+    E -->|no| G{"public without content:publish_public?"}
+    G -->|yes| H["Store private, signal visibility_widen"]
+    G -->|no| I["Store the resolved level"]
+```
+
+*Caption: how the create-time level is resolved; the collection's default never enters this path.*
+
+- **Only explicit input widens.** `createVisibilityGrants` returns the grants the caller passed, or none. `collectionDefaultFromAccess` now returns only the owner, because the collection's level and grants are no longer read at create time.
+- **Public creates are still downgraded.** An explicit `public` level without `content:publish_public` is stored `private` and signals a `visibility_widen` request, as the §26.4 gate in [Publication Model](#publication-model-livedraft--level) describes.
+- **The collection level still governs access to the collection.** `defaultVisibilityLevel` and the effective `view` grants decide who may open and browse a collection. Owner-bound (personal) collections still restrict content to `private`; see [Private-Collection Content](#private-collection-content-1958).
+- **Copy in the UI.** The collection panel labels the setting "Collection visibility" and says that content saved there stays private to its owner until it is shared.
+
+**Focused Tests**:
+- `tests/unit/atrium-content-collection-atomicity.test.ts` — `creates content PRIVATE with no grants in a %s-default collection (#2034)` (runs for `group`, `internal`, and `public` collection defaults) and `honors an explicit visibility in a collection, ignoring the collection's grants`
+- `tests/unit/atrium-private-by-default-migration.test.ts` — `Atrium private-by-default migration (#2034)`: registration in `infra/database/migrations.json`, narrowing only `internal` objects to `private`, keeping objects with a successful `set_visibility` audit row, writing the audit row before the update, and running as one statement
+- `tests/e2e/atrium-private-by-default.functional.spec.ts` — "content created in an all-staff collection is private unless widened explicitly" (conditional, see below)
+
+**Validation**: `bunx jest --silent tests/unit/atrium-content-collection-atomicity.test.ts tests/unit/atrium-private-by-default-migration.test.ts`. Run `bun run test:e2e:local tests/e2e/atrium-private-by-default.functional.spec.ts` only when the create or move visibility path or the migration's audit contract changes.
+
+**Non-goals**: this rule does not change `isInPrivateCollection`, the Share-dialog picker lock, or object-level grant validation. Those keep their own rules, described in the sections below.
+
 #### Private-Collection Content (#1958)
 
 **Sources**: `/lib/content/visibility-service.ts`, `/lib/content/errors.ts`, `/actions/db/atrium/set-visibility.ts`, `/actions/db/atrium/get-visibility.ts`, `/components/atrium/VisibilityChip.tsx`
