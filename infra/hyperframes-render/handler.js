@@ -8,8 +8,12 @@ const { validatedFs } = require("../validated-fs.cjs");
  * Renders a self-contained HyperFrames HTML/CSS/JS composition to an MP4
  * using the upstream `hyperframes` CLI (headless Chromium + FFmpeg, both
  * bundled in the container image — see ./Dockerfile), then uploads the
- * result to the agent workspace S3 bucket under the public `public-images/`
- * prefix and returns an unsigned, shareable HTTPS URL.
+ * result to the agent workspace S3 bucket under the PRIVATE `agent-renders/`
+ * prefix and returns a short-lived presigned GET (#2034). The agent skill
+ * downloads it at once and delivers it to the requester's Drive by default;
+ * nothing this Lambda writes is public. The presigned URL is consumed by the
+ * skill within seconds, never pasted into a chat client, so the STS-session
+ * expiry that broke presigned links in #934 does not apply.
  *
  * This is the render half of the `psd-hyperframes` OpenClaw agent skill
  * (issue #1175). Chromium/FFmpeg live HERE, never in the agent image — the
@@ -33,9 +37,9 @@ const { validatedFs } = require("../validated-fs.cjs");
  *   }
  *
  * Success result:
- *   { "status":"ok", "url":"https://…/public-images/<email>/<uuid>.mp4",
- *     "s3Key":"public-images/<email>/<uuid>.mp4", "bytes":N, "fps":30,
- *     "durationSeconds":8, "width":1920, "height":1080, "sharing":"public-by-link" }
+ *   { "status":"ok", "downloadUrl":"https://…/agent-renders/<email>/<uuid>.mp4?X-Amz-…",
+ *     "s3Key":"agent-renders/<email>/<uuid>.mp4", "bytes":N, "fps":30,
+ *     "durationSeconds":8, "width":1920, "height":1080, "sharing":"private-staging" }
  *
  * Error result (never throws a bare string / silent null):
  *   { "status":"error", "error":"<code>", "message":"<actionable text>" }
@@ -48,7 +52,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { promisify } = require('node:util');
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const execFileAsync = promisify(execFile);
 
@@ -73,7 +78,14 @@ const MAX_DIMENSION = 3840; // 4K wide — supersampling above this blows the /t
 // hand-authored scene while bounding the Lambda invoke payload (max 6 MB sync).
 const MAX_HTML_BYTES = 4 * 1024 * 1024;
 
-const PUBLIC_PREFIX = 'public-images';
+// PRIVATE staging prefix (#2034). The bucket policy grants nothing here and a
+// lifecycle rule (`expire-agent-renders`) deletes objects after 1 day: the
+// agent skill moves the MP4 to its real destination (Drive by default)
+// straight after the render.
+const RENDER_PREFIX = 'agent-renders';
+// Long enough for the skill to fetch a 100 MB MP4, short enough to be useless
+// if it ever leaked.
+const DOWNLOAD_URL_TTL_SECONDS = 900;
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const HYPERFRAMES_BIN = process.env.HYPERFRAMES_BIN || 'hyperframes';
 // Under the Lambda timeout so a stuck render surfaces a clean `render_timeout`
@@ -382,13 +394,12 @@ async function renderToMp4(compositionHtml, { fps, workDir, outPath }) {
 }
 
 /**
- * Upload the MP4 to `s3://$WORKSPACE_BUCKET/public-images/<email>/<uuid>.mp4`
- * and return an unsigned, public-by-link HTTPS URL. Same delivery model as
- * psd-image-gen / psd-tts (the `public-images/` prefix has a bucket-policy
- * ALLOW for `s3:GetObject` to Principal:*; the UUID makes the key unguessable).
+ * Upload the MP4 to `s3://$WORKSPACE_BUCKET/agent-renders/<email>/<uuid>.mp4`
+ * (private) and return a presigned GET the agent skill uses once, right away,
+ * to move the bytes to their destination. `presign` is a test seam.
  */
-async function uploadMp4(s3, { outPath, userEmail, bucket, uuid }) {
-  const key = `${PUBLIC_PREFIX}/${userEmail}/${uuid}.mp4`;
+async function uploadMp4(s3, { outPath, userEmail, bucket, uuid }, presign = getSignedUrl) {
+  const key = `${RENDER_PREFIX}/${userEmail}/${uuid}.mp4`;
   // Read into a Buffer rather than streaming: the file lives in workDir, which
   // the handler's finally block removes right after the upload resolves, so a
   // lazily-opened read stream could outlive the file. MP4s are well within the
@@ -400,9 +411,12 @@ async function uploadMp4(s3, { outPath, userEmail, bucket, uuid }) {
     ContentType: 'video/mp4',
     Metadata: { generated_by: 'psd-hyperframes' },
   }));
-  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
-  const url = `https://${bucket}.s3.${REGION}.amazonaws.com/${encodedKey}`;
-  return { url, key };
+  const downloadUrl = await presign(
+    s3,
+    new GetObjectCommand({ Bucket: bucket, Key: key }),
+    { expiresIn: DOWNLOAD_URL_TTL_SECONDS },
+  );
+  return { downloadUrl, key };
 }
 
 /**
@@ -458,8 +472,12 @@ async function handler(event, deps = {}) {
 
       // Guaranteed set for the non-dryRun path by the fail-fast check above.
       const bucket = process.env.WORKSPACE_BUCKET;
-      const { url, key } = await uploadMp4(s3, { outPath, userEmail: req.userEmail, bucket, uuid });
-      return { ...base, url, s3Key: key, sharing: 'public-by-link' };
+      const { downloadUrl, key } = await uploadMp4(
+        s3,
+        { outPath, userEmail: req.userEmail, bucket, uuid },
+        deps.presign,
+      );
+      return { ...base, downloadUrl, s3Key: key, sharing: 'private-staging' };
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });
     }
@@ -530,6 +548,8 @@ module.exports = {
   uploadMp4,
   childEnvWithoutCredentials,
   RenderError,
+  RENDER_PREFIX,
+  DOWNLOAD_URL_TTL_SECONDS,
   MAX_DURATION_SECONDS,
   DEFAULT_FPS,
 };

@@ -474,17 +474,16 @@ describe('synthesis and newspaper', () => {
     expect(html).toContain(DEFAULT_EMPTY_MESSAGES.calendar);
   });
 
-  // #1886: a withheld recording and a broken relay must not read the same.
-  test('a refused narration renders its own explanation, not "unavailable"', () => {
+  // #2034: the recording is a private Drive file, so the page links to it
+  // rather than embedding a player whose source would have to be public.
+  test('the podcast renders as a link to the private Drive file', () => {
     const html = renderNewspaper({
       snapshot: snapshotFixture(),
       synthesis: synthesisFixture(),
-      podcast: { enabled: true, url: null, refused: 'personal_data_detected' },
+      podcast: { enabled: true, url: 'https://drive.example.net/file/d/abc/view' },
     });
-    expect(html).toContain('No recording today');
-    expect(html).toContain('personal data');
-    expect(html).not.toContain('Audio was disabled or unavailable');
-    // No player for a recording that does not exist.
+    expect(html).toContain('href="https://drive.example.net/file/d/abc/view"');
+    expect(html).toContain('private file shared with you only');
     expect(html).not.toContain('<audio');
   });
 
@@ -495,7 +494,6 @@ describe('synthesis and newspaper', () => {
       podcast: { enabled: true, url: null },
     });
     expect(html).toContain('Audio was disabled or unavailable');
-    expect(html).not.toContain('No recording today');
   });
 
   test('HTML and unsafe URLs are escaped instead of executed', () => {
@@ -632,19 +630,35 @@ describe('Atrium delivery and podcast', () => {
         },
       },
     );
+    // Copied before toMatchObject, which (under Bun) leaves the asymmetric
+    // matcher in place of the matched property.
+    const ttsArgs = [...externalCalls[0].args];
     expect(externalCalls[0]).toMatchObject({
       skill: 'tts',
-      args: expect.arrayContaining(['--engine', 'long-form']),
+      args: expect.arrayContaining([
+        '--engine',
+        'long-form',
+        '--name',
+        'Morning Brief 2026-07-29',
+      ]),
     });
+    // #2034: the podcast narrates the owner's inbox and calendar. It is
+    // always private — the brief never asks psd-tts for a public link.
+    for (const flag of ['--to', 'public', '--public-confirmed']) {
+      expect(ttsArgs.includes(flag)).toBe(false);
+    }
     expect(result.deliveryMessage).toContain(
       'https://example.net/c/morning-brief-2026-07-29',
     );
     expect(result.deliveryMessage).toContain(
       'https://example.net/audio/today.mp3',
     );
+    expect(result.deliveryMessage).toContain('shared with you only');
     expect(brokerCalls).toHaveLength(1);
   });
+});
 
+describe('podcast settings and failures', () => {
   test('per-user config can disable podcast generation', async () => {
     const dir = makeTempDir();
     process.env.PSD_MORNING_BRIEF_STATE_DIR = dir;
@@ -678,72 +692,9 @@ describe('Atrium delivery and podcast', () => {
     expect(result.deliveryMessage).not.toContain('.mp3');
   });
 
-});
-
-// The #1886 narration gate, as the brief pipeline sees it. Split into its
-// own describe so neither block outgrows the 150-line function cap.
-describe('podcast narration refusals', () => {
-  // #1886. psd-tts refuses to narrate a phone number, email address, SSN or
-  // student number, because its MP3s are public by link for 30 days. A
-  // refusal must NOT cost the user their whole brief: before this, any
-  // non-zero psd-tts exit threw straight out of composeBrief and nothing was
-  // delivered at all.
-  test('a narration refusal still delivers the edition, without audio', async () => {
-    const dir = makeTempDir();
-    process.env.PSD_MORNING_BRIEF_STATE_DIR = dir;
-    const brokerCalls = [];
-    const result = await composeBrief(
-      {
-        user: 'owner@example.net',
-        config: normalizeConfig(),
-        snapshot: snapshotFixture(),
-        synthesis: synthesisFixture(),
-      },
-      {
-        runExternal: () => ({
-          code: 1,
-          stdout: JSON.stringify({
-            status: 'error',
-            error: 'personal_data_detected',
-            message: 'the narration contains personal data (us-phone).',
-          }),
-          stderr: '',
-        }),
-        broker: async (route, payload) => {
-          brokerCalls.push({ route, payload });
-          return {
-            httpStatus: 201,
-            payload: {
-              data: {
-                id: 'brief-id',
-                slug: 'brief',
-                title: 'Morning Brief — 2026-07-29',
-                visibilityLevel: 'private',
-                url: 'https://example.net/c/brief',
-              },
-            },
-          };
-        },
-      },
-    );
-    expect(result.status).toBe('ok');
-    expect(result.podcast).toMatchObject({
-      enabled: true,
-      url: null,
-      refused: 'personal_data_detected',
-    });
-    // The edition itself was still published.
-    expect(brokerCalls).toHaveLength(1);
-    expect(result.deliveryMessage).toContain('https://example.net/c/brief');
-    expect(result.deliveryMessage).not.toContain('.mp3');
-    // Says why, without repeating what matched.
-    expect(result.deliveryMessage).toContain('No podcast today');
-    expect(result.deliveryMessage).toContain('personal data');
-    expect(result.deliveryMessage).not.toContain('us-phone');
-  });
-
-  // The other side of the same coin: a BROKEN relay must stay loud. Swallowing
-  // every psd-tts failure would hide an outage behind a missing audio player.
+  // Private narration is never content-gated (#2034), so every psd-tts
+  // failure is a real one and must stay loud rather than hide an outage
+  // behind a missing recording.
   test('any other psd-tts failure still fails the run', async () => {
     const dir = makeTempDir();
     process.env.PSD_MORNING_BRIEF_STATE_DIR = dir;
@@ -771,37 +722,6 @@ describe('podcast narration refusals', () => {
         },
       ),
     ).rejects.toThrow(/upstream_error|Polly/);
-  });
-
-  // The refusal is recognised by psd-tts's structured `error` code, never by
-  // the phrase turning up in some other failure's text.
-  test('a failure that only quotes the refusal code still fails the run', async () => {
-    const dir = makeTempDir();
-    process.env.PSD_MORNING_BRIEF_STATE_DIR = dir;
-    await expect(
-      composeBrief(
-        {
-          user: 'owner@example.net',
-          config: normalizeConfig(),
-          snapshot: snapshotFixture(),
-          synthesis: synthesisFixture(),
-        },
-        {
-          runExternal: () => ({
-            code: 1,
-            stdout: JSON.stringify({
-              status: 'error',
-              error: 'upstream_error',
-              message: 'relay error while handling personal_data_detected',
-            }),
-            stderr: '',
-          }),
-          broker: async () => {
-            throw new Error('must not reach delivery');
-          },
-        },
-      ),
-    ).rejects.toThrow(/upstream_error/);
   });
 
 });

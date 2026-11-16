@@ -3,7 +3,7 @@
 /**
  * publish.js — psd-publish-file.publish
  * Usage:
- *   node publish.js --file <path> [--to drive|public] [--content-type <type>]
+ *   node publish.js --file <path> [--to drive|public --public-confirmed] [--content-type <type>]
  *
  * Hands a file the agent just produced to the person who asked for it.
  *
@@ -25,6 +25,9 @@
  *                           the URL can open it, with no sign-in, and the
  *                           object is deleted 30 days after it is written.
  *                           For content that is genuinely meant to be public.
+ *                           Refused with `public_needs_confirmation` unless
+ *                           `--public-confirmed` is also passed (#2034): the
+ *                           agent must ask the user and get a yes first.
  *
  * Drive is the default because the old default was wrong: the only outbound
  * path used to be the public one, so files with student and staff data in them
@@ -42,7 +45,8 @@
  * Exit codes:
  *   0  delivered (JSON with the link on stdout)
  *   1  bad arguments / unsupported type / delivery failure / refused for
- *      personal data (JSON error on stdout, `error` carries the code)
+ *      personal data / public link not confirmed (JSON error on stdout,
+ *      `error` carries the code)
  */
 
 'use strict';
@@ -51,6 +55,7 @@ const { validatedFs } = require("../../../validated-fs.cjs");
 const path = require('node:path');
 
 const { publishArtifact } = require('../_shared/artifact-publisher');
+const { DeliveryChoiceError, resolveDelivery } = require('../_shared/delivery-choice');
 const {
   DRIVE_DELIVERABLE_TYPES,
   MAX_DRIVE_DELIVERY_BYTES,
@@ -141,19 +146,17 @@ function parseArgs(argv) {
   return args;
 }
 
-/** Which destination to use. Drive unless `--to public` was asked for. */
-function resolveDestination(requested) {
-  if (requested === undefined) return 'drive';
-  const name = requested === true ? '' : String(requested).trim().toLowerCase();
-  if (!DESTINATIONS.has(name)) {
-    fail(
-      `--to ${name || '(no value)'} is not a destination. Use --to drive ` +
-        '(private, shared with you only — the default) or --to public ' +
-        '(unsigned public link, deleted after 30 days).',
-      'bad_args'
-    );
+/**
+ * Which destination to use. Drive unless `--to public --public-confirmed` was
+ * asked for (#2034) — see ../_shared/delivery-choice.js.
+ */
+function resolveDestination(args) {
+  try {
+    return resolveDelivery(args, { allowed: ['drive', 'public'] });
+  } catch (err) {
+    if (err instanceof DeliveryChoiceError) fail(err.message, err.code);
+    throw err;
   }
-  return name;
 }
 
 /**
@@ -280,12 +283,13 @@ async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
     console.log(
-      'Usage: publish.js --file <path> [--to drive|public] [--content-type <type>]\n' +
+      'Usage: publish.js --file <path> [--to drive|public --public-confirmed] [--content-type <type>]\n' +
         '\n' +
         '--to drive  (default) create the file in your agent\'s Drive and share\n' +
         '            it with you alone. Nothing becomes public.\n' +
         `            Deliverable: ${[...DRIVE_DELIVERABLE_TYPES.keys()].join(', ')}\n` +
-        '--to public unsigned public-by-link URL, deleted after 30 days.\n' +
+        '--to public unsigned public-by-link URL, deleted after 30 days. Needs\n' +
+        '            --public-confirmed too: ask the user first (#2034).\n' +
         `            Publishable: ${[...PUBLISHABLE_TYPES.keys()].join(', ')}\n` +
         '\n' +
         'HTML pages go to Atrium instead — use psd-html-artifact.'
@@ -296,7 +300,7 @@ async function main() {
   const file = args.file && args.file !== true ? String(args.file) : null;
   if (!file) fail('--file is required (path to the file to deliver)', 'bad_args');
 
-  const destination = resolveDestination(args.to);
+  const destination = resolveDestination(args);
   const { extension, contentType } = resolveContentType(
     file,
     args.content_type,

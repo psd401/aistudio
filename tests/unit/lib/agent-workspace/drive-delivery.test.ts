@@ -210,6 +210,9 @@ describe("Drive delivery type policy", () => {
     ["photo.jpeg", "image/jpeg"],
     ["photo.jpg", "image/jpeg"],
     ["hero.webp", "image/webp"],
+    // #2034: narration and rendered video are private by default.
+    ["brief.mp3", "audio/mpeg"],
+    ["clip.mp4", "video/mp4"],
   ])("accepts %s as %s", (fileName, contentType) => {
     expect(assertDriveDeliveryContentType(fileName)).toBe(contentType)
     expect(assertDriveDeliveryContentType(fileName, contentType)).toBe(
@@ -238,7 +241,7 @@ describe("Drive delivery type policy", () => {
 
   // `.svg` is active content and `.html` is a district document (it goes to
   // Atrium). Neither is deliverable, and nor is a type we simply do not handle.
-  it.each(["archive.zip", "page.html", "icon.svg", "clip.mp4", "noextension"])(
+  it.each(["archive.zip", "page.html", "icon.svg", "data.json", "noextension"])(
     "refuses %s with unsupported_type",
     (fileName) => {
       expect(isDriveDeliverableName(fileName)).toBe(false)

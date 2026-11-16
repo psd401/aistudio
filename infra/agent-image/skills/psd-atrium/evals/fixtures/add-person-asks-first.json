@@ -1,0 +1,32 @@
+[
+  {
+    "route": "/api/agent/atrium",
+    "method": "POST",
+    "request_body": {
+      "method": "GET",
+      "path": "/_people"
+    },
+    "response": {
+      "status": 200,
+      "body": {
+        "httpStatus": 200,
+        "payload": {
+          "people": [],
+          "minQueryLength": 2,
+          "limit": 20,
+          "truncated": false
+        }
+      }
+    }
+  },
+  {
+    "route": "/api/agent/failures",
+    "method": "POST",
+    "response": {
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    }
+  }
+]

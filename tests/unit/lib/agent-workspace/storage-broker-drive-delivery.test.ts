@@ -294,7 +294,7 @@ describe("driveDeliveryTargetKey / driveDeliveryFileName", () => {
     ).toThrow("Invalid owner Drive delivery key")
   })
 
-  it.each(["page.html", "icon.svg", "archive.zip", "clip.mp4"])(
+  it.each(["page.html", "icon.svg", "archive.zip", "data.json"])(
     "refuses %s outright",
     (fileName) => {
       expect(() =>

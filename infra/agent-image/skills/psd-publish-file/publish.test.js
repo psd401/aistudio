@@ -104,6 +104,37 @@ describe('argument handling', () => {
   });
 });
 
+describe('public links are opt-in and confirmed (#2034)', () => {
+  test('--to public without --public-confirmed is refused before any upload', () => {
+    // No broker is listening in this test: the refusal must come first.
+    const result = run(['--file', write('flyer.pdf', '%PDF-1.4'), '--to', 'public']);
+    expect(result.code).toBe(1);
+    expect(result.json.error).toBe('public_needs_confirmation');
+    expect(result.json.message).toContain('--public-confirmed');
+    expect(result.json.message).toContain('without signing in');
+  });
+
+  test('--public-confirmed takes no value', () => {
+    const result = run([
+      '--file',
+      write('flyer2.pdf', '%PDF-1.4'),
+      '--to',
+      'public',
+      '--public-confirmed',
+      'yes',
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.json.error).toBe('bad_args');
+  });
+
+  test('an unknown destination names the private default', () => {
+    const result = run(['--file', write('a.pdf', '%PDF-1.4'), '--to', 'everyone']);
+    expect(result.code).toBe(1);
+    expect(result.json.error).toBe('bad_args');
+    expect(result.json.message).toContain('--to drive');
+  });
+});
+
 describe('type gate', () => {
   test('HTML is sent to Atrium, not published as a public file', () => {
     const result = run(['--file', write('page.html', '<!doctype html><title>x</title>')]);
@@ -286,6 +317,7 @@ describe('a public link refused for personal data (#1886)', () => {
           file,
           '--to',
           'public',
+          '--public-confirmed',
         ]);
         expect(code).toBe(1);
         const json = JSON.parse(stdout.trim());
@@ -311,7 +343,7 @@ describe('a public link refused for personal data (#1886)', () => {
       },
       async () => {
         const file = write('subs.csv', 'a@b.net,253-555-0147\n');
-        const { stdout } = await runAsync(['--file', file, '--to', 'public']);
+        const { stdout } = await runAsync(['--file', file, '--to', 'public', '--public-confirmed']);
         const json = JSON.parse(stdout.trim());
         expect(json.message).toContain('email, us-phone');
       }
@@ -329,6 +361,7 @@ describe('a public link refused for personal data (#1886)', () => {
           file,
           '--to',
           'public',
+          '--public-confirmed',
         ]);
         expect(code).toBe(1);
         const json = JSON.parse(stdout.trim());

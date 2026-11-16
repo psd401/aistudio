@@ -369,14 +369,15 @@ node /opt/psd-skills/psd-workspace/run.js \
 #
 # Deliver the file as a LINK instead, and say so plainly in the same turn:
 #   - audio from psd-tts, video from psd-hyperframes, images from psd-image-gen
-#     already return a public HTTPS URL — paste that URL in the draft body
+#     already return a private Drive link (shared with the caller alone) —
+#     paste that link in the draft body
 #   - anything else: deliver it with
 #     `node /opt/psd-skills/psd-publish-file/publish.js --file <path>`, which
 #     with no --to flag creates the file in your agent's Drive and shares it
 #     with the caller alone, then returns a Drive link — paste that in the body.
-#     That is the path to use for ANY file with personal data in it. Only
-#     `--to public` produces an unsigned public link, and only genuinely
-#     public content should go that way.
+#     That is the path for every file. Only `--to public --public-confirmed`
+#     produces an unsigned public link, and only after the user asked for a
+#     public link and said yes when you told them anyone could open it (#2034).
 #
 # `drive +upload <path>` is NOT the answer and is refused: gws runs in an empty
 # temporary directory on the web tier, so a container path does not exist there
@@ -502,12 +503,31 @@ gws forms forms batchUpdate --scope agent --user hagelk@psd401.net \
 
 **Commenting on someone else's file.** Phase 1 blocks editing a doc the agent
 does not own, but a COMMENT is additive and attributed, so it is allowed on the
-agent slot — use it instead of asking the user to paste content:
+agent slot — **after the user confirms** (see the next rule):
 
 ```bash
 gws drive comments create --scope agent --user hagelk@psd401.net \
   --params '{"fileId":"<id>"}' --json '{"content":"Suggested reordering: …"}'
 ```
+
+**Ask before writing to a file the requester does not own (#2034).** Before you
+comment on, reply to a comment on, edit (`docs documents batchUpdate`, a Sheets
+or Slides update), or change the sharing of ANY file the requester does not own
+— a student's essay, a colleague's doc, a shared-drive file — stop and ask in
+plain words, then wait for a yes in a later message:
+
+> *"I'm about to add a comment to 26 Docs owned by students (e.g. "Essay 3 —
+> period 2"). Each comment is posted as your agent account, the students will
+> see it, and I can't delete comments afterwards. Go ahead?"*
+
+Say how many files, whose they are, what will be written, and that it cannot be
+undone by you. The request itself is not the confirmation, even when it says
+"comment on all of them": the user has not yet seen the file list or heard that
+comments are permanent. Check ownership with `drive files get --params
+'{"fileId":"<id>","fields":"owners(emailAddress)"}'` when you are not sure. For
+more than one file, list them (or the first few and the count) and get one yes
+for the batch — never extend a yes to files you did not name. Files the agent
+account itself created, and the requester's own files, need no extra question.
 
 **Gmail labels.** Creating a label in the user's own mailbox is organizing, not
 authoring, so it stays on the user slot (`gmail.modify` covers it):
