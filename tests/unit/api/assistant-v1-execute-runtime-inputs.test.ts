@@ -293,6 +293,43 @@ describe("v1 async assistant runtime repository inputs", () => {
     )
   })
 
+  it("creates the polling job with the final prompt's model, never 0", async () => {
+    // createJob rejects a falsy modelId and ai_streaming_jobs.model_id is a
+    // NOT NULL foreign key, so a placeholder 0 made every async call a 400.
+    mockGetAssistantArchitect.mockResolvedValueOnce({
+      isSuccess: true,
+      message: "ok",
+      data: {
+        id: 5,
+        userId: 9,
+        prompts: [
+          { id: 11, position: 1, modelId: 8 },
+          { id: 10, position: 0, modelId: 3 },
+        ],
+      },
+    } as never)
+    mockPrepareAssistantExecutionInputs.mockResolvedValue({
+      ownerId: 7,
+      inputs: {},
+      runtimeRepositoryIds: [],
+      runtimeRepositoryQuery: "",
+      references: [],
+    })
+
+    const response = await POST(
+      new NextRequest("http://localhost/api/v1/assistants/5/execute", {
+        method: "POST",
+        headers: { accept: "application/json" },
+      }),
+      { params: Promise.resolve({ id: "5" }) }
+    )
+
+    expect(response.status).toBe(202)
+    expect(mockCreateJob).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: 8 })
+    )
+  })
+
   it("rejects a foreign marker before creating a polling job", async () => {
     mockPrepareAssistantExecutionInputs.mockRejectedValue(
       new Error("Temporary repository input is unavailable")

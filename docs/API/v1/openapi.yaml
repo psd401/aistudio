@@ -1775,17 +1775,29 @@ paths:
         "400":
           description: |
             Invalid inputs, more than 10 temporary sources, or a temporary
-            source that is missing, foreign, expired, or otherwise unavailable.
-            Unavailable source variants intentionally return the same message.
+            source that is missing, foreign, expired, or otherwise unavailable
+            (`VALIDATION_ERROR`). Unavailable source variants intentionally
+            return the same message. An assistant whose final prompt has no
+            model returns `CONFIGURATION_ERROR` ("Assistant has no model
+            configured") in both modes, before any stream or polling job is
+            created; the polling job records that final prompt's model.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-              example:
-                error:
-                  code: VALIDATION_ERROR
-                  message: Temporary repository input is unavailable
-                requestId: req_abc123
+              examples:
+                unavailableSource:
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: Temporary repository input is unavailable
+                    requestId: req_abc123
+                noModel:
+                  value:
+                    error:
+                      code: CONFIGURATION_ERROR
+                      message: Assistant has no model configured
+                    requestId: req_abc123
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
