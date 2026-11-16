@@ -21,7 +21,12 @@ export function unsupportedImageNote(filename: string | undefined, format: strin
   return `[The user attached ${label} in ${format} format, which could not be sent to the model. Ask them to re-attach it as JPEG or PNG if it matters.]`;
 }
 
-/** First bytes of a base64 data URL payload, or null when `url` isn't one. */
+/**
+ * First bytes of a base64 data URL payload, or null when `url` isn't one.
+ * Only base64 data URLs are inspected: the composer builds image parts with
+ * FileReader.readAsDataURL, which always emits base64. A percent-encoded image
+ * data URL would pass through unguarded.
+ */
 function dataUrlHeader(url: string): { declared: string; header: Uint8Array } | null {
   if (url.slice(0, 5).toLowerCase() !== "data:") return null;
   const comma = url.indexOf(",");

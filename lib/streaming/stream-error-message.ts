@@ -74,13 +74,14 @@ const CLASSIFICATION_RULES: ReadonlyArray<{
 }> = [
   {
     // Before "timeout"/"unavailable": provider image-format rejections
-    // ("Unsupported image mime type: image/heic", "image processing failed:
-    // cannot measure image dimensions") must not read as a generic failure.
+    // ("Unsupported image mime type: image/heic", "... The image format could
+    // not be determined") must not read as a generic failure. Needles are
+    // format-specific on purpose: a bare "image processing failed" would also
+    // claim e.g. "image processing failed: timeout".
     kind: "unsupportedImage",
     needles: [
       "unsupported image",
       "image mime type",
-      "image processing failed",
       "image format could not be determined",
     ],
   },

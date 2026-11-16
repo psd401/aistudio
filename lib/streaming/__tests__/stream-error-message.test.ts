@@ -88,6 +88,10 @@ describe('classifyStreamError', () => {
     ).toBe('unsupportedImage')
   })
 
+  it('leaves a non-format image failure to the other rules', () => {
+    expect(classifyStreamError(new Error('image processing failed: request timeout'))).toBe('timeout')
+  })
+
   it('falls back to the generic explanation for anything unrecognised', () => {
     expect(classifyStreamError(new Error('weird provider failure'))).toBe('unknown')
     expect(classifyStreamError(undefined)).toBe('unknown')
