@@ -72,3 +72,5 @@ cb285293ba750b01e2d443cc6b61601477ea4329:tests/unit/credential-entry-form.test.t
 # PR #2033: async execute curl example in the API docs; "sk-your-key" is the same
 # placeholder every other curl example there uses, not a credential.
 86bb5e21de05be5a8153b2d7d1d2dd5e2ce80404:docs/API/v1/context-graph.md:curl-auth-header:1286
+# The same line after #2033 was squash-merged to dev (new commit, new fingerprint).
+7f1bbd911062fdb6a4b1c96219e8039abcf285e7:docs/API/v1/context-graph.md:curl-auth-header:1286
