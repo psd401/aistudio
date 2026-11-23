@@ -3434,6 +3434,16 @@ export class AgentPlatformStack extends cdk.Stack {
       // ends — we just stop killing the request prematurely.
       // SQS visibilityTimeout below MUST stay >= 6x this value.
       timeout: cdk.Duration.minutes(15),
+      // The router intentionally re-enqueues to its OWN trigger queue: a
+      // Chat turn whose workspace is busy is deferred and retried
+      // (deferWorkspaceTurn, bounded by WORKSPACE_DEFER_MAX_ATTEMPTS=180 /
+      // 3 h), then a failed post becomes one delayed delivery record and
+      // one settlement record, neither of which requeues again. Lambda's
+      // default loop detection (TERMINATE) cuts any SQS→Lambda→SQS chain
+      // at ~16 hops — far below the code's own budget — and silently drops
+      // the user's turn (prod RecursiveInvocationsDropped since 11-09; AWS
+      // Health notice 2026-11-23). The code-level bounds are the guard.
+      recursiveLoop: lambda.RecursiveLoop.ALLOW,
       architecture: lambda.Architecture.ARM_64,
       role: resources.routerLambdaRole,
       logGroup: resources.routerLogGroup,
