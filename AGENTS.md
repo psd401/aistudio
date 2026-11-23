@@ -1,10 +1,19 @@
 # AGENTS.md
 
-AI Studio codebase guidance for Codex. Optimized for token efficiency and accuracy.
+AI Studio codebase guidance for coding agents (Claude Code, Codex, Cursor). `CLAUDE.md` imports this file; edit only this one.
 
 ## 🚀 Quick Reference
 
 ```bash
+# Fresh checkout — install BOTH manifests (CI does the same; a root-only
+# install fails typecheck (20 errors) and 1 test:ci suite, because
+# infra/lambdas/agent-router/ resolves its AWS SDK deps from its OWN package.json)
+bun install
+(cd infra/lambdas/agent-router && bun install --frozen-lockfile)
+# ^ keep --frozen-lockfile: no lockfile is committed there, so it resolves fresh
+#   WITHOUT writing one — a plain install writes a local bun.lock that silently
+#   pins your installs while CI floats
+
 # Local Development (Issue #607)
 bun run db:up              # Start local PostgreSQL (Docker)
 bun run dev:local          # Run Next.js with local database
@@ -29,110 +38,18 @@ cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 1. **Type Safety**: NO `any` types. Full TypeScript. Run `bun run lint` and `bun run typecheck` on ENTIRE codebase before commits.
 2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `migrationFiles` array in `/infra/database/migrations.json`.
-3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below. **Exception**: `voice-server.js` and other CJS standalone scripts that run outside the Next.js runtime cannot import `@/lib/logger` — use `console.*` with `// eslint-disable-line no-console` comments.
+3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger` (see the server action template in `docs/guides/agent-reference.md`). **Exception**: `voice-server.js` and other CJS standalone scripts that run outside the Next.js runtime cannot import `@/lib/logger` — use `console.*` with `// eslint-disable-line no-console` comments.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features (see `docs/guides/TESTING.md` — E2E Expectations section). Run locally via `bunx playwright test tests/e2e/`.
 6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
 7. **API Documentation**: When adding or modifying `/api/v1/` endpoints, update both `docs/API/v1/openapi.yaml` (OpenAPI spec) and `docs/API/v1/context-graph.md` (human-readable reference). Include request/response examples, error codes, and auth/scope requirements.
 
-## 🏗️ Architecture
 
-**Stack**: Next.js 15 App Router • ECS Fargate (SSR) • Aurora Serverless v2 • Cognito Auth
+## 🏗️ Architecture, database and server actions
 
-**Core Patterns**:
-- Server Actions return `ActionState<T>`
-- Drizzle ORM for all DB operations (executeQuery/executeTransaction)
-- JWT sessions via NextAuth v5
-- Layered architecture (presentation → application → infrastructure)
-- **Reusable CDK constructs** for infrastructure consistency
+**Stack**: Next.js App Router • ECS Fargate (SSR) • Aurora Serverless v2 • Cognito Auth. Server Actions return `ActionState<T>`; all DB access goes through Drizzle (`executeQuery` / `executeTransaction` from `@/lib/db/drizzle-client`); JWT sessions via NextAuth v5; AI calls go through the provider factory (`/app/api/chat/lib/provider-factory.ts`).
 
-**File Structure**:
-```
-/app         → Pages & API routes
-/actions     → Server actions (*.actions.ts)
-/components  → UI components
-/lib         → Core utilities & adapters
-/infra       → AWS CDK infrastructure
-  ├── lib/constructs/        → Reusable CDK patterns
-  │   ├── security/          → IAM, secrets, roles
-  │   ├── network/           → VPC, shared networking
-  │   ├── compute/           → Lambda, ECS patterns
-  │   ├── monitoring/        → CloudWatch, ADOT
-  │   └── config/            → Environment configs
-  ├── lib/stacks/            → CDK stack definitions
-  └── database/              → RDS, migrations
-```
-
-## 🤖 AI Integration
-
-**AI SDK v6** with provider factory pattern:
-- Providers: OpenAI, Google (Gemini), Amazon Bedrock (Codex), Azure
-- Streaming: `streamText` for chat, SSE for assistant architect
-- Client: `@ai-sdk/react` with `useChat` hook
-
-**Provider Factory** (`/app/api/chat/lib/provider-factory.ts`):
-```typescript
-createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
-```
-
-**Settings Management**:
-- Database-first with env fallback via `@/lib/settings-manager`
-- Cache with 5-minute TTL
-- AWS Lambda IAM role support for Bedrock
-
-## 📚 Document Processing
-
-**Supported**: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON, XML, YAML (via `/lib/document-processing.ts` and `/lib/attachments/chat-attachment-adapters.ts`)
-**Storage**: S3 with presigned URLs for large files
-**Limits**: 500MB for Nexus attachments, 25MB for document processing (configurable per deployment)
-
-## 🗄️ Database Operations
-
-**ORM**: Drizzle ORM with postgres.js driver (direct PostgreSQL connection)
-
-**Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
-
-```typescript
-import { eq, and, desc } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { users, userRoles, roles } from "@/lib/db/schema";
-
-// SELECT with type safety
-const user = await executeQuery(
-  (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
-  "getUserById"
-);
-
-// INSERT with returning
-const [newUser] = await executeQuery(
-  (db) => db.insert(users).values({ email, firstName }).returning(),
-  "createUser"
-);
-
-// UPDATE
-await executeQuery(
-  (db) => db.update(users).set({ firstName }).where(eq(users.id, userId)),
-  "updateUser"
-);
-
-// DELETE
-await executeQuery(
-  (db) => db.delete(users).where(eq(users.id, userId)),
-  "deleteUser"
-);
-```
-
-**Transactions** (automatic rollback on error):
-```typescript
-await executeTransaction(
-  async (tx) => {
-    await tx.delete(userRoles).where(eq(userRoles.userId, userId));
-    await tx.insert(userRoles).values(roleIds.map(id => ({ userId, roleId: id })));
-    // Side effects (emails, etc.) should be AFTER transaction, not inside
-  },
-  "updateUserRoles"
-);
-```
+Patterns and detail — file structure, AI integration, document-processing limits, Drizzle query/transaction/JSONB/raw-SQL examples, Aurora and connection settings, local database setup and test users, DB troubleshooting, and the **server action template** — are in [docs/guides/agent-reference.md](docs/guides/agent-reference.md). Read it before writing a server action or a DB query.
 
 **⚠️ CRITICAL - Transaction Pattern**:
 - ✅ Use `executeTransaction()` directly for multi-statement transactions
@@ -140,135 +57,12 @@ await executeTransaction(
 - ❌ NEVER nest `db.transaction()` inside `executeQuery()`
 - See `/docs/database/drizzle-patterns.md` and `drizzle-client.ts` JSDoc
 
-**JSONB Columns** (type-safe via `.$type<T>()`):
-```typescript
-import type { UserSettings } from "@/lib/db/types/jsonb";
-
-// Schema definition
-settings: jsonb("settings").$type<UserSettings>(),
-
-// Query - TypeScript knows the shape
-user.settings.theme;  // "light" | "dark" | "system"
-```
-
 **Migrations** (see `/docs/database/drizzle-migration-guide.md`):
 ```bash
 bun run drizzle:generate        # Generate from schema changes
 bun run migration:prepare       # Format for Lambda
 bun run migration:list          # List all migrations
 # Then add to migrationFiles array in /infra/database/migrations.json
-```
-
-**MCP tools for schema verification**:
-```bash
-mcp__awslabs_postgres-mcp-server__get_table_schema
-mcp__awslabs_postgres-mcp-server__run_query
-```
-
-**Aurora Serverless v2 Configuration**:
-- **Dev**: Auto-pause enabled (scales to 0 ACU when idle, saves ~$44/month)
-- **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
-- **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
-- **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
-
-**Connection Management** (Issue #603):
-- Use `DATABASE_URL` for local dev (set in .env.local)
-- Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
-- Connection pool auto-manages connections (max: 20 per container)
-- Graceful shutdown: Handled automatically via `instrumentation.ts`
-- Connection warmup: Pools are pre-initialized on server startup
-
-**Local Development Setup** (Issue #607):
-```bash
-# Quick Start (first time)
-bun run db:up              # Start PostgreSQL container
-bun run db:seed            # Create test users
-bun run dev:local          # Start Next.js with local DB
-
-# Daily workflow
-bun run db:up && bun run dev:local   # Start everything
-
-# Reset if database gets corrupted
-bun run db:reset           # Destroys all data, re-runs migrations
-bun run db:seed            # Re-create test users
-```
-
-**Local vs AWS Configuration**:
-| Environment | DATABASE_URL | DB_SSL |
-|-------------|--------------|--------|
-| Local Docker | `postgresql://postgres:postgres@localhost:5432/aistudio` | `false` |
-| AWS Aurora | `postgresql://user:pass@aurora-cluster:5432/aistudio` | `true` (default) |
-
-**Test Users** (after `bun run db:seed`):
-- `test@example.com` - administrator role
-- `staff@example.com` - staff role
-- `student@example.com` - student role
-
-**Raw SQL Results** (postgres.js driver):
-```typescript
-import { toPgRows, executeQuery } from "@/lib/db/drizzle-client";
-import { sql } from "drizzle-orm";
-
-// Raw SQL returns array-like object (no .rows property)
-const result = await executeQuery(
-  (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
-  "getActiveUsers"
-);
-const users = toPgRows<{ id: number; name: string }>(result);
-```
-
-**Troubleshooting**:
-- "Connection refused": Check VPC security groups allow traffic from ECS to Aurora
-- "Too many connections": Increase Aurora max_connections or reduce `DB_MAX_CONNECTIONS` per task
-- "SSL required": Ensure connection string includes `?sslmode=require` (auto-added by drizzle-client)
-- "Connection timeout": Check `DB_CONNECT_TIMEOUT` env var (default: 10s)
-- First request slow: Connection pool warmup happens on startup; check logs for "warmed up successfully"
-
-## 📝 Server Action Template
-
-```typescript
-"use server"
-import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { getServerSession } from "@/lib/auth/server-session"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq } from "drizzle-orm"
-import { users } from "@/lib/db/schema"
-
-export async function actionName(params: ParamsType): Promise<ActionState<ReturnType>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("actionName")
-  const log = createLogger({ requestId, action: "actionName" })
-
-  try {
-    log.info("Action started", { params: sanitizeForLogging(params) })
-
-    // Auth check
-    const session = await getServerSession()
-    if (!session) {
-      log.warn("Unauthorized")
-      throw ErrorFactories.authNoSession()
-    }
-
-    // Business logic - use Drizzle ORM executeQuery
-    const result = await executeQuery(
-      (db) => db.select().from(users).where(eq(users.id, params.userId)),
-      "actionName"
-    )
-
-    timer({ status: "success" })
-    log.info("Action completed")
-    return createSuccess(result, "Success message")
-
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(error, "User-friendly error", {
-      context: "actionName",
-      requestId,
-      operation: "actionName"
-    })
-  }
-}
 ```
 
 ## 🧪 Testing
@@ -281,7 +75,7 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 
 ## 🏗️ Infrastructure Patterns
 
-See [infra/AGENTS.md](infra/AGENTS.md) (auto-loads when working under `/infra`): VPC/networking, Lambda sizing, ECS Fargate, monitoring/ADOT, and cost optimization patterns.
+See [infra/CLAUDE.md](infra/AGENTS.md) (auto-loads when working under `/infra`): VPC/networking, Lambda sizing, ECS Fargate, monitoring/ADOT, and cost optimization patterns.
 
 ## 🔒 Security & IAM
 
@@ -313,14 +107,7 @@ tree, and anti-patterns.
   `lib/ai/capability-utils.ts` (AI-model feature flags).
 
 ### Infrastructure Security (IAM Least Privilege)
-**CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory` — see [infra/AGENTS.md](infra/AGENTS.md) for the pattern, tag-based access control, and secrets management.
-
-## 📦 Key Dependencies
-
-- Vercel AI SDK v6 (`ai`, `@ai-sdk/react`, `@ai-sdk/*` providers)
-- Next.js 16 App Router
-- NextAuth v5
-- AWS SDK v3 clients
+**CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory` — see [infra/CLAUDE.md](infra/AGENTS.md) for the pattern, tag-based access control, and secrets management.
 
 ## 🚨 Common Pitfalls
 
@@ -364,7 +151,18 @@ tree, and anti-patterns.
 - **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
 - **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
 - **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
+- **Don't** add a second toast system — `@/components/ui/use-toast` forwards to the ONE sonner `<Toaster />` mounted in `app/layout.tsx`; a hook whose root is unmounted is silently mute
+- **Don't** make a toast the only feedback for a blocked action — pair it with `<FormMessage />`, `aria-invalid`, and `setFocus` (which no-ops unless `field.ref` reaches a focusable node)
+- **Don't** read `formState` off `useFormContext()` in a child — it never re-renders there; use `useFormState({ name })`. Likewise `form.formState.errors` after `await trigger()` can read empty — take errors from `handleSubmit`'s invalid callback
 - **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
+- **Don't** cap a Chat/transport payload by character count or with `substring()` — the limit is bytes and `substring()` splits emoji; and don't cut before extracting a structured envelope, or a long card reply delivers raw JSON. One byte-aware, grapheme-safe helper per transport (`infra/lambdas/agent-router/chat-text-budget.ts`), and raise the retry path's bounds with the primary path's or the redelivery is silently dropped
+- **Don't** let an SSE response go quiet for minutes — the ALB idles it out at 300s and the app's own error chunk never reaches the browser. Emit `: keep-alive` comment frames (`lib/streaming/sse-keep-alive.ts`), never a `data-*` chunk (`classifyChunkVisibility` buckets it as rendered output, suppressing the empty-turn notice)
+
+### Edge Runtime (see `docs/guides/edge-runtime-boundaries.md`)
+- **Don't** import `@/lib/logger` (winston), `@aws-sdk/*`, or `node:*` from anything reachable from `middleware.ts` — that includes all of `auth.ts` and its callbacks. Use `@/lib/auth/edge-logger` and `fetch`
+- **Don't** treat `await import("…")` as a runtime boundary — a static specifier is still bundled into the *importing* runtime's chunk
+- **Don't** treat a `"use server"` action as a Node boundary — it is only an RPC call when a **client** component imports it; from server/Edge code the implementation is inlined and runs in the caller's runtime
+- To actually reach Node from Edge, make a real HTTP hop to a Route Handler with `export const runtime = "nodejs"`
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
@@ -376,38 +174,12 @@ tree, and anti-patterns.
 - **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
 - **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
 - **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
-
+- **Don't** `router.push()` away from a page that may still have server actions in flight (e.g. mount-time fetch bursts) — a straggler resolving after the push rebases the App Router back onto its origin route, silently yanking the user back. For leave-the-page mutations (archive/delete → library), use a document navigation (`window.location.assign`) so page teardown cancels the stragglers (see `ContentSettings.tsx`)
 ## 📖 Documentation
 
-**Structure:**
-```
-/docs/
-├── README.md           # Documentation index
-├── ARCHITECTURE.md     # System architecture
-├── DEPLOYMENT.md       # Deployment guide
-├── guides/            # Development guides
-├── features/          # Feature docs
-├── operations/        # Ops & monitoring
-└── archive/           # Historical docs
-```
+`/docs/` is the human-oriented documentation (index: `docs/README.md`). Keep docs current with code changes and update the index when adding docs.
 
-**Maintenance:**
-- Keep docs current with code changes
-- Archive completed implementations
-- Remove outdated content
-- Update index when adding docs
-
-**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on every `dev` push (opens a rolling `openwiki/update` PR, served by Bedrock GLM-5). Do not hand-edit `openwiki/`; it is regenerated.
-
-## 🎯 Repository Knowledge System
-
-**Assistant Architect**: Processes repository context for AI assistants
-**Embeddings**: Vector search via `/lib/repositories/search-service.ts`
-**Knowledge Base**: Stored in S3, retrieved during execution
-
----
-*Token-optimized for Codex efficiency. Last updated: May 2026*
-*Infrastructure optimized via Epic #372 - AWS Well-Architected Framework aligned*
+**OpenWiki (agent wiki):** `openwiki/` is an auto-maintained, agent-navigable index of this codebase — start at [openwiki/quickstart.md](openwiki/quickstart.md) for a structured map before spelunking. It coexists with `/docs` (human-oriented). The tree is refreshed by `.github/workflows/openwiki-update.yml` on its Monday schedule or a manual run (it opens and auto-merges a docs PR). Do not hand-edit `openwiki/`; it is regenerated.
 
 <!-- OPENWIKI:START -->
 

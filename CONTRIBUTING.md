@@ -164,7 +164,7 @@ When documenting code or in comments, include file references in the format `pat
 1. Run `npm run lint` to check for linting errors.
 2. Run `npm run typecheck` to verify TypeScript types.
 3. Run `npm test` to ensure all tests pass.
-4. Update `CLAUDE.md` if you've made architectural changes.
+4. Update `AGENTS.md` if you've made architectural changes.
 5. Update relevant documentation for API changes.
 
 ### Pull Requests & Code Review
@@ -177,7 +177,7 @@ When documenting code or in comments, include file references in the format `pat
 ## Documentation
 - Update documentation as needed for new features, changes, or fixes.
 - Document security implications of changes.
-- Keep `CLAUDE.md` up to date with architectural decisions.
+- Keep `AGENTS.md` up to date with architectural decisions.
 - Use clear, concise comments for complex logic.
 
 ---

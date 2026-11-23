@@ -250,7 +250,7 @@ With mixed usage (Gemini + GPT-4 mini), costs drop to ~$200/month (**90% savings
 ### Development
 - [Developer Guide](./DEVELOPER_GUIDE.md) - Development setup and workflow
 - [Library Documentation](./lib/README.md) - Core utilities and patterns
-- [CLAUDE.md](./CLAUDE.md) - AI assistant development guidelines
+- [AGENTS.md](./AGENTS.md) - AI assistant development guidelines (`CLAUDE.md` imports it)
 
 ## 🧪 Testing
 
