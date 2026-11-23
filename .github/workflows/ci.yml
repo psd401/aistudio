@@ -1,10 +1,10 @@
 # Continuous Integration workflow
-# Runs tests, linting, and type checking on all PRs and main branch pushes
+# Runs tests, linting, and type checking on pull requests to main and dev.
+# No push trigger: checks run on the PR, not again after the merge
+# (psd-dev-standards standards/06 §4, Runner minutes).
 name: CI
 
 on:
-  push:
-    branches: [ "main", "dev" ]
   pull_request:
     branches: [ "main", "dev" ]
 

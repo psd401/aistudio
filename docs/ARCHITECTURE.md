@@ -803,4 +803,4 @@ Comprehend-backed detect-only PII checks for Nexus memory and published content.
 - [Next.js Documentation](https://nextjs.org/docs)
 - [AWS CDK Guide](https://docs.aws.amazon.com/cdk/latest/guide/)
 - [Vercel AI SDK](https://sdk.vercel.ai/docs)
-- [Internal CLAUDE.md](../CLAUDE.md) - AI assistant guidelines
+- [AGENTS.md](../AGENTS.md) - AI assistant guidelines

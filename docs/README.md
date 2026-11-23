@@ -412,4 +412,4 @@ Key architectural decisions documented:
 **Last updated**: April 2026
 **Status**: Active - comprehensive documentation with 9 architectural diagrams
 **Total Documentation**: 10,000+ lines across 50+ files
-*For AI assistant guidelines, see [CLAUDE.md](../CLAUDE.md)*
+*For AI assistant guidelines, see [AGENTS.md](../AGENTS.md)*

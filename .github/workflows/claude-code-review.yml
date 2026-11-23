@@ -13,7 +13,7 @@ jobs:
     # Keyed on the PR author, not github.actor: a maintainer reopening or
     # pushing to a Dependabot PR is the actor, but the PR is still Dependabot's.
     if: github.event.pull_request.user.login != 'dependabot[bot]'
-    uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
+    uses: PSD401/.github/.github/workflows/reusable-claude-review.yml@78358a20608aa2f4de77e23f183c3ec7e1bbe795 # v1.12.0
     secrets:
       BEDROCK_API_KEY: ${{ secrets.BEDROCK_API_KEY }}
   # Dependabot PRs aren't reviewed, but production repos require a
@@ -24,4 +24,4 @@ jobs:
     name: claude-review
     permissions: {}
     if: github.event.pull_request.user.login == 'dependabot[bot]'
-    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
+    uses: PSD401/.github/.github/workflows/reusable-claude-review-skip.yml@78358a20608aa2f4de77e23f183c3ec7e1bbe795 # v1.12.0

@@ -269,7 +269,7 @@ aws stepfunctions start-execution \
 
 ### Internal Documentation
 
-- [CLAUDE.md](../../CLAUDE.md) - Project-specific guidance for AI assistants
+- [AGENTS.md](../../AGENTS.md) - Project-specific guidance for AI assistants
 - [Architecture Diagrams](./architecture/) - System architecture documentation
 - [Deployment Guide](./deployment.md) - Detailed deployment procedures
 

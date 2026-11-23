@@ -23,7 +23,7 @@ Brief description of what this PR does
 - [ ] My code follows the project's coding standards (see CONTRIBUTING.md)
 - [ ] I have added/updated tests for my changes
 - [ ] I have updated documentation as needed
-- [ ] I have added entries to CLAUDE.md if architectural changes were made
+- [ ] I have added entries to AGENTS.md if architectural changes were made
 - [ ] All new server actions follow the `ActionState<T>` pattern
 - [ ] No business logic has been added to UI components
 - [ ] All database queries use parameterized queries

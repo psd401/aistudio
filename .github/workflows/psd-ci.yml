@@ -1,17 +1,15 @@
 name: PSD CI
 on:
   pull_request:
-  push:
-    branches: [dev]
 permissions:
   contents: read
 jobs:
   psd-ci:
-    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@1aa5f5351a78b15f5c71668037f5d35b9613ae41 # v1.0.0
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@78358a20608aa2f4de77e23f183c3ec7e1bbe795 # v1.12.0
     with:
       # Mirrors ci.yml "Test, Lint, and Type Check": the agent-router and
       # agent-cron Lambdas resolve AWS SDK deps from their own package.json;
-      # a root-only install fails typecheck (see CLAUDE.md Quick Reference).
+      # a root-only install fails typecheck (see AGENTS.md Quick Reference).
       install-command: >-
         bun install --frozen-lockfile &&
         (cd infra/lambdas/agent-router && bun install --frozen-lockfile) &&
