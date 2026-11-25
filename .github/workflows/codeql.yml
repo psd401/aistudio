@@ -3,9 +3,10 @@
 # Note: This is an advanced setup. GitHub's default CodeQL setup must be disabled in repository settings.
 name: "CodeQL"
 
+# No push trigger (psd-dev-standards 06 §4/§5): a PR's analysis already
+# covers the change, and the weekly run on the default branch (dev) keeps
+# the baseline that a PR's results are compared with.
 on:
-  push:
-    branches: [ "main", "dev" ]
   pull_request:
     branches: [ "main", "dev" ]
   schedule:
