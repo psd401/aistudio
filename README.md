@@ -128,7 +128,7 @@ See [Architecture Diagrams](./docs/diagrams/README.md) for detailed visualizatio
 
 ### Prerequisites
 
-- [Bun](https://bun.sh) 1.2.23+ (the repo's package manager, pinned in `package.json`)
+- [Bun](https://bun.sh) 1.4.5+ (the repo's package manager, pinned in `package.json`)
 - Node.js 22.x (matches the `node:22-alpine` production image)
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI (run via `bunx cdk`, no global install needed)
