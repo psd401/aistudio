@@ -94,7 +94,9 @@ try {
       FROM repository_items
       ORDER BY id
     `;
-    assert.deepEqual(repositoryRows, [
+    // postgres.js returns a Result (an Array subclass); assert/strict's
+    // deepEqual compares prototypes, as Node's does and Bun's has since 1.4.
+    assert.deepEqual([...repositoryRows], [
       { id: 1, processing_status: "cancelled" },
       { id: 2, processing_status: "cancelled" },
       { id: 3, processing_status: "completed" },

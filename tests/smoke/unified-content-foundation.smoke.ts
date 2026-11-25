@@ -3086,12 +3086,18 @@ try {
     ),
     false
   );
-  assert.deepEqual(await releasePostDeployEmbeddingGenerations(), []);
+  // releasePostDeployEmbeddingGenerations returns the postgres.js Result (an
+  // Array subclass) that toPgRows passes through. assert/strict's deepEqual
+  // compares prototypes, as Node's does and Bun's has since 1.4, so a Result
+  // never equals an array literal. Spread it into a plain array first.
+  assert.deepEqual([...(await releasePostDeployEmbeddingGenerations())], []);
   assert.deepEqual(
-    await releasePostDeployEmbeddingGenerations({
-      graceMinutes: 0,
-      now: new Date(Date.now() + 60_000),
-    }),
+    [
+      ...(await releasePostDeployEmbeddingGenerations({
+        graceMinutes: 0,
+        now: new Date(Date.now() + 60_000),
+      })),
+    ],
     [{ id: connectionStormGeneration.id }]
   );
   const rearmedConnectionStormGeneration = (
