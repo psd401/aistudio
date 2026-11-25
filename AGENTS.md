@@ -2,6 +2,8 @@
 
 AI Studio codebase guidance for coding agents (Claude Code, Codex, Cursor). `CLAUDE.md` imports this file; edit only this one.
 
+This repo follows the district's engineering standards: [psd401/psd-dev-standards](https://github.com/psd401/psd-dev-standards). Where this file and a standard disagree, the standard wins.
+
 ## 🚀 Quick Reference
 
 ```bash
