@@ -90,3 +90,8 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    # psd-dev-standards standards/04 rule 4: a 7-day cooldown on
+    # github-actions entries, so a release has a week to be found bad before
+    # its pin lands here. Security updates are not held by the cooldown.
+    cooldown:
+      default-days: 7
