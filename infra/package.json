@@ -23,7 +23,7 @@
     "@types/node": "26.6.6",
     "@types/pdf-parse": "^1.1.5",
     "@types/xml2js": "^0.4.14",
-    "aws-cdk": "^2.1146.1",
+    "aws-cdk": "^2.1149.0",
     "jest": "^30.5.2",
     "tsx": "^4.23.15",
     "typescript": "~7.0.2"
@@ -45,7 +45,7 @@
     "@aws-sdk/client-textract": "^3.1160.0",
     "@e965/xlsx": "^0.20.3",
     "@types/node-fetch": "^2.6.12",
-    "aws-cdk-lib": "^2.275.0",
+    "aws-cdk-lib": "^2.278.0",
     "cheerio": "^1.2.0",
     "constructs": "^10.8.1",
     "csv-parse": "^7.0.3",
