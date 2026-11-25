@@ -219,7 +219,11 @@ function makeHost(
           remainingPostMessageFailures -= 1;
           throw new Error("postMessage failed");
         }
-        parentMessages.push({ origin: targetOrigin, data });
+        // A real postMessage hands the receiver a structured clone. Cloning
+        // here also moves the object out of the jsdom realm: its prototype is
+        // jsdom's Object.prototype, which assert/strict's deepEqual rejects
+        // against a literal from this realm (Node does; Bun does since 1.4).
+        parentMessages.push({ origin: targetOrigin, data: structuredClone(data) });
       }) as Window["postMessage"];
       if (options.timeoutDelayMs !== undefined || options.timeoutDelays) {
         const nativeSetTimeout = hostWindow.setTimeout.bind(hostWindow);
@@ -270,7 +274,8 @@ function postToHost(
 ): void {
   const source = {
     postMessage: (msg: unknown, targetOrigin: string) => {
-      acks.push({ origin: targetOrigin, data: msg });
+      // structuredClone: see the parent.postMessage stub in makeHost.
+      acks.push({ origin: targetOrigin, data: structuredClone(msg) });
     },
   };
   const event = new window.MessageEvent("message", {

@@ -21,7 +21,7 @@ const {
 } = require('bun:test');
 const path = require('node:path');
 const http = require('node:http');
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 const CLI = path.resolve(__dirname, 'request_entry.js');
 // Must match brokerUrl() in ../_shared/agent-broker.js.
@@ -64,17 +64,36 @@ async function startRelay(handler) {
   return seen;
 }
 
+/**
+ * Run the CLI and wait for it without blocking this process.
+ *
+ * The relay stub above is an http server in this same process. spawnSync would
+ * block the event loop, so the stub could never answer the CLI's request and
+ * the CLI would hang until the test timed out. That is what Node does, and
+ * what Bun does from 1.4; Bun 1.2 happened to keep serving during spawnSync.
+ */
 function run(args) {
-  return spawnSync('node', [CLI, ...args], {
-    encoding: 'utf8',
-    env: process.env,
+  return new Promise((resolve, reject) => {
+    const child = spawn('node', [CLI, ...args], { env: process.env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
   });
 }
 
 test('mints a credential_entry link through the consent-link route', async () => {
   const seen = await startRelay(() => [200, { url: ENTRY_URL }]);
 
-  const result = run([
+  const result = await run([
     '--name',
     'freshservice_api_key',
     '--label',
@@ -100,7 +119,7 @@ test('mints a credential_entry link through the consent-link route', async () =>
 test('tells the agent how to send the link and not to ask for a paste', async () => {
   await startRelay(() => [200, { url: ENTRY_URL }]);
 
-  const emitted = JSON.parse(run(['--name', 'openai_api_key']).stdout);
+  const emitted = JSON.parse((await run(['--name', 'openai_api_key'])).stdout);
   const instructions = emitted.chatInstructions.join(' ');
 
   // Markdown around the link corrupts the JWT in Google Chat (incident
@@ -116,7 +135,7 @@ test('tells the agent how to send the link and not to ask for a paste', async ()
 test('refuses to carry a value — the user types it into the page', async () => {
   const seen = await startRelay(() => [200, { url: ENTRY_URL }]);
 
-  const result = run(['--name', 'freshservice_api_key', '--value', 'sk-leaked']);
+  const result = await run(['--name', 'freshservice_api_key', '--value', 'sk-leaked']);
 
   expect(result.status).toBe(1);
   expect(result.stderr).toContain('--value is not accepted');
@@ -132,7 +151,7 @@ test.each([
 ])('rejects %s before contacting the relay', async (_label, args) => {
   const seen = await startRelay(() => [200, { url: ENTRY_URL }]);
 
-  const result = run(args);
+  const result = await run(args);
 
   expect(result.status).toBe(1);
   expect(result.stderr).toContain('Invalid credential name');
@@ -142,7 +161,7 @@ test.each([
 test('fails closed when the relay refuses', async () => {
   await startRelay(() => [429, { error: 'Rate limit exceeded' }]);
 
-  const result = run(['--name', 'freshservice_api_key']);
+  const result = await run(['--name', 'freshservice_api_key']);
 
   expect(result.status).toBe(1);
   expect(result.stderr).toContain('Failed to mint credential entry link');
@@ -153,7 +172,7 @@ test('fails closed when the relay refuses', async () => {
 test('fails closed when the relay returns no url', async () => {
   await startRelay(() => [200, { ok: true }]);
 
-  const result = run(['--name', 'freshservice_api_key']);
+  const result = await run(['--name', 'freshservice_api_key']);
 
   expect(result.status).toBe(1);
   expect(result.stderr).toContain('no entry link');

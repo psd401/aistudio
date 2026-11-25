@@ -2,7 +2,7 @@
   "name": "aistudio",
   "version": "1.1.0",
   "private": true,
-  "packageManager": "bun@1.2.23",
+  "packageManager": "bun@1.4.5",
   "scripts": {
     "test:oauth-public-flow": "tsx scripts/test/oauth-public-client-flow.smoke.ts",
     "test:smoke:oauth-client-trust-audit": "bun run tests/smoke/oauth-client-trust-audit.smoke.ts",

@@ -409,7 +409,12 @@ test('#2034: a chart whose data matches a personal-data pattern goes private wit
   const { result, brokerCalls } = await withStubBroker(async ctx => ({
     result: await runCliAsync([
       '--type', 'bar',
-      '--data-json', '[{"label":"Student 1000123","value":3}]',
+      // A PSD student number is 7 digits starting with 2 (see
+      // lib/safety/personal-data-patterns.json). The label here used to be
+      // "Student 1000123", which that pattern does not match; the test only
+      // passed because bun < 1.4 reported async node:test bodies as passed
+      // without waiting for them.
+      '--data-json', '[{"label":"Student 2000123","value":3}]',
     ]),
     ...ctx,
   }));
