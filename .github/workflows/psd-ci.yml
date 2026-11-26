@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   psd-ci:
-    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@78358a20608aa2f4de77e23f183c3ec7e1bbe795 # v1.12.0
+    uses: PSD401/.github/.github/workflows/reusable-psd-ci.yml@bf041d7e251023502d143a5af3b19bdf449ac65c # v1.22.4
     with:
       # Mirrors ci.yml "Test, Lint, and Type Check": the agent-router and
       # agent-cron Lambdas resolve AWS SDK deps from their own package.json;
